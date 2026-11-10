@@ -116,12 +116,13 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         slot.put(Frame { width: 4, height: 2, data: vec![0; 32] });
         let (s2, st2, stop2, sent2) = (slot.clone(), stats.clone(), stop.clone(), sent.clone());
-        let h = std::thread::spawn(move || run(Box::new(Count(sent2)), s2, st2, 50, stop2));
-        std::thread::sleep(Duration::from_millis(300));
+        // 20 fps over 1 s: loose enough for Windows' coarse sleep timer (~16 ms steps)
+        let h = std::thread::spawn(move || run(Box::new(Count(sent2)), s2, st2, 20, stop2));
+        std::thread::sleep(Duration::from_millis(1000));
         stop.store(true, Ordering::Relaxed);
         h.join().unwrap();
         let n = sent.load(Ordering::Relaxed);
-        assert!((10..=20).contains(&n), "about 15 frames in 0.3 s at 50 fps, got {n}");
+        assert!((12..=24).contains(&n), "about 20 frames in 1 s at 20 fps, got {n}");
         assert_eq!(stats.connections.load(Ordering::Relaxed), 2);
         assert_eq!(stats.width.load(Ordering::Relaxed), 4);
     }

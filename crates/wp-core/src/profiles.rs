@@ -205,6 +205,9 @@ mod tests {
         assert_eq!(active(&r), youth);
         assert!(delete(&r, &youth).is_err(), "active profile cannot be deleted");
         rename(&r, &copy, "Akwatia").unwrap();
+        // Windows cannot move a folder while a database inside it is open
+        drop(c);
+        drop(main);
         let moved = delete(&r, &copy).unwrap();
         assert!(moved.join("library.db").exists(), "deleted profile is recoverable");
         assert_eq!(list(&r).unwrap().len(), 2);

@@ -242,9 +242,15 @@ impl LiveState {
         let tmp = path.with_extension("json.tmp");
         let mut durable = self.clone();
         durable.previous = None;
-        std::fs::write(&tmp, serde_json::to_vec_pretty(&durable)?)?;
-        let f = std::fs::File::open(&tmp)?;
-        f.sync_all()?;
+        {
+            // flush through the handle that wrote it (Windows refuses to flush a
+            // read-only handle), and close it before the swap (Windows cannot rename
+            // an open file)
+            use std::io::Write;
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(&serde_json::to_vec_pretty(&durable)?)?;
+            f.sync_all()?;
+        }
         std::fs::rename(&tmp, path)?;
         Ok(())
     }
@@ -327,5 +333,8 @@ mod tests {
         let r = LiveState::load(&p, true);
         assert_eq!(r.mode, Mode::Live);
         assert!(!p.with_extension("json.tmp").exists());
+        // saving again replaces the file (the case Windows is strict about)
+        s.apply(Command::Show { slide_idx: 3, position: None }).save(&p).unwrap();
+        assert_eq!(LiveState::load(&p, false).slide_idx, 3);
     }
 }
