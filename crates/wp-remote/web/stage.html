@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Worship Presenter stage display</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:#000; color:#fff; font-family:"Noto Sans", "Segoe UI", system-ui, sans-serif; }
+  #s { position:fixed; inset:0; display:flex; flex-direction:column; container-type:size; }
+  .top { display:flex; align-items:baseline; gap:3cqh; padding:2.5cqh 4cqw; color:rgba(255,255,255,.7); font-size:4cqh; border-bottom:1px solid #222; }
+  .title { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .clock { color:#fff; font-size:7cqh; font-weight:600; font-variant-numeric:tabular-nums; }
+  .timer { margin:2cqh 4cqw 0; font-size:12cqh; font-weight:700; font-variant-numeric:tabular-nums; line-height:1; }
+  .timer.over { color:#ff5a5f; }
+  .timer small { font-size:3.6cqh; color:rgba(255,255,255,.6); font-weight:500; margin-left:2cqw; }
+  .msg { margin:2cqh 4cqw 0; padding:1.5cqh 2cqw; background:#f2c94c; color:#000; font-size:6cqh; font-weight:600; border-radius:4px; }
+  .rep { margin:2cqh 4cqw 0; font-size:7cqh; font-weight:600; color:#8ad6aa; }
+  .state { margin:2cqh 4cqw 0; color:#ff5a5f; font-size:4.5cqh; font-weight:600; }
+  .now { flex:1; min-height:0; padding:3cqh 4cqw; font-size:9cqh; font-weight:600; line-height:1.18; overflow:hidden; }
+  .now p { margin:0; }
+  .second { margin-top:2cqh; font-size:6cqh; font-weight:400; color:#ffe066; }
+  .next { padding:2cqh 4cqw 3cqh; border-top:1px solid #222; color:rgba(255,255,255,.5); font-size:5cqh; line-height:1.2; min-height:14cqh; }
+  .next.big { color:rgba(255,255,255,.85); font-size:8cqh; }
+  .next b { display:block; font-size:3cqh; text-transform:uppercase; letter-spacing:.08em; font-weight:500; margin-bottom:.6cqh; }
+  .next p { margin:0; }
+  .join { position:fixed; inset:0; display:grid; place-items:center; background:#191918; font-size:16px; }
+  .join div { width:min(360px, 90vw); }
+  .join input, .join button { width:100%; height:48px; margin-top:10px; border-radius:6px; border:1px solid #85827c; background:#201f1e; color:#fff; font:inherit; padding:0 12px; }
+  .join input { font-size:26px; letter-spacing:.3em; text-align:center; }
+  .join button { background:#aec3f4; color:#182238; border-color:#aec3f4; font-weight:600; }
+  .err { color:#ffa39f; min-height:20px; margin-top:8px; }
+</style>
+</head>
+<body>
+<div id="s"></div>
+<script>
+(() => {
+  const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c]));
+  const root = document.getElementById("s");
+  let token = localStorage.getItem("wp-remote-token"), snap = null, retry = 0;
+  const fmt = (ms) => { const over = ms < 0, s = Math.ceil(Math.abs(ms) / 1000) - (over ? 1 : 0); const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60; return (over ? "+" : "") + (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(r).padStart(2, "0"); };
+
+  function join(msg) {
+    document.body.insertAdjacentHTML("beforeend", `<div class="join" id="j"><div><b>Stage display</b><p style="color:#a5a29d">Enter the PIN shown on the computer under Settings, Remote.</p><input id="p" inputmode="numeric" maxlength="6" aria-label="PIN"><button id="g">Show stage display</button><div class="err" id="e">${esc(msg)}</div></div></div>`);
+    document.getElementById("g").onclick = async () => {
+      const r = await fetch("/api/join", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pin: document.getElementById("p").value, role: "stage", device: localStorage.getItem("wp-remote-device") || "Stage tablet" }) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) return (document.getElementById("e").textContent = j.error || "Could not join.");
+      token = j.token; localStorage.setItem("wp-remote-token", token); localStorage.setItem("wp-remote-role", "stage");
+      document.getElementById("j").remove(); connect();
+    };
+    document.getElementById("p").focus();
+  }
+
+  function connect() {
+    const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?token=${token}`);
+    ws.onmessage = (e) => { snap = JSON.parse(e.data); snap.clock_offset_ms = (snap.server_now_ms || Date.now()) - Date.now(); retry = 0; render(); };
+    ws.onclose = async () => {
+      const r = await fetch("/api/snapshot", { headers: { Authorization: "Bearer " + token } }).catch(() => null);
+      if (r && r.status === 401) { token = null; localStorage.removeItem("wp-remote-token"); return join("Signed out by the computer. Join again."); }
+      setTimeout(connect, Math.min(5000, 500 * ++retry));
+    };
+  }
+
+  function render() {
+    const s = snap; if (!s) return;
+    const now = Date.now() + (s.clock_offset_ms || 0);
+    const cur = s.slides[s.slide_idx], next = s.slides[s.slide_idx + 1];
+    const t = s.timer && s.timer.on_stage ? s.timer : null;
+    const left = t ? (t.paused_left_ms ?? t.ends_at_ms - now) : 0;
+    const state = !s.connected ? "No signal from the control computer" : s.mode === "blank" ? "Screens blank" : s.mode === "logo" ? "Logo on screens" : s.mode === "clear" ? "Words hidden" : "";
+    root.innerHTML = `
+      <div class="top"><span class="title">${esc(s.item ? s.item.title : "Nothing live")}</span>${cur && s.slides.length > 1 ? `<span>${esc(cur.label)} ${s.slide_idx + 1}/${s.slides.length}</span>` : ""}<span class="clock">${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span></div>
+      ${t ? `<div class="timer ${left < 0 ? "over" : ""}">${fmt(left)}<small>${esc(t.label || "")}${t.paused_left_ms != null ? " paused" : ""}</small></div>` : ""}
+      ${s.repeat ? `<div class="rep">${esc(s.repeat.label)} ${s.repeat.done} of ${s.repeat.total}${s.repeat.done >= s.repeat.total ? " · last time" : ""}</div>` : ""}
+      ${s.stage_message ? `<div class="msg">${esc(s.stage_message)}</div>` : ""}
+      ${s.alert && s.alert.on_stage ? `<div class="state" style="color:#f2c94c">Alert on screens: ${esc(s.alert.text)}</div>` : ""}
+      ${state ? `<div class="state">${state}</div>` : ""}
+      <div class="now">${cur ? cur.primary.map((l) => `<p>${esc(l)}</p>`).join("") + (cur.second.length ? `<div class="second">${cur.second.map((l) => `<p>${esc(l)}</p>`).join("")}</div>` : "") : ""}</div>
+      <div class="next ${s.lining_out ? "big" : ""}">${next ? `<b>Next${next.label !== (cur && cur.label) ? " · " + esc(next.label) : ""}</b>${next.primary.map((l) => `<p>${esc(l)}</p>`).join("")}` : cur ? `<b>Last slide of this item</b>` : ""}</div>`;
+  }
+
+  setInterval(render, 1000);
+  if (token) connect(); else join("");
+})();
+</script>
+</body>
+</html>

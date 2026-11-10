@@ -1,0 +1,84 @@
+import type { MediaItem, Slide } from "./api";
+import { MediaView } from "./MediaView";
+import { useTheme } from "./theme/store";
+import { ThemeView, type Phase } from "./theme/ThemeView";
+import { useMediaUrl } from "./theme/media";
+
+function PictureSlide({ path }: { path: string }) {
+  const url = useMediaUrl();
+  return (
+    <div className="tv tv--media">
+      <img className="tv__bg" src={url(`media:${path}`)} alt="" style={{ objectFit: "contain" }} />
+    </div>
+  );
+}
+
+// A slide drawn with the default theme for its kind, or a picture/video item.
+// Thumbnails, Preview, Live and the outputs all go through here, so they always match.
+
+export interface SlideLook {
+  /** Lower-third theme (alternate output) instead of the full-screen one. */
+  lowerThird?: boolean;
+}
+
+const BLACK = { kind: "color" as const, color: "#000000", image: null, fit: "cover" as const, dim: 0 };
+const CLEAR = { ...BLACK, kind: "transparent" as const };
+
+export function SlideView({
+  slide,
+  kind = "song",
+  caption,
+  media,
+  look,
+  blank,
+  hideText,
+  still,
+  phase = "static",
+  showKey,
+  textKey,
+  playing,
+  restart,
+  muted = true,
+  themeId,
+  alpha,
+}: {
+  slide?: Slide;
+  kind?: "song" | "scripture" | "media" | "announcement";
+  caption?: string | null;
+  media?: MediaItem | null;
+  look?: SlideLook;
+  blank?: boolean;
+  hideText?: boolean;
+  still?: boolean;
+  phase?: Phase;
+  showKey?: number;
+  textKey?: string;
+  playing?: boolean;
+  restart?: number;
+  muted?: boolean;
+  /** A per-item look; the lower third always uses its own theme. */
+  themeId?: number | null;
+  /** Alpha channel: the theme's background is left out so the output is see-through. */
+  alpha?: boolean;
+}) {
+  const base = useTheme(look?.lowerThird ? "lower_third" : kind === "scripture" ? "scripture" : kind === "announcement" ? "announcement" : "song", themeId);
+  const theme = alpha ? { ...base, background: CLEAR } : base;
+
+  if (blank || !slide) {
+    // Blank: black on screens, see-through on keyed outputs. No background video.
+    return <ThemeView theme={{ ...theme, background: look?.lowerThird || alpha ? CLEAR : BLACK, layers: [] }} data={{ primary: [], second: [] }} />;
+  }
+  if (kind === "announcement") {
+    // announcements are for the screens; the stream's lower third stays clear
+    if (look?.lowerThird) return <ThemeView theme={{ ...theme, background: CLEAR, layers: [] }} data={{ primary: [], second: [] }} />;
+    if (slide.image) return <PictureSlide path={slide.image} />;
+    return <ThemeView theme={theme} data={{ primary: slide.primary, second: [], title: slide.label }} phase={phase} showKey={showKey} textKey={textKey} hideText={hideText} still={still} />;
+  }
+  if (kind === "media") {
+    // Pictures and videos are for the screens, not the lower third.
+    if (look?.lowerThird || !media) return <ThemeView theme={{ ...theme, background: CLEAR, layers: [] }} data={{ primary: [], second: [] }} />;
+    return <MediaView item={media} playing={playing} restart={restart} muted={muted} still={still} />;
+  }
+  const data = { primary: slide.primary, second: slide.second, reference: kind === "scripture" ? caption : null, title: kind === "song" ? caption : null };
+  return <ThemeView theme={theme} data={data} phase={phase} showKey={showKey} textKey={textKey} hideText={hideText} still={still} />;
+}

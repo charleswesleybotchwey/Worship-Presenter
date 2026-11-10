@@ -1,0 +1,33 @@
+// One line-icon set: 16px grid, 1.5px stroke, round joins. Drawn for this app.
+const PATHS: Record<string, string> = {
+  search: "M7 12.5a5.5 5.5 0 1 0 0-11 5.5 5.5 0 0 0 0 11ZM11 11l3.5 3.5",
+  plus: "M8 3v10M3 8h10",
+  close: "M4 4l8 8M12 4l-8 8",
+  note: "M6 12.5V3.5l7-1.5v9M6 12.5a2 2 0 1 1-4 0 2 2 0 0 1 4 0ZM13 11a2 2 0 1 1-4 0 2 2 0 0 1 4 0Z",
+  book: "M2.5 3.5c2-.8 3.8-.8 5.5.5v9c-1.7-1.3-3.5-1.3-5.5-.5v-9ZM13.5 3.5c-2-.8-3.8-.8-5.5.5v9c1.7-1.3 3.5-1.3 5.5-.5v-9Z",
+  monitor: "M2 3h12v8H2zM6 14h4M8 11v3",
+  import: "M8 2v8M5 7l3 3 3-3M3 13h10",
+  video: "M2 4h9v8H2zM11 7l3-2v6l-3-2",
+  music: "M6 12V3.5l7-1.5v8.5M6 12a1.75 1.75 0 1 1-3.5 0A1.75 1.75 0 0 1 6 12ZM13 10.5a1.75 1.75 0 1 1-3.5 0 1.75 1.75 0 0 1 3.5 0Z",
+  slides: "M2 3.5h12v8H2zM5 14h6M4.5 6.5h7M4.5 8.5h4",
+  more: "M3.5 8h.01M8 8h.01M12.5 8h.01",
+  speaker: "M2.5 6h2.5L8.5 3v10L5 10H2.5V6ZM11 5.5a3.5 3.5 0 0 1 0 5",
+  check: "M3 8.5l3 3 7-7",
+  blank: "M2.5 3.5h11v9h-11z",
+  logo: "M2.5 3.5h11v9h-11zM6 8a2 2 0 1 0 4 0 2 2 0 0 0-4 0",
+  clear: "M2.5 3.5h11v9h-11zM5 10.5l6-5",
+  timer: "M8 14A5.5 5.5 0 1 0 8 3a5.5 5.5 0 0 0 0 11ZM8 5.5V8.5l2 1.5M6.5 1.5h3",
+  alert: "M8 2l6.5 11.5h-13L8 2ZM8 6.5v3.2M8 11.6h.01",
+  image: "M2 3h12v10H2zM2 11l3.5-3.5 3 3 2-2L14 12M10.5 6.5h.01",
+  theme: "M2 3h12v10H2zM4.5 9.5h7M5.5 11.5h5M2 6h12",
+  edit: "M10.5 2.5l3 3L6 13H3v-3l7.5-7.5Z",
+  backup: "M3 4.5C3 3.7 5.2 3 8 3s5 .7 5 1.5v7c0 .8-2.2 1.5-5 1.5s-5-.7-5-1.5v-7ZM3 4.5c0 .8 2.2 1.5 5 1.5s5-.7 5-1.5M3 8c0 .8 2.2 1.5 5 1.5S13 8.8 13 8",
+};
+
+export function Icon({ name }: { name: keyof typeof PATHS | string }) {
+  return (
+    <svg className="icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d={PATHS[name] ?? ""} />
+    </svg>
+  );
+}

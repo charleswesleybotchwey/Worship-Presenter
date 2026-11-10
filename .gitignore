@@ -1,0 +1,9 @@
+target/
+node_modules/
+ui/dist/
+src-tauri/gen/
+*.db
+*.db-wal
+*.db-shm
+docs/design/baselines/current/
+docs/design/baselines/diff/

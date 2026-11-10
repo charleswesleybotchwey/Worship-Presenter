@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#191918">
+<title>Worship Presenter remote</title>
+<style>
+  :root { --shell:#191918; --canvas:#201f1e; --sel:#343331; --line:#383735; --edge:#85827c; --ink:#f1f0ee; --sec:#c4c2be; --muted:#a5a29d; --accent:#aec3f4; --on-accent:#182238; --live:#8ad6aa; --warn:#f0c07a; --danger:#ffa39f; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; background:var(--shell); color:var(--ink); font:400 15px/1.4 "Segoe UI", system-ui, sans-serif; -webkit-tap-highlight-color: transparent; }
+  body { padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+  button, input { font:inherit; color:inherit; }
+  button { border:1px solid var(--edge); background:transparent; border-radius:6px; min-height:44px; padding:0 14px; font-weight:600; }
+  button:active { background:var(--sel); }
+  button:disabled { opacity:.4; }
+  button:focus-visible, input:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  .wrap { max-width:560px; margin:0 auto; padding:12px; }
+  h1 { font-size:18px; margin:8px 0 12px; }
+  .muted { color:var(--muted); font-size:13px; }
+  .card { border:1px solid var(--line); border-radius:8px; background:var(--canvas); }
+  input { width:100%; height:48px; border:1px solid var(--edge); border-radius:6px; background:var(--canvas); padding:0 12px; }
+  .pin { font-size:28px; letter-spacing:.3em; text-align:center; }
+  .roles { display:grid; gap:8px; margin:12px 0; }
+  .roles button { text-align:left; padding:10px 14px; min-height:56px; }
+  .roles button small { display:block; font-weight:400; color:var(--muted); }
+  .roles button[aria-pressed=true] { border-color:var(--ink); background:var(--sel); }
+  .primary { background:var(--accent); color:var(--on-accent); border-color:var(--accent); width:100%; }
+  .err { color:var(--danger); margin:8px 0; min-height:20px; }
+  .state { display:flex; align-items:center; gap:8px; font-weight:600; }
+  .dot { width:10px; height:10px; border-radius:50%; background:var(--muted); }
+  .on .dot { background:var(--live); } .on { color:var(--live); }
+  .held { color:var(--warn); } .held .dot { background:var(--warn); }
+  .now { padding:14px; margin:10px 0; min-height:110px; font-family:"Noto Sans", sans-serif; font-size:19px; font-weight:600; }
+  .now .second { color:#ffe066; font-weight:400; font-size:16px; margin-top:6px; }
+  .now .label { color:var(--muted); font-size:12px; font-weight:600; margin-bottom:4px; }
+  .nav { display:grid; grid-template-columns:1fr 1.6fr; gap:8px; }
+  .nav button { min-height:72px; font-size:18px; }
+  .modes { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-top:8px; }
+  .modes button[aria-pressed=true] { background:var(--sel); border-color:var(--ink); }
+  .resume { margin-top:8px; width:100%; border-color:var(--warn); color:var(--warn); }
+  .list { list-style:none; margin:8px 0; padding:0; }
+  .list li button { width:100%; text-align:left; border:0; border-bottom:1px solid var(--line); border-radius:0; display:flex; gap:10px; align-items:center; font-weight:400; }
+  .list li button .n { color:var(--muted); width:28px; font-variant-numeric:tabular-nums; }
+  .list li button.cur { background:var(--sel); }
+  .list li button .tag { margin-left:auto; color:var(--live); font-size:12px; font-weight:600; }
+  .tabs { display:flex; gap:4px; margin-top:12px; }
+  .tabs button { min-height:36px; border:0; color:var(--muted); }
+  .tabs button[aria-selected=true] { background:var(--sel); color:var(--ink); }
+  .top { display:flex; align-items:center; gap:8px; }
+  .top .sp { flex:1; }
+  .small { min-height:32px; font-size:13px; font-weight:500; }
+  .toast { position:fixed; left:12px; right:12px; bottom:calc(12px + env(safe-area-inset-bottom)); background:var(--canvas); border:1px solid var(--danger); border-radius:8px; padding:10px 12px; display:none; }
+  .viewer .now { font-size:24px; min-height:200px; }
+  .timer { font-variant-numeric:tabular-nums; font-weight:700; }
+  .timer.over { color:var(--danger); }
+</style>
+</head>
+<body>
+<div class="wrap" id="app"></div>
+<div class="toast" id="toast" role="alert"></div>
+<script>
+(() => {
+  const $ = (h) => { const t = document.createElement("template"); t.innerHTML = h.trim(); return t.content.firstChild; };
+  const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c]));
+  const app = document.getElementById("app");
+  let token = localStorage.getItem("wp-remote-token");
+  let role = localStorage.getItem("wp-remote-role") || "operator";
+  let snap = null, tab = "slides", ws = null, retry = 0;
+
+  function toast(msg) {
+    const t = document.getElementById("toast");
+    t.textContent = msg; t.style.display = "block";
+    clearTimeout(t._h); t._h = setTimeout(() => (t.style.display = "none"), 3500);
+  }
+
+  async function api(path, body) {
+    const r = await fetch(path, { method: body ? "POST" : "GET", headers: { "Content-Type": "application/json", ...(token ? { Authorization: "Bearer " + token } : {}) }, body: body ? JSON.stringify(body) : undefined });
+    const j = await r.json().catch(() => ({}));
+    if (r.status === 401 && path !== "/api/join") { signOut(j.error); throw new Error(j.error); }
+    if (!r.ok) throw new Error(j.error || "Something went wrong.");
+    return j;
+  }
+
+  function signOut(msg) {
+    token = null; localStorage.removeItem("wp-remote-token");
+    if (ws) { ws.onclose = null; ws.close(); }
+    renderJoin(msg || "");
+  }
+
+  function renderJoin(msg) {
+    app.innerHTML = "";
+    const roles = [["operator","Control the screens","Next, previous, blank, and the service order"],["stage","Stage display","Current and next words, clock and notes, for the pulpit"],["viewer","Watch only","See what is on the screens; cannot change anything"]];
+    const el = $(`<div><h1>Worship Presenter</h1>
+      <p class="muted">Enter the PIN shown on the computer under Settings, Remote.</p>
+      <input class="pin" id="pin" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="••••••" aria-label="PIN">
+      <div class="roles" role="radiogroup" aria-label="This device will">${roles.map(([v,t,d]) => `<button role="radio" data-r="${v}" aria-pressed="${v===role}">${t}<small>${d}</small></button>`).join("")}</div>
+      <input id="dev" placeholder="Name for this device (e.g. Pastor's tablet)" aria-label="Device name" value="${esc(localStorage.getItem("wp-remote-device") || "")}">
+      <div class="err" id="err">${esc(msg)}</div>
+      <button class="primary" id="go">Join</button></div>`);
+    el.querySelectorAll("[data-r]").forEach((b) => b.onclick = () => { role = b.dataset.r; el.querySelectorAll("[data-r]").forEach((x) => x.setAttribute("aria-pressed", x === b)); });
+    el.querySelector("#go").onclick = async () => {
+      const device = el.querySelector("#dev").value.trim();
+      localStorage.setItem("wp-remote-device", device);
+      try {
+        const j = await api("/api/join", { pin: el.querySelector("#pin").value, role, device });
+        token = j.token; localStorage.setItem("wp-remote-token", token); localStorage.setItem("wp-remote-role", role);
+        if (role === "stage") { location.href = "/stage"; return; }
+        connect();
+      } catch (e) { el.querySelector("#err").textContent = e.message; }
+    };
+    app.append(el);
+    el.querySelector("#pin").focus();
+  }
+
+  function connect() {
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    ws = new WebSocket(`${proto}://${location.host}/ws?token=${token}`);
+    ws.onmessage = (e) => { snap = JSON.parse(e.data); snap.clock_offset_ms = (snap.server_now_ms || Date.now()) - Date.now(); retry = 0; render(); };
+    ws.onclose = () => { setTimeout(() => api("/api/snapshot").then(() => connect()).catch(() => {}), Math.min(5000, 500 * ++retry)); };
+  }
+
+  async function send(cmd) {
+    try { await api("/api/command", cmd); if (navigator.vibrate) navigator.vibrate(15); }
+    catch (e) { toast(e.message); }
+  }
+
+  function fmt(ms) {
+    const over = ms < 0, s = Math.ceil(Math.abs(ms) / 1000) - (over ? 1 : 0);
+    const m = Math.floor(s / 60), r = s % 60;
+    return (over ? "+" : "") + m + ":" + String(r).padStart(2, "0");
+  }
+
+  function render() {
+    if (!snap) return;
+    const s = snap, held = s.item && s.mode !== "live";
+    const cur = s.slides[s.slide_idx];
+    const stateCls = !s.item ? "" : held ? "held" : "on";
+    const stateTxt = !s.item ? "Nothing on the screens" : s.mode === "live" ? "Live" : s.mode === "blank" ? "Blank" : s.mode === "logo" ? "Logo" : "Text cleared";
+    const timer = s.timer ? (s.timer.paused_left_ms ?? (s.timer.ends_at_ms - (Date.now() + (s.clock_offset_ms || 0)))) : null;
+    app.className = "wrap " + (role === "viewer" ? "viewer" : "");
+    app.innerHTML = "";
+    const el = $(`<div>
+      <div class="top"><span class="state ${stateCls}"><span class="dot"></span>${stateTxt}</span><span class="sp"></span>
+        ${timer != null ? `<span class="timer ${timer < 0 ? "over" : ""}">${fmt(timer)}</span>` : ""}
+        <button class="small" id="out">Leave</button></div>
+      <div class="muted">${esc(s.item ? s.item.title : (s.service || ""))}</div>
+      <div class="card now">${cur ? `<div class="label">${esc(cur.label)}${s.slides.length > 1 ? ` · ${s.slide_idx + 1} of ${s.slides.length}` : ""}</div>${cur.primary.map((l) => `<div>${esc(l)}</div>`).join("")}${cur.second.length ? `<div class="second">${cur.second.map(esc).join("<br>")}</div>` : ""}` : `<span class="muted">The desk has not sent anything yet.</span>`}</div>
+      ${role === "operator" ? `
+        <div class="nav"><button id="prev" ${!s.item || held ? "disabled" : ""}>Previous</button><button id="next" ${!s.item || held ? "disabled" : ""}>Next</button></div>
+        <div class="modes">${["blank","logo","clear"].map((m) => `<button data-m="${m}" aria-pressed="${s.mode === m}">${m[0].toUpperCase() + m.slice(1)}</button>`).join("")}</div>
+        ${held ? `<button class="resume" id="resume">Resume output</button>` : ""}
+        <div class="tabs" role="tablist"><button role="tab" data-t="slides" aria-selected="${tab === "slides"}">Slides</button><button role="tab" data-t="order" aria-selected="${tab === "order"}">Service order</button></div>
+        <ul class="list">${tab === "slides"
+          ? s.slides.map((x, i) => `<li><button data-s="${i}" class="${i === s.slide_idx ? "cur" : ""}"><span class="n">${i + 1}</span><span>${esc(x.label)}: ${esc((x.primary[0] || "").slice(0, 60))}</span>${i === s.slide_idx && !held ? `<span class="tag">Live</span>` : ""}</button></li>`).join("")
+          : (s.schedule || []).map((x, i) => `<li><button data-i="${i}" class="${i === s.live_index ? "cur" : ""}"><span class="n">${i + 1}</span><span>${esc(x.title)}</span>${i === s.live_index ? `<span class="tag">Live</span>` : ""}</button></li>`).join("") || `<li class="muted">No service order is open on the computer.</li>`}</ul>` : ""}
+    </div>`);
+    el.querySelector("#out").onclick = () => signOut("Signed out.");
+    if (role === "operator") {
+      const on = (id, cmd) => { const b = el.querySelector(id); if (b) b.onclick = () => send(cmd); };
+      on("#prev", { cmd: "previous" }); on("#next", { cmd: "next" }); on("#resume", { cmd: "resume" });
+      el.querySelectorAll("[data-m]").forEach((b) => b.onclick = () => send({ cmd: b.dataset.m }));
+      el.querySelectorAll("[data-t]").forEach((b) => b.onclick = () => { tab = b.dataset.t; render(); });
+      el.querySelectorAll("[data-s]").forEach((b) => b.onclick = () => send({ cmd: "show", index: Number(b.dataset.s) }));
+      el.querySelectorAll("[data-i]").forEach((b) => b.onclick = () => {
+        const it = s.schedule[Number(b.dataset.i)];
+        if (confirm(`Send “${it.title}” to the screens now?`)) send({ cmd: "go_live_item", index: Number(b.dataset.i) });
+      });
+    }
+    app.append(el);
+  }
+
+  setInterval(() => snap && snap.timer && render(), 1000);
+  if (token) connect(); else renderJoin("");
+})();
+</script>
+</body>
+</html>

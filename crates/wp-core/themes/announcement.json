@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "name": "Announcements",
+  "kind": "announcement",
+  "background": { "kind": "color", "color": "#0e1726", "image": null, "fit": "cover", "dim": 0 },
+  "transition": { "kind": "fade", "ms": 400 },
+  "layers": [
+    {
+      "id": "rule", "name": "Accent line", "kind": "shape", "shape": "rect",
+      "x": 8, "y": 30, "w": 10, "h": 0.8, "opacity": 1, "hidden": false, "locked": false,
+      "fill": "#f2c94c", "radius": 0, "border": { "color": "#ffffff00", "width": 0 },
+      "animIn": { "kind": "wipe", "ms": 500, "delay": 0 }, "animOut": { "kind": "fade", "ms": 200, "delay": 0 }
+    },
+    {
+      "id": "title", "name": "Title", "kind": "text", "field": "title", "text": "",
+      "x": 8, "y": 12, "w": 84, "h": 16, "solo": null, "opacity": 1, "hidden": false, "locked": false,
+      "style": { "font": "Noto Sans", "size": 9, "weight": 700, "italic": false, "color": "#ffffff", "align": "left", "valign": "bottom", "lineHeight": 1.1, "letterSpacing": 0, "uppercase": false, "autoFit": true, "minSize": 4,
+                 "shadow": { "on": false, "color": "#000000cc", "blur": 0.6, "x": 0, "y": 0.25 }, "outline": { "on": false, "color": "#000000", "width": 0.15 } },
+      "animIn": { "kind": "slide-right", "ms": 450, "delay": 100 }, "animOut": { "kind": "fade", "ms": 200, "delay": 0 }
+    },
+    {
+      "id": "body", "name": "Text", "kind": "text", "field": "lyrics", "text": "",
+      "x": 8, "y": 36, "w": 84, "h": 52, "solo": null, "opacity": 1, "hidden": false, "locked": false,
+      "style": { "font": "Noto Sans", "size": 5.6, "weight": 400, "italic": false, "color": "#e8edf5", "align": "left", "valign": "top", "lineHeight": 1.35, "letterSpacing": 0, "uppercase": false, "autoFit": true, "minSize": 3,
+                 "shadow": { "on": false, "color": "#000000cc", "blur": 0.6, "x": 0, "y": 0.25 }, "outline": { "on": false, "color": "#000000", "width": 0.15 } },
+      "animIn": { "kind": "fade", "ms": 400, "delay": 250 }, "animOut": { "kind": "fade", "ms": 200, "delay": 0 }
+    }
+  ]
+}

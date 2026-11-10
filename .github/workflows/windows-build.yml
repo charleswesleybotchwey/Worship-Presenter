@@ -1,0 +1,83 @@
+# Builds the Windows installers on GitHub's Windows machines, so nobody needs Rust,
+# Visual Studio or the Tauri CLI on their own PC.
+#
+# Every push: download them from the run's page, under "Artifacts".
+# A version tag (git tag v0.1.0 && git push --tags, or "Create a new release" on
+# GitHub with a tag like v0.1.0): they are attached to that GitHub Release.
+#
+#   Worship Presenter_<version>_x64-setup.exe          small; downloads WebView2 if missing
+#   Worship Presenter_<version>_x64-setup-offline.exe  includes WebView2; for PCs without internet
+name: Windows installer
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            ui/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install JavaScript packages
+        run: npm run setup
+
+      - name: Version from the tag (v1.2.3 → 1.2.3)
+        id: ver
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then v="${GITHUB_REF#refs/tags/v}"; else v="$(node -p "require('./src-tauri/tauri.conf.json').version")"; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Test
+        run: cargo test --release -p wp-core -p wp-remote -p wp-audio
+
+      - name: Build the installer
+        shell: bash
+        run: npx tauri build --config "{\"version\":\"${{ steps.ver.outputs.version }}\"}"
+
+      - name: Build the offline installer (WebView2 included)
+        shell: bash
+        run: |
+          dir=target/release/bundle/nsis
+          mkdir -p out && mv "$dir"/*-setup.exe out/
+          npx tauri build --config "{\"version\":\"${{ steps.ver.outputs.version }}\",\"bundle\":{\"windows\":{\"webviewInstallMode\":{\"type\":\"offlineInstaller\"}}}}"
+          for f in "$dir"/*-setup.exe; do mv "$f" "out/$(basename "${f%.exe}")-offline.exe"; done
+          ls -la out
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: Worship-Presenter-${{ steps.ver.outputs.version }}-Windows
+          path: out/*.exe
+          if-no-files-found: error
+
+      - name: Attach to the GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*.exe
+          draft: false
+          body: |
+            Windows installers for Worship Presenter ${{ steps.ver.outputs.version }}.
+            - **setup.exe**: the usual installer (downloads Microsoft WebView2 only if this PC lacks it).
+            - **setup-offline.exe**: for PCs without internet; includes WebView2.
+            The installer is not code-signed yet: if Windows shows "Windows protected your PC", choose More info, then Run anyway.

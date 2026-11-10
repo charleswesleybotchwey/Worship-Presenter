@@ -1,0 +1,176 @@
+{
+  "schema_version": 1,
+  "name": "Scripture",
+  "kind": "scripture",
+  "background": {
+    "kind": "color",
+    "color": "#000000",
+    "image": null,
+    "fit": "cover",
+    "dim": 0
+  },
+  "transition": {
+    "kind": "fade",
+    "ms": 250
+  },
+  "layers": [
+    {
+      "id": "verse",
+      "name": "Verse text",
+      "kind": "text",
+      "field": "lyrics",
+      "text": "",
+      "x": 6,
+      "y": 8,
+      "w": 88,
+      "h": 58,
+      "solo": {
+        "x": 6,
+        "y": 8,
+        "w": 88,
+        "h": 76
+      },
+      "opacity": 1,
+      "hidden": false,
+      "locked": false,
+      "style": {
+        "font": "Noto Sans",
+        "size": 7,
+        "weight": 600,
+        "italic": false,
+        "color": "#ffffff",
+        "align": "center",
+        "valign": "middle",
+        "lineHeight": 1.2,
+        "letterSpacing": 0,
+        "uppercase": false,
+        "autoFit": true,
+        "minSize": 4,
+        "shadow": {
+          "on": true,
+          "color": "#000000cc",
+          "blur": 0.6,
+          "x": 0,
+          "y": 0.25
+        },
+        "outline": {
+          "on": false,
+          "color": "#000000",
+          "width": 0.15
+        }
+      },
+      "animIn": {
+        "kind": "fade",
+        "ms": 300,
+        "delay": 0
+      },
+      "animOut": {
+        "kind": "fade",
+        "ms": 200,
+        "delay": 0
+      }
+    },
+    {
+      "id": "second",
+      "name": "Second version",
+      "kind": "text",
+      "field": "second",
+      "text": "",
+      "x": 6,
+      "y": 67,
+      "w": 88,
+      "h": 18,
+      "solo": null,
+      "opacity": 1,
+      "hidden": false,
+      "locked": false,
+      "style": {
+        "font": "Noto Sans",
+        "size": 5.5,
+        "weight": 400,
+        "italic": false,
+        "color": "#ffe066",
+        "align": "center",
+        "valign": "top",
+        "lineHeight": 1.2,
+        "letterSpacing": 0,
+        "uppercase": false,
+        "autoFit": true,
+        "minSize": 4,
+        "shadow": {
+          "on": true,
+          "color": "#000000cc",
+          "blur": 0.6,
+          "x": 0,
+          "y": 0.25
+        },
+        "outline": {
+          "on": false,
+          "color": "#000000",
+          "width": 0.15
+        }
+      },
+      "animIn": {
+        "kind": "fade",
+        "ms": 300,
+        "delay": 0
+      },
+      "animOut": {
+        "kind": "fade",
+        "ms": 200,
+        "delay": 0
+      }
+    },
+    {
+      "id": "reference",
+      "name": "Reference",
+      "kind": "text",
+      "field": "reference",
+      "text": "",
+      "x": 6,
+      "y": 86,
+      "w": 88,
+      "h": 8,
+      "solo": null,
+      "opacity": 1,
+      "hidden": false,
+      "locked": false,
+      "style": {
+        "font": "Noto Sans",
+        "size": 4,
+        "weight": 500,
+        "italic": false,
+        "color": "#ffffffb8",
+        "align": "center",
+        "valign": "middle",
+        "lineHeight": 1.2,
+        "letterSpacing": 0,
+        "uppercase": false,
+        "autoFit": true,
+        "minSize": 4,
+        "shadow": {
+          "on": true,
+          "color": "#000000cc",
+          "blur": 0.6,
+          "x": 0,
+          "y": 0.25
+        },
+        "outline": {
+          "on": false,
+          "color": "#000000",
+          "width": 0.15
+        }
+      },
+      "animIn": {
+        "kind": "fade",
+        "ms": 300,
+        "delay": 0
+      },
+      "animOut": {
+        "kind": "fade",
+        "ms": 200,
+        "delay": 0
+      }
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+[package]
+name = "wp-audio"
+description = "Worship Presenter background music: playlist, crossfade, fades and service rules"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+rodio = { version = "=0.23.0", default-features = false, features = ["playback", "mp3", "wav", "flac", "vorbis", "mp4", "symphonia-aac"] }

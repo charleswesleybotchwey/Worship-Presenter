@@ -1,0 +1,85 @@
+/*
+  Worship Presenter operator tokens (design brief v1.0, section 4).
+  Build values, not extracted Linear values. The only place operator colours,
+  sizes, type and motion are defined. Projected slides never read these.
+*/
+:root,
+[data-theme="dark"] {
+  color-scheme: dark;
+  --wp-shell: #191918;
+  --wp-canvas: #201f1e;
+  --wp-overlay: #292827;
+  --wp-hover: #2c2b2a;
+  --wp-selected: #343331;
+  --wp-line: #383735;
+  --wp-edge: #85827c;
+  --wp-ink: #f1f0ee;
+  --wp-secondary: #c4c2be;
+  --wp-muted: #a5a29d;
+  --wp-accent: #aec3f4;
+  --wp-on-accent: #182238;
+  --wp-focus: #b4cafa;
+  --wp-live: #8ad6aa;
+  --wp-warn: #f0c07a;
+  --wp-danger: #ffa39f;
+}
+[data-theme="light"] {
+  color-scheme: light;
+  --wp-shell: #f5f4f2;
+  --wp-canvas: #fcfbfa;
+  --wp-overlay: #ffffff;
+  --wp-hover: #f0efed;
+  --wp-selected: #e7e6e3;
+  --wp-line: #dedddA;
+  --wp-edge: #75736d;
+  --wp-ink: #22211f;
+  --wp-secondary: #4e4c49;
+  --wp-muted: #62605c;
+  --wp-accent: #39558d;
+  --wp-on-accent: #ffffff;
+  --wp-focus: #385790;
+  --wp-live: #216542;
+  --wp-warn: #80500c;
+  --wp-danger: #973a38;
+}
+:root {
+  --wp-font: "Inter Variable", Inter, "Noto Sans", "Segoe UI", sans-serif;
+  --wp-text: 13px;
+  --wp-lead: 20px;
+  --wp-small: 12px;
+  --wp-r-control: 4px;
+  --wp-r-surface: 6px;
+  --wp-r-dialog: 8px;
+  --wp-hover-time: 100ms;
+  --wp-overlay-time: 120ms;
+  --wp-h-tabs: 32px;
+  --wp-h-bar: 44px;
+  --wp-h-head: 36px;
+  --wp-h-status: 24px;
+  --wp-h-row: 32px;
+
+  /* names used by the earlier screens, now resolved to the brief's tokens */
+  --bg: var(--wp-canvas);
+  --panel: var(--wp-shell);
+  --raised: var(--wp-selected);
+  --line: var(--wp-line);
+  --line-strong: var(--wp-edge);
+  --text: var(--wp-ink);
+  --muted: var(--wp-secondary);
+  --faint: var(--wp-muted);
+  --live: var(--wp-live);
+  --preview: var(--wp-edge);
+  --focus: var(--wp-focus);
+  --ui: var(--wp-font);
+  --r: var(--wp-r-control);
+}
+@media (prefers-reduced-motion: reduce) {
+  :root { --wp-hover-time: 0ms; --wp-overlay-time: 0ms; }
+}
+.wp-control.is-lowspec { --wp-hover-time: 0ms; --wp-overlay-time: 0ms; }
+
+/* Windows high-contrast (forced colours): keep every boundary and state visible */
+@media (forced-colors: active) {
+  .wp-control button, .wp-control input, .wp-control select { border: 1px solid ButtonText; }
+  .wp-control [aria-pressed="true"], .wp-control [aria-selected="true"], .wp-control [aria-current="true"] { outline: 2px solid Highlight; }
+}
