@@ -1,0 +1,45 @@
+# Builds the Windows installer in the cloud on every push, so nobody needs
+# Rust, Visual Studio or the Tauri CLI on their own PC.
+# Download it from the run's page under "Artifacts".
+name: Windows installer
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            ui/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install JavaScript packages
+        run: npm run setup
+
+      - name: Test the core
+        run: cargo test -p wp-core --release
+
+      - name: Build the installer
+        run: npx tauri build
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: worship-presenter-windows
+          path: |
+            target/release/bundle/nsis/*.exe
+            target/release/bundle/msi/*.msi
+          if-no-files-found: error
