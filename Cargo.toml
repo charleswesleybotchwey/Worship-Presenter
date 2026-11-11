@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["crates/wp-core", "crates/wp-remote", "crates/wp-audio", "src-tauri"]
-default-members = ["crates/wp-core", "crates/wp-remote", "crates/wp-audio"]
+members = ["crates/wp-core", "crates/wp-remote", "crates/wp-audio", "crates/wp-render", "src-tauri"]
+default-members = ["crates/wp-core", "crates/wp-remote", "crates/wp-audio", "crates/wp-render"]
 
 [workspace.package]
 version = "0.1.0"

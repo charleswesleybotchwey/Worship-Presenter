@@ -15,13 +15,23 @@ pub struct Frame {
 
 /// Something that can put frames on the network (the NDI sender, or a test double).
 pub trait Sink: Send {
-    fn send(&mut self, f: &Frame, fps: u32);
+    /// A frame already converted to NDI's UYVA layout.
+    fn send(&mut self, width: u32, height: u32, uyva: &[u8], fps: u32);
     fn connections(&self) -> i32;
 }
 
+impl Sink for Arc<super::sdk::Sender> {
+    fn send(&mut self, width: u32, height: u32, uyva: &[u8], fps: u32) {
+        self.send_uyva(width, height, uyva, fps);
+    }
+    fn connections(&self) -> i32 {
+        super::sdk::Sender::connections(self)
+    }
+}
+
 impl Sink for super::sdk::Sender {
-    fn send(&mut self, f: &Frame, fps: u32) {
-        self.send_bgra(f.width, f.height, f.width * 4, &f.data, fps);
+    fn send(&mut self, width: u32, height: u32, uyva: &[u8], fps: u32) {
+        self.send_uyva(width, height, uyva, fps);
     }
     fn connections(&self) -> i32 {
         super::sdk::Sender::connections(self)
@@ -56,23 +66,44 @@ impl Slot {
 
 /// Runs until `stop` is set. If the sink paces itself (NDI with clock_video),
 /// sleeping here is only a fallback for sinks that do not.
+/// While nobody is receiving, one frame a second keeps the source alive (FreeShow
+/// does the same): no work is wasted on frames no one sees.
+pub const IDLE_FPS: u32 = 1;
+
 pub fn run(mut sink: Box<dyn Sink>, slot: Arc<Slot>, stats: Arc<Stats>, fps: u32, stop: Arc<AtomicBool>) {
-    let period = Duration::from_secs_f64(1.0 / fps.max(1) as f64);
     let mut last_conn = Instant::now() - Duration::from_secs(5);
+    let mut receivers = 0i32;
+    // converted once per new frame; repeats reuse it (always the newest frame)
+    let mut current: Option<(Arc<Frame>, Vec<u8>)> = None;
     while !stop.load(Ordering::Relaxed) {
         let t = Instant::now();
+        if last_conn.elapsed() > Duration::from_secs(1) {
+            receivers = sink.connections().max(0);
+            stats.connections.store(receivers as u64, Ordering::Relaxed);
+            last_conn = Instant::now();
+        }
+        let rate = if receivers > 0 { fps.max(1) } else { IDLE_FPS };
         if let Some(f) = slot.latest() {
-            sink.send(&f, fps);
+            if !current.as_ref().map_or(false, |(c, _)| Arc::ptr_eq(c, &f)) {
+                let uyva = super::convert::bgra_to_uyva(&f.data, f.width as usize, f.height as usize);
+                current = Some((f, uyva));
+            }
+            let (f, uyva) = current.as_ref().unwrap();
+            sink.send(f.width, f.height, uyva, rate);
             stats.sent.fetch_add(1, Ordering::Relaxed);
             stats.width.store(f.width as u64, Ordering::Relaxed);
             stats.height.store(f.height as u64, Ordering::Relaxed);
         }
-        if last_conn.elapsed() > Duration::from_secs(1) {
-            stats.connections.store(sink.connections().max(0) as u64, Ordering::Relaxed);
-            last_conn = Instant::now();
-        }
-        if let Some(rest) = period.checked_sub(t.elapsed()) {
-            std::thread::sleep(rest);
+        // wake every 100 ms at most, so a receiver connecting is noticed quickly
+        let period = Duration::from_secs_f64(1.0 / rate as f64).min(if receivers > 0 { Duration::from_secs(1) } else { Duration::from_millis(1000) });
+        let mut left = period.saturating_sub(t.elapsed());
+        while left > Duration::ZERO && !stop.load(Ordering::Relaxed) {
+            let step = left.min(Duration::from_millis(100));
+            std::thread::sleep(step);
+            left = left.saturating_sub(step);
+            if receivers == 0 && last_conn.elapsed() > Duration::from_millis(300) && sink.connections() > 0 {
+                break;
+            }
         }
     }
 }
@@ -98,13 +129,13 @@ pub fn test_pattern(width: u32, height: u32, frame: u64) -> Frame {
 mod tests {
     use super::*;
 
-    struct Count(Arc<AtomicU64>);
+    struct Count(Arc<AtomicU64>, i32);
     impl Sink for Count {
-        fn send(&mut self, _f: &Frame, _fps: u32) {
+        fn send(&mut self, _w: u32, _h: u32, _d: &[u8], _fps: u32) {
             self.0.fetch_add(1, Ordering::Relaxed);
         }
         fn connections(&self) -> i32 {
-            2
+            self.1
         }
     }
 
@@ -117,7 +148,7 @@ mod tests {
         slot.put(Frame { width: 4, height: 2, data: vec![0; 32] });
         let (s2, st2, stop2, sent2) = (slot.clone(), stats.clone(), stop.clone(), sent.clone());
         // 20 fps over 1 s: loose enough for Windows' coarse sleep timer (~16 ms steps)
-        let h = std::thread::spawn(move || run(Box::new(Count(sent2)), s2, st2, 20, stop2));
+        let h = std::thread::spawn(move || run(Box::new(Count(sent2, 2)), s2, st2, 20, stop2));
         std::thread::sleep(Duration::from_millis(1000));
         stop.store(true, Ordering::Relaxed);
         h.join().unwrap();
@@ -125,6 +156,21 @@ mod tests {
         assert!((12..=24).contains(&n), "about 20 frames in 1 s at 20 fps, got {n}");
         assert_eq!(stats.connections.load(Ordering::Relaxed), 2);
         assert_eq!(stats.width.load(Ordering::Relaxed), 4);
+    }
+
+    #[test]
+    fn idles_at_one_frame_a_second_with_no_receivers() {
+        let sent = Arc::new(AtomicU64::new(0));
+        let slot = Arc::new(Slot::default());
+        let stop = Arc::new(AtomicBool::new(false));
+        slot.put(Frame { width: 4, height: 2, data: vec![0; 32] });
+        let (s2, stop2, sent2) = (slot.clone(), stop.clone(), sent.clone());
+        let h = std::thread::spawn(move || run(Box::new(Count(sent2, 0)), s2, Arc::new(Stats::default()), 30, stop2));
+        std::thread::sleep(Duration::from_millis(1500));
+        stop.store(true, Ordering::Relaxed);
+        h.join().unwrap();
+        let n = sent.load(Ordering::Relaxed);
+        assert!((1..=3).contains(&n), "about 2 frames in 1.5 s while idle, got {n}");
     }
 
     #[test]

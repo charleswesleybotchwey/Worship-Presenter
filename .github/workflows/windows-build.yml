@@ -52,7 +52,7 @@ jobs:
           echo "version=$v" >> "$GITHUB_OUTPUT"
 
       - name: Test
-        run: cargo test --release -p wp-core -p wp-remote -p wp-audio
+        run: cargo test --release -p wp-core -p wp-remote -p wp-audio -p wp-render
 
       - name: Build the installer
         shell: bash

@@ -358,7 +358,7 @@ export interface NdiStatus {
   runtime: string | null;
   problem: string | null;
   capture_supported: boolean;
-  sources: { source: string; name: string; seconds: number; fps: number; captured: number; sent: number; process_ms: number; connections: number; width: number; height: number }[];
+  sources: { source: string; name: string; seconds: number; fps: number; captured: number; sent: number; process_ms: number; connections: number; width: number; height: number; audio?: boolean }[];
 }
 
 export interface OutputStatus {
@@ -531,7 +531,12 @@ export const api = {
   remoteEndAll: () => call<void>("remote_end_all"),
   ndiStatus: () => call<NdiStatus>("ndi_status"),
   ndiTestPattern: (name: string, seconds: number) => call<void>("ndi_test_pattern", { name, seconds }),
-  ndiStart: (source: "lower_third" | "main", name: string, fps: number) => call<void>("ndi_start", { source, name, fps }),
+  ndiStart: (source: "lower_third" | "main", name: string, fps: number, groups?: string, renderer?: "builtin" | "capture") => call<void>("ndi_start", { source, name, fps, groups: groups || null, renderer: renderer ?? null }),
+  openNdiRuntimePage: () => call<void>("open_ndi_runtime_page"),
+  setWindowLook: (dark: boolean) => call<void>("set_window_look", { dark }),
+  showMainWindow: () => call<void>("show_main_window"),
+  ndiAudio: (source: string, on: boolean) => call<void>("ndi_audio", { source, on }),
+  ndiSources: (groups?: string) => call<{ name: string; url: string }[]>("ndi_sources", { groups: groups || null }),
   ndiStop: (source: string) => call<void>("ndi_stop", { source }),
   listProfiles: () => call<Profile[]>("list_profiles"),
   currentProfile: () => call<{ slug: string; name: string }>("current_profile"),
@@ -629,6 +634,26 @@ export async function pickPresentation(): Promise<string | null> {
 }
 
 /** An EasyWorship or ProPresenter theme file. */
+/** The Windows menu bar: each choice arrives as its id ("file.save", "live.next"…). */
+export function onMenu(f: (id: string) => void): () => void {
+  if (!inTauri) {
+    // the browser preview: window.__wpMenu("live.next") stands in for the menu
+    (window as unknown as { __wpMenu?: (id: string) => void }).__wpMenu = f;
+    return () => {};
+  }
+  let un = () => {};
+  import("@tauri-apps/api/event").then(({ listen }) => listen<string>("menu", (e) => f(e.payload)).then((u) => (un = u)));
+  return () => un();
+}
+
+/** Address of the newest picture from an NDI source (served by the app over ndi://). */
+export async function ndiFrameUrl(name: string, url: string): Promise<string> {
+  if (!inTauri) return "/samples/sunrise.jpg";
+  const { convertFileSrc } = await import("@tauri-apps/api/core");
+  const base = convertFileSrc("x", "ndi").replace(/x$/, "");
+  return `${base}frame/${encodeURIComponent(name)}?url=${encodeURIComponent(url)}`;
+}
+
 export async function pickForeignTheme(): Promise<string | null> {
   if (!inTauri) return "Theme.proTheme";
   const { open } = await import("@tauri-apps/plugin-dialog");
@@ -1421,6 +1446,15 @@ async function mock(cmd: string, a: Record<string, unknown>): Promise<unknown> {
     case "ndi_test_pattern":
     case "ndi_start":
       throw new Error("NDI works in the desktop app only. In this browser preview nothing is sent.");
+    case "ndi_sources":
+      return [{ name: "MEDIA-PC (OBS Program)", url: "192.168.1.20:5961" }, { name: "PTZ-CAM-1 (Stage)", url: "192.168.1.31:5961" }];
+    case "ndi_audio":
+    case "set_window_look":
+    case "show_main_window":
+      return;
+    case "open_ndi_runtime_page":
+      window.open("https://ndi.link/NDIRedistV6", "_blank");
+      return;
     case "ndi_stop":
       return;
     case "list_announcements":

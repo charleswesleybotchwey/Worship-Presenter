@@ -5,6 +5,7 @@
 //!
 //! NDI® is a registered trademark of Vizrt NDI AB.
 
+pub mod convert;
 pub mod key;
 pub mod pump;
 pub mod sdk;

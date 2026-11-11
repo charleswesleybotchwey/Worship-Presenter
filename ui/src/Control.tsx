@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { onMenu } from "./api";
 import { api, isDesktop, type PulpitNote, type SpeechStatus, onLibraryRestored, onProfileChanged, onSettingsChanged, type LangMode, type LiveState, type MediaItem, type Mode, type ProgramItem, type Schedule, type Slide, type Timer } from "./api";
 import { SlideView } from "./SlideView";
 import { Icon } from "./Icon";
@@ -53,6 +54,8 @@ type UiTheme = "dark" | "light" | "system";
 function applyUiTheme(t: UiTheme) {
   const dark = t === "dark" || (t === "system" && matchMedia("(prefers-color-scheme: dark)").matches);
   document.documentElement.dataset.theme = dark ? "dark" : "light";
+  // the Windows title bar and Mica follow the app
+  void api.setWindowLook(dark).catch(() => {});
 }
 function useUiTheme(): [UiTheme, (t: UiTheme) => void] {
   const [t, setT] = useState<UiTheme>(() => (localStorage.getItem("wp-ui-theme") as UiTheme) || "dark");
@@ -188,8 +191,11 @@ export function Control() {
   });
   const saveEw = (v: typeof ew) => (setEw(v), localStorage.setItem(ewKey, JSON.stringify(v)));
   const panes = { reset: () => (localStorage.removeItem(ewKey), setEw({ schedule: 240, split: 0.5, top: 58 })) };
-  const [slideView, setSlideViewRaw] = useState<"list" | "thumbs">(() => (localStorage.getItem("wp-slide-view") as "list" | "thumbs") || "list");
-  const setSlideView = (v: "list" | "thumbs") => (setSlideViewRaw(v), localStorage.setItem("wp-slide-view", v));
+  // Preview and Live each keep their own list/pictures choice
+  const [previewView, setPreviewViewRaw] = useState<"list" | "thumbs">(() => (localStorage.getItem("wp-preview-view") as "list" | "thumbs") || (localStorage.getItem("wp-slide-view") as "list" | "thumbs") || "list");
+  const [liveView, setLiveViewRaw] = useState<"list" | "thumbs">(() => (localStorage.getItem("wp-live-view") as "list" | "thumbs") || (localStorage.getItem("wp-slide-view") as "list" | "thumbs") || "list");
+  const setPreviewView = (v: "list" | "thumbs") => (setPreviewViewRaw(v), localStorage.setItem("wp-preview-view", v));
+  const setLiveView = (v: "list" | "thumbs") => (setLiveViewRaw(v), localStorage.setItem("wp-live-view", v));
 
   const state = live?.state;
   const liveSlides = live?.slides ?? [];
@@ -198,7 +204,8 @@ export function Control() {
   const coreLatched = !!live?.item && !!state && state.mode !== "live";
   const latched = rehearsal ? !!reh && reh.mode !== "live" : coreLatched;
   const held = live?.held ?? [];
-  const canGoLive = rehearsal ? !!preview && !latched : !!preview && main.condition !== "none" && main.condition !== "disconnected" && !latched;
+  // like EasyWorship, Go live works with no projector too (it shows in Live)
+  const canGoLive = !!preview && !latched;
 
   const say = (text: string, bad = false) => setNotice({ text, bad });
   const run = useCallback(async <T,>(p: Promise<T>) => {
@@ -408,7 +415,23 @@ export function Control() {
         if (k === "Escape") e.preventDefault(), (e.target as HTMLElement).blur();
         return;
       }
-      // The Live driving surface itself, not a button or list inside the Live pane.
+      // Arrow and page keys drive Live from anywhere you are not typing (as in
+      // EasyWorship); a held key still does not race through a hymn.
+      const nav = ["ArrowRight", "ArrowLeft", "ArrowDown", "ArrowUp", "PageDown", "PageUp"].includes(k);
+      const target = e.target as HTMLElement | null;
+      const ownsArrows = !!target?.closest?.("input[type=radio], [role=slider], [role=listbox], [role=grid], input[type=range]");
+      if (nav && !ownsArrows && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        if (e.repeat) return e.preventDefault();
+        const map: Record<string, "next" | "previous" | "nextItem" | "previousItem"> = { ArrowRight: "next", ArrowDown: "next", ArrowLeft: "previous", ArrowUp: "previous", PageDown: "nextItem", PageUp: "previousItem" };
+        const a = actionFor(prefs, k) ?? map[k];
+        e.preventDefault();
+        if (a === "next") return step(1);
+        if (a === "previous") return step(-1);
+        if (a === "nextItem") return void stepSchedule(1);
+        if (a === "previousItem") return void stepSchedule(-1);
+      }
+      // Blank, Logo, Clear and the number keys only on the Live monitor itself, so a
+      // stray letter elsewhere never changes the screens.
       if (!liveSurface.current || document.activeElement !== liveSurface.current) return;
       if (e.repeat) return e.preventDefault(); // a held key must not step through a hymn
       if (e.ctrlKey && k.toLowerCase() === "z") return e.preventDefault(), rehearsal ? undefined : void run(api.undoGoLive());
@@ -432,6 +455,57 @@ export function Control() {
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [goLive, liveSlides, layer, activeTab, run, stepSchedule, prefs, rehearsal, reh]);
+
+  useEffect(() => {
+    requestAnimationFrame(() => requestAnimationFrame(() => void api.showMainWindow().catch(() => {})));
+  }, []);
+
+  // The Windows menu bar: each choice runs the same action as the palette or a key.
+  const [settingsPage, setSettingsPage] = useState<string | undefined>(undefined);
+  const menuRef = useRef<(id: string) => void>(() => {});
+  menuRef.current = (id: string) => {
+    const palette = (pid: string) => commands.find((c) => c.id === pid)?.run();
+    const toService = () => setActiveTab("service");
+    switch (id) {
+      case "file.service": return palette("service");
+      case "file.import": return palette("import");
+      case "file.backups": return palette("backups");
+      case "file.outputs": return palette("outputs");
+      case "file.settings": return palette("settings");
+      case "file.exit": return void import("@tauri-apps/api/window").then(({ getCurrentWindow }) => getCurrentWindow().close());
+      case "edit.newsong": return palette("new-song");
+      case "edit.find": return palette("song-search");
+      case "edit.quick": return palette("quick");
+      case "edit.palette": return setLayer("palette");
+      case "live.go": return toService(), void goLive();
+      case "live.next": return toService(), step(1);
+      case "live.previous": return toService(), step(-1);
+      case "live.nextitem": return toService(), void stepSchedule(1);
+      case "live.previousitem": return toService(), void stepSchedule(-1);
+      case "live.blank": return void setMode("blank");
+      case "live.logo": return void setMode("logo");
+      case "live.clear": return void setMode("clear");
+      case "live.resume": return void setMode("live");
+      case "live.timer": return palette("timer");
+      case "live.alert": return palette("alert");
+      case "live.music": return palette("music");
+      case "live.rehearsal": return palette("rehearsal");
+      case "profiles.manage": return palette("profiles");
+      case "view.dark": return setUiTheme("dark");
+      case "view.light": return setUiTheme("light");
+      case "view.system": return setUiTheme("system");
+      case "view.preview-list": return setPreviewView("list");
+      case "view.preview-pictures": return setPreviewView("thumbs");
+      case "view.live-list": return setLiveView("list");
+      case "view.live-pictures": return setLiveView("thumbs");
+      case "view.themes": return palette("themes");
+      case "view.media": return palette("media");
+      case "view.reset": return palette("reset-panes");
+      case "help.shortcuts": return setSettingsPage("keyboard"), openTab({ id: "settings" });
+      case "help.about": return setSettingsPage("about"), openTab({ id: "settings" });
+    }
+  };
+  useEffect(() => onMenu((id) => menuRef.current(id)), []);
 
   // Closing the window during a service asks first; cancelling leaves output unchanged.
   // Registered once (a fresh handler per state change leaked duplicates); reads the
@@ -581,6 +655,11 @@ export function Control() {
       liveItem={live?.item ?? null}
       dateLabel={service ? `${service.template ? "Template" : service.service_date ? niceDate(service.service_date) : ""}` : ""}
       onSelect={(i) => (setSelected(i), void load(schedule[i]))}
+      onActivate={(i) => {
+        setSelected(i);
+        pendingLive.current = { item: schedule[i], idx: 0 };
+        void load(schedule[i]);
+      }}
       onRemove={(i) => setSchedule((s) => s.filter((_, j) => j !== i))}
       onMove={(from, to) =>
         setSchedule((s) => {
@@ -641,7 +720,7 @@ export function Control() {
             </select>
           </label>
         )}
-        <ViewToggle value={slideView} onChange={setSlideView} />
+        <ViewToggle value={previewView} onChange={setPreviewView} />
       </header>
       {noteChip}
       <div className="ew-list">
@@ -649,7 +728,7 @@ export function Control() {
           <div className="wp-empty">
             <p>Select an item to preview.</p>
           </div>
-        ) : slideView === "list" ? (
+        ) : previewView === "list" ? (
           <SlideList slides={preview.slides} current={previewIdx} onPick={setPreviewIdx} onActivate={(i) => (setPreviewIdx(i), void goLive(i))} empty="This item has no slides." />
         ) : (
           <SlideGrid
@@ -758,7 +837,7 @@ export function Control() {
         <span className="wp-pane__sub" title={liveTitle}>
           {liveTitle}
         </span>
-        <ViewToggle value={slideView} onChange={setSlideView} />
+        <ViewToggle value={liveView} onChange={setLiveView} />
       </header>
       {heardChip}
       {speech?.listening && <div className="heard__caption" title="What the speech engine is hearing">{speech.caption ? `Hearing: ${speech.caption}` : `Listening (${speech.listening})…`}</div>}
@@ -771,14 +850,14 @@ export function Control() {
         </div>
       )}
       <div className="ew-list">
-        {slideView === "list" ? (
+        {liveView === "list" ? (
           <SlideList
             slides={gridSlides}
             current={latched ? -1 : rehearsal ? reh?.slide_idx ?? -1 : state?.slide_idx ?? -1}
             onPick={(i) => (latched ? say("Output is held. Choose Resume output first.", true) : show(i))}
             live
             confirmed={rehearsal ? reh?.mode === "live" : main.condition === "confirmed" && state?.mode === "live"}
-            empty={rehearsal ? "Rehearsal: stage an item in Preview, then Go live. Nothing reaches the screens." : "Nothing live yet. Stage an item in Preview, then Go live."}
+            empty={rehearsal ? "Rehearsal: stage an item in Preview, then Go live. Nothing reaches the screens." : "Nothing live yet. Double-click a slide in Preview or an item in the schedule, or press Go live (F5)."}
           />
         ) : (
           <SlideGrid
@@ -1034,7 +1113,7 @@ export function Control() {
             className="wp-btn wp-btn--primary"
             onClick={() => void goLive()}
             disabled={!canGoLive}
-            title={main.condition === "none" ? "Set up a main display first" : latched ? "Resume output first" : "Send the staged slide to the screens (F5)"}
+            title={latched ? "Resume output first" : main.condition === "none" ? "No projector connected: the slide shows in Live only (F5)" : "Send the staged slide to the screens (F5)"}
           >
             Go live <kbd>F5</kbd>
           </button>
@@ -1151,6 +1230,7 @@ export function Control() {
           />
         ) : editorTab?.id === "settings" ? (
           <Settings
+            initial={settingsPage}
             uiTheme={uiTheme}
             setUiTheme={setUiTheme}
             views={view}

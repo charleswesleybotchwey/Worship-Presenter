@@ -37,14 +37,20 @@ export function Settings({
   setUiTheme,
   views,
   mainLive,
+  initial,
 }: {
   uiTheme: "dark" | "light" | "system";
   setUiTheme: (t: "dark" | "light" | "system") => void;
   views: (role: string) => OutputView;
   mainLive: boolean;
   onOpenOutputs?: () => void;
+  /** Open at this page (the Help menu's About and Keyboard shortcuts). */
+  initial?: string;
 }) {
-  const [cat, setCat] = useState<Cat>("appearance");
+  const [cat, setCat] = useState<Cat>(() => (initial as Cat) || "appearance");
+  useEffect(() => {
+    if (initial) setCat(initial as Cat);
+  }, [initial]);
   const [depth, setDepth] = useState(() => localStorage.getItem("wp-depth") || "3d");
   const [prefs, setPrefs] = usePrefs();
   const [core, setCore] = useState<Record<string, string>>({});
@@ -255,6 +261,8 @@ function NdiPanel() {
   const [st, setSt] = useState<NdiStatus | null>(null);
   const [name, setName] = useState("Worship Presenter Lower Third");
   const [fps, setFps] = useState(30);
+  const [groups, setGroups] = useState("");
+  const [drawing, setDrawing] = useState<"builtin" | "capture">("builtin");
   const [msg, setMsg] = useState<{ text: string; bad?: boolean } | null>(null);
   useEffect(() => {
     const load = () => api.ndiStatus().then(setSt).catch(() => {});
@@ -287,12 +295,26 @@ function NdiPanel() {
       <p className="wp-note">
         {st?.runtime ? `NDI Runtime ${st.runtime}.` : st?.problem ?? "Checking for the NDI Runtime…"} NDI® is a registered trademark of Vizrt NDI AB.
       </p>
+      {!st?.runtime && (
+        <Row name="NDI Runtime" hint="Free from NDI. Install it, then restart Worship Presenter.">
+          <button className="wp-btn" onClick={() => go(api.openNdiRuntimePage, "The NDI download page is open in your browser.")}>
+            Get the NDI Runtime
+          </button>
+        </Row>
+      )}
+      <Row name="NDI groups" hint="Optional, e.g. Church. Receivers must be in the same group to see the sources. Empty: everyone on the network.">
+        <input className="wp-input" value={groups} onChange={(e) => setGroups(e.target.value)} placeholder="Public" aria-label="NDI groups" />
+      </Row>
       <Row name="Test pattern" hint="Moving colour bars with a see-through half for 30 seconds. Checks OBS or vMix receives NDI, before anything else.">
         <button className="wp-btn" disabled={!st?.runtime || !!running("test")} onClick={() => go(() => api.ndiTestPattern("Worship Presenter Test", 30), "Sending “Worship Presenter Test” for 30 seconds. Add it as an NDI source in OBS or vMix.")}>
           {running("test") ? "Sending…" : "Send test pattern"}
         </button>
       </Row>
-      <Row name="Lower third over NDI" hint="The lower third with real transparency, for keying in OBS or vMix. Drawn off screen; no monitor needed.">
+      <Row name="Lower third over NDI" hint="The lower third with real transparency, for keying in OBS or vMix. No monitor or window needed. Sends 1 frame a second until a receiver connects.">
+        <select className="wp-input" value={drawing} onChange={(e) => setDrawing(e.target.value as "builtin" | "capture")} aria-label="How the lower third is drawn">
+          <option value="builtin">Built-in (exact transparency)</option>
+          <option value="capture">Window capture (fallback)</option>
+        </select>
         <input className="wp-input" value={name} onChange={(e) => setName(e.target.value)} aria-label="NDI name" />
         <select className="wp-input" value={fps} onChange={(e) => setFps(Number(e.target.value))} aria-label="Frames per second">
           {[25, 30, 50, 60].map((n) => (
@@ -306,7 +328,7 @@ function NdiPanel() {
             Stop
           </button>
         ) : (
-          <button className="wp-btn" disabled={!st?.runtime || !st?.capture_supported} onClick={() => go(() => api.ndiStart("lower_third", name, fps), `Sending “${name}”.`)}>
+          <button className="wp-btn" disabled={!st?.runtime || (drawing === "capture" && !st?.capture_supported)} onClick={() => go(() => api.ndiStart("lower_third", name, fps, groups, drawing), `Sending “${name}”${groups.trim() ? ` in the group “${groups.trim()}”` : ""}.`)}>
             Start
           </button>
         )}
@@ -317,14 +339,17 @@ function NdiPanel() {
             Stop
           </button>
         ) : (
-          <button className="wp-btn" disabled={!st?.runtime || !st?.capture_supported} onClick={() => go(() => api.ndiStart("main", "Worship Presenter Main", 30), "Sending “Worship Presenter Main”.")}>
+          <button className="wp-btn" disabled={!st?.runtime || !st?.capture_supported} onClick={() => go(() => api.ndiStart("main", "Worship Presenter Main", 30, groups, "capture"), "Sending “Worship Presenter Main”.")}>
             Start
           </button>
         )}
       </Row>
       {(st?.sources ?? []).filter((x) => x.source !== "test").map((x) => (
         <p key={x.source} className="wp-note wp-num">
-          {x.name}: {x.width}×{x.height}, {x.seconds ? (x.sent / x.seconds).toFixed(1) : "0"} fps sent, {x.seconds ? (x.captured / x.seconds).toFixed(1) : "0"} captures/s, {x.process_ms.toFixed(1)} ms per frame, {x.connections} receiver{x.connections === 1 ? "" : "s"}
+          <label className="wp-check" style={{ marginRight: 12 }} title="Sends everything this computer plays (music, video sound) with this NDI source">
+            <input type="checkbox" checked={!!x.audio} onChange={(e) => go(() => api.ndiAudio(x.source, e.target.checked), e.target.checked ? `The computer's sound now goes with “${x.name}”.` : "Sound stopped.")} /> With the computer's sound
+          </label>
+          {x.name}: {x.width}×{x.height}, {x.seconds ? (x.sent / x.seconds).toFixed(1) : "0"} fps sent, {x.seconds ? (x.captured / x.seconds).toFixed(1) : "0"} captures/s, {x.process_ms.toFixed(1)} ms per frame{x.connections ? "" : " (1 frame a second until someone connects)"}, {x.connections} receiver{x.connections === 1 ? "" : "s"}
         </p>
       ))}
       {msg && <p className={`wp-banner ${msg.bad ? "wp-banner--bad" : ""}`}>{msg.text}</p>}

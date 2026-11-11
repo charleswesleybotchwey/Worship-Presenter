@@ -24,6 +24,9 @@ import "./ui/tokens.css";
 import "./styles.css";
 import "./ui/shell.css";
 import "./ui/depth.css";
+import { installNativeGuard } from "./nativeGuard";
+
+installNativeGuard();
 
 // #/output/<role> renders an output window; anything else is the control window.
 const m = location.hash.match(/^#\/output\/([a-z_]+)/);

@@ -88,6 +88,9 @@ pub struct AppState {
     music: Mutex<Option<wp_audio::Music>>,
     speech: speech::Speech,
     pulpit: Mutex<std::collections::VecDeque<PulpitNote>>,
+    /// The latest live subtitle words and when they came (for the NDI renderer).
+    caption_now: Mutex<(String, Option<Instant>)>,
+    ndi_inputs: ndi::Inputs,
 }
 
 /// A point sent from the pulpit phone: kept as a slide in today's "Sermon notes" deck,
@@ -1388,6 +1391,7 @@ struct NdiSource {
     connections: u64,
     width: u64,
     height: u64,
+    audio: bool,
 }
 
 #[derive(Serialize)]
@@ -1425,6 +1429,7 @@ fn ndi_status(st: State<'_, AppState>) -> NdiStatus {
                 connections: ld(&s.connections),
                 width: ld(&s.width),
                 height: ld(&s.height),
+                audio: j.audio.is_some(),
             }
         })
         .collect();
@@ -1434,7 +1439,7 @@ fn ndi_status(st: State<'_, AppState>) -> NdiStatus {
 /// Sends a moving test pattern (with a see-through half) for `seconds`.
 #[tauri::command]
 fn ndi_test_pattern(st: State<'_, AppState>, name: String, seconds: Option<u64>) -> Res<()> {
-    let (slot, _stats, stop) = st.ndi.start_pump("test", &name, 30)?;
+    let (slot, _stats, stop) = st.ndi.start_pump("test", &name, None, 30)?;
     ndi::run_test_pattern(slot, stop, seconds.unwrap_or(30));
     Ok(())
 }
@@ -1442,17 +1447,26 @@ fn ndi_test_pattern(st: State<'_, AppState>, name: String, seconds: Option<u64>)
 /// Starts an NDI source. "lower_third": an off-screen keyed window; "main": the
 /// open main output window as it is.
 #[tauri::command]
-async fn ndi_start(app: AppHandle, source: String, name: String, fps: Option<u32>) -> Res<()> {
+async fn ndi_start(app: AppHandle, source: String, name: String, fps: Option<u32>, groups: Option<String>, renderer: Option<String>) -> Res<()> {
     let st = app.state::<AppState>();
-    if !cfg!(windows) {
-        return Err("Capturing a window for NDI works on Windows only in this version. The test pattern works everywhere.".into());
-    }
     let fps = fps.unwrap_or(30).clamp(10, 60);
+    let default_name = if source == "main" { "Worship Presenter Main" } else { "Worship Presenter Lower Third" };
+    let name = if name.trim().is_empty() { default_name.to_string() } else { name.trim().to_string() };
+    let groups = groups.filter(|g| !g.trim().is_empty());
+    // the lower third is drawn by the built-in renderer unless window capture is chosen
+    if source == "lower_third" && renderer.as_deref() != Some("capture") {
+        let (slot, stats, stop) = st.ndi.start_pump(&source, &name, groups.as_deref(), fps)?;
+        ndi::run_builtin(app.clone(), slot, stats, stop);
+        return Ok(());
+    }
+    if !cfg!(windows) {
+        return Err("Window capture for NDI works on Windows only. Use the built-in renderer for the lower third.".into());
+    }
     let label = match source.as_str() {
         "lower_third" => {
             // 1920×1080 window drawn on the key colour, kept off the visible desktop
             let w = WebviewWindowBuilder::new(&app, "output-ndi", WebviewUrl::App("index.html#/output/ndi".into()))
-            .additional_browser_args(BROWSER_ARGS)
+                .additional_browser_args(BROWSER_ARGS)
                 .title("Worship Presenter – NDI lower third")
                 .decorations(false)
                 .skip_taskbar(true)
@@ -1468,21 +1482,232 @@ async fn ndi_start(app: AppHandle, source: String, name: String, fps: Option<u32
         "main" => "output-main",
         other => return Err(format!("Unknown NDI source {other}")),
     };
-    let default_name = if source == "main" { "Worship Presenter Main" } else { "Worship Presenter Lower Third" };
-    let name = if name.trim().is_empty() { default_name.to_string() } else { name.trim().to_string() };
     #[cfg(windows)]
     {
         let win = app.get_webview_window(label).ok_or_else(|| "Open the main output first (Output setup).".to_string())?;
         let hwnd = win.hwnd().map_err(err)?.0 as *mut std::ffi::c_void;
-        let (slot, stats, _stop) = st.ndi.start_pump(&source, &name, fps)?;
+        let (slot, stats, _stop) = st.ndi.start_pump(&source, &name, groups.as_deref(), fps)?;
         let running = ndi::capture::start(hwnd, slot, stats, source == "lower_third")?;
         if let Some(j) = st.ndi.jobs.lock().unwrap().get_mut(&source) {
             j.capture = Some(running);
         }
     }
     #[cfg(not(windows))]
-    let _ = (label, name, fps, &st);
+    let _ = (label, name, fps, &st, groups);
     Ok(())
+}
+
+/// What the NDI lower third shows now (the same rules as the lower-third output):
+/// song and scripture words; nothing for media, announcements, Blank, Logo or held.
+pub(crate) fn ndi_content(st: &AppState) -> (wp_render::Content, serde_json::Value, String, bool) {
+    let live = st.live.lock().unwrap().clone();
+    let item = st.item.lock().unwrap().clone();
+    let slides = st.slides.lock().unwrap().clone();
+    let caption = st.caption.lock().unwrap().clone();
+    let rev = *st.theme_rev.lock().unwrap();
+    let (theme, clock_now) = {
+        let conn = st.db.lock().unwrap();
+        let t = wp_core::themes::list(&conn).ok().and_then(|rows| rows.into_iter().filter(|r| r.kind == "lower_third").max_by_key(|r| r.is_default).map(|r| r.theme));
+        let now: String = conn.query_row("SELECT strftime('%H:%M', 'now', 'localtime')", [], |r| r.get(0)).unwrap_or_default();
+        (t, now)
+    };
+    let theme = theme.unwrap_or_else(|| serde_json::json!({ "background": { "kind": "transparent" }, "layers": [] }));
+    let mut c = wp_render::Content { clock: clock_now, ..Default::default() };
+    let words = matches!(item, Some(ProgramItem::Song { .. }) | Some(ProgramItem::Scripture { .. }));
+    let showing = matches!(live.mode, Mode::Live | Mode::Clear);
+    if words && showing {
+        if let Some(s) = slides.get(live.slide_idx) {
+            c.primary = s.primary.clone();
+            c.second = s.second.clone();
+            if let Some(ProgramItem::Song { .. }) = item {
+                c.section = Some(section_name(&s.label));
+                c.title = caption.clone();
+            } else {
+                c.reference = caption.clone();
+            }
+        }
+        c.hide_text = live.mode == Mode::Clear;
+    }
+    c.alert = live.alert.as_ref().filter(|a| a.on_stream).map(|a| a.text.clone());
+    if matches!(live.subtitles.as_deref(), Some("stream") | Some("both")) {
+        let (text, at) = st.caption_now.lock().unwrap().clone();
+        if at.map_or(false, |t| t.elapsed().as_secs() < 6) {
+            c.subtitle = Some(text);
+        }
+    }
+    let clock = theme.to_string().contains("\"clock\"");
+    let sig = format!("{}|{}|{:?}|{:?}|{:?}|{:?}|{}", live.revision, rev, c.primary, c.alert, c.subtitle, c.reference, c.hide_text);
+    (c, theme, sig, clock)
+}
+
+fn pct_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(if b[i] == b'+' { b' ' } else { b[i] });
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// "V2" → "Verse 2", "C" → "Chorus" (as the screens label sections).
+fn section_name(label: &str) -> String {
+    let letters: String = label.chars().take_while(|c| c.is_ascii_alphabetic()).collect();
+    let num = &label[letters.len()..];
+    let word = match letters.as_str() {
+        "V" => "Verse",
+        "C" => "Chorus",
+        "B" => "Bridge",
+        "PC" => "Pre-chorus",
+        "T" => "Tag",
+        "E" => "Ending",
+        "I" => "Intro",
+        "O" => "Outro",
+        _ => return label.to_string(),
+    };
+    if num.is_empty() { word.to_string() } else { format!("{word} {num}") }
+}
+
+/// NDI sources on the network, for the Camera panel.
+#[tauri::command]
+async fn ndi_sources(app: AppHandle, groups: Option<String>) -> Res<Vec<wp_core::ndi::sdk::Source>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let st = app.state::<AppState>();
+        let rt = st.ndi.runtime()?;
+        let own: Vec<String> = st.ndi.jobs.lock().unwrap().values().map(|j| j.name.clone()).collect();
+        // leave out this computer's own outputs
+        Ok(rt.find_sources(groups.as_deref(), 1500).into_iter().filter(|s| !own.iter().any(|o| s.name.ends_with(&format!("({o})")))).collect())
+    })
+    .await
+    .map_err(err)?
+}
+
+/// Sends (or stops sending) the computer's sound with an NDI source.
+#[tauri::command]
+fn ndi_audio(st: State<'_, AppState>, source: String, on: bool) -> Res<()> {
+    let mut jobs = st.ndi.jobs.lock().unwrap();
+    let job = jobs.get_mut(&source).ok_or("Start that NDI source first.")?;
+    if let Some(a) = job.audio.take() {
+        a.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    if on {
+        job.audio = Some(ndi::start_audio(job.sender.clone())?);
+    }
+    Ok(())
+}
+
+/// The Windows title bar follows the app's Dark/Light choice; on Windows 11 the
+/// window gets the Mica backdrop in the same shade (Windows 10 ignores it).
+#[tauri::command]
+fn set_window_look(app: AppHandle, dark: bool) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.set_theme(Some(if dark { tauri::Theme::Dark } else { tauri::Theme::Light }));
+        let effect = if dark { tauri::window::Effect::MicaDark } else { tauri::window::Effect::MicaLight };
+        let _ = w.set_effects(tauri::window::EffectsBuilder::new().effect(effect).build());
+        let _ = w.set_background_color(Some(if dark { tauri::window::Color(25, 25, 24, 255) } else { tauri::window::Color(247, 247, 245, 255) }));
+    }
+}
+
+/// The control window starts hidden and appears once its first frame is drawn.
+#[tauri::command]
+fn show_main_window(app: AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
+}
+
+/// The Windows menu bar of the control window. Shortcuts are shown beside each item
+/// but handled by the app's own keyboard code, so a key never acts twice.
+fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
+    let item = |id: &str, text: &str, keys: &str| {
+        let label = if keys.is_empty() { text.to_string() } else { format!("{text}\t{keys}") };
+        MenuItemBuilder::with_id(id, label).build(app)
+    };
+    let file = SubmenuBuilder::new(app, "&File")
+        .item(&item("file.service", "&Open or start a service order…", "")?)
+        .item(&item("file.import", "&Import songs or Bibles…", "")?)
+        .item(&item("file.backups", "&Backups…", "")?)
+        .separator()
+        .item(&item("file.outputs", "Output &setup…", "")?)
+        .item(&item("file.settings", "Se&ttings", "")?)
+        .separator()
+        .item(&item("file.exit", "E&xit", "Alt+F4")?)
+        .build()?;
+    let edit = SubmenuBuilder::new(app, "&Edit")
+        .item(&PredefinedMenuItem::cut(app, Some("Cu&t\tCtrl+X"))?)
+        .item(&PredefinedMenuItem::copy(app, Some("&Copy\tCtrl+C"))?)
+        .item(&PredefinedMenuItem::paste(app, Some("&Paste\tCtrl+V"))?)
+        .item(&PredefinedMenuItem::select_all(app, Some("Select &all\tCtrl+A"))?)
+        .separator()
+        .item(&item("edit.find", "&Find a song", "Ctrl+F")?)
+        .item(&item("edit.quick", "&Quick scripture", "Ctrl+G")?)
+        .item(&item("edit.newsong", "&New song", "")?)
+        .separator()
+        .item(&item("edit.palette", "C&ommands…", "Ctrl+K")?)
+        .build()?;
+    let live = SubmenuBuilder::new(app, "&Live")
+        .item(&item("live.go", "&Go live", "F5")?)
+        .item(&item("live.next", "&Next slide", "→")?)
+        .item(&item("live.previous", "&Previous slide", "←")?)
+        .item(&item("live.nextitem", "Next &item", "PgDn")?)
+        .item(&item("live.previousitem", "Previous i&tem", "PgUp")?)
+        .separator()
+        .item(&item("live.blank", "&Blank", "B")?)
+        .item(&item("live.logo", "&Logo", "L")?)
+        .item(&item("live.clear", "&Clear text", "C")?)
+        .item(&item("live.resume", "&Resume", "")?)
+        .separator()
+        .item(&item("live.timer", "&Timer…", "")?)
+        .item(&item("live.alert", "&Alert…", "")?)
+        .item(&item("live.music", "Background &music…", "")?)
+        .separator()
+        .item(&item("live.rehearsal", "Re&hearsal mode", "")?)
+        .build()?;
+    let profiles = SubmenuBuilder::new(app, "&Profiles").item(&item("profiles.manage", "&Switch or manage profiles…", "")?).build()?;
+    let view = SubmenuBuilder::new(app, "&View")
+        .item(&item("view.dark", "&Dark", "")?)
+        .item(&item("view.light", "&Light", "")?)
+        .item(&item("view.system", "&Follow Windows", "")?)
+        .separator()
+        .item(&item("view.preview-list", "Preview as &list", "")?)
+        .item(&item("view.preview-pictures", "Preview as &pictures", "")?)
+        .item(&item("view.live-list", "Live as l&ist", "")?)
+        .item(&item("view.live-pictures", "Live as pi&ctures", "")?)
+        .separator()
+        .item(&item("view.themes", "&Themes", "")?)
+        .item(&item("view.media", "&Media library", "")?)
+        .item(&item("view.reset", "&Reset pane sizes", "")?)
+        .build()?;
+    let help = SubmenuBuilder::new(app, "&Help")
+        .item(&item("help.shortcuts", "&Keyboard shortcuts", "")?)
+        .separator()
+        .item(&item("help.about", "&About Worship Presenter", "")?)
+        .build()?;
+    MenuBuilder::new(app).items(&[&file, &edit, &live, &profiles, &view, &help]).build()
+}
+
+/// Opens NDI's official runtime download in the browser (this fixed address only).
+#[tauri::command]
+fn open_ndi_runtime_page() -> Res<()> {
+    let url = if cfg!(target_os = "macos") { "https://ndi.link/NDIRedistV6Apple" } else { "https://ndi.link/NDIRedistV6" };
+    let r = if cfg!(windows) {
+        std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", url]).spawn()
+    } else if cfg!(target_os = "macos") {
+        std::process::Command::new("open").arg(url).spawn()
+    } else {
+        std::process::Command::new("xdg-open").arg(url).spawn()
+    };
+    r.map(drop).map_err(|e| format!("Could not open the browser ({e}). The address is {url}"))
 }
 
 #[tauri::command]
@@ -1559,7 +1784,7 @@ fn set_repeat(app: AppHandle, st: State<'_, AppState>, label: Option<String>, to
 /// Browser arguments for every window (they must match across windows). Tauri's
 /// defaults, plus camera access for the app's own pages without a prompt that would
 /// appear on the projector (only the app's code runs there: see the CSP).
-pub(crate) const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --use-fake-ui-for-media-stream";
+pub(crate) const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --use-fake-ui-for-media-stream --disable-pinch";
 
 /// Moves the musicians' chords up or down (semitones) on the stage view.
 #[tauri::command]
@@ -1768,6 +1993,24 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            // the Windows menu bar on the control window only (outputs stay bare)
+            if let Some(main) = app.get_webview_window("main") {
+                if let Ok(menu) = build_menu(app.handle()) {
+                    let _ = main.set_menu(menu);
+                }
+                let h = app.handle().clone();
+                main.on_menu_event(move |_w, e| {
+                    let _ = h.emit_to("main", "menu", e.id().0.clone());
+                });
+                // never stay invisible: shown when the first frame is drawn, or after 4 s
+                let m2 = main.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_secs(4));
+                    if !m2.is_visible().unwrap_or(true) {
+                        let _ = m2.show();
+                    }
+                });
+            }
             let root = app.path().app_data_dir()?.join("profiles");
             std::fs::create_dir_all(&root)?;
             let slug = wp_core::profiles::ensure_default(&root)?;
@@ -1803,6 +2046,8 @@ pub fn run() {
                 music: Mutex::new(None),
                 speech: speech::Speech::default(),
                 pulpit: Mutex::new(Default::default()),
+                caption_now: Mutex::new((String::new(), None)),
+                ndi_inputs: ndi::Inputs::default(),
             });
             // weekly automatic backup, taken quietly at start-up
             if let Some(s) = app.try_state::<AppState>() {
@@ -1816,8 +2061,24 @@ pub fn run() {
             std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_millis(1200));
                 let Some(st) = h2.try_state::<AppState>() else { return };
-                let cfgs = wp_core::options::outputs(&st.db.lock().unwrap()).unwrap_or_default();
-                let names: Vec<String> = h2.available_monitors().unwrap_or_default().iter().map(|m| m.name().cloned().unwrap_or_default()).collect();
+                let mut cfgs = wp_core::options::outputs(&st.db.lock().unwrap()).unwrap_or_default();
+                let monitors = h2.available_monitors().unwrap_or_default();
+                let names: Vec<String> = monitors.iter().map(|m| m.name().cloned().unwrap_or_default()).collect();
+                // First run with a projector or TV connected (as EasyWorship does): the main
+                // output goes on the first monitor that is not the operator's own screen,
+                // and is remembered and shown at every start from then on.
+                let primary = h2.primary_monitor().ok().flatten().map(|m| *m.position());
+                if let Some(main) = cfgs.iter_mut().find(|c| c.role == "main") {
+                    let never_set = main.display_index.is_none() && main.display_name.is_none();
+                    if never_set && monitors.len() > 1 {
+                        if let Some(i) = monitors.iter().position(|m| Some(*m.position()) != primary) {
+                            main.display_index = Some(i);
+                            main.display_name = monitors[i].name().cloned();
+                            main.show_on_startup = true;
+                            let _ = wp_core::options::save_output(&st.db.lock().unwrap(), main);
+                        }
+                    }
+                }
                 for c in cfgs.into_iter().filter(|c| c.show_on_startup) {
                     if let Some(i) = wp_core::options::pick_display(&c, &names) {
                         st.outputs.lock().unwrap().insert(c.role.clone(), Some(i));
@@ -1873,6 +2134,23 @@ pub fn run() {
         })
         // closing the control window ends Worship Presenter: outputs, music, the phone
         // remote and the watchdog go with it (they used to keep running with no window)
+        // screens fetch the newest picture of an NDI source here (ndi://localhost/frame/…)
+        .register_asynchronous_uri_scheme_protocol("ndi", |ctx, request, responder| {
+            let app = ctx.app_handle().clone();
+            std::thread::spawn(move || {
+                let uri = request.uri();
+                let path = uri.path().trim_start_matches('/');
+                let name = path.strip_prefix("frame/").map(pct_decode).unwrap_or_default();
+                let url = uri.query().and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("url="))).map(pct_decode).unwrap_or_default();
+                let st = app.state::<AppState>();
+                let body = if name.is_empty() { None } else { st.ndi_inputs.frame(&st.ndi, &name, &url) };
+                let resp = match body {
+                    Some(jpeg) => tauri::http::Response::builder().status(200).header("Content-Type", "image/jpeg").header("Cache-Control", "no-store").body(jpeg),
+                    None => tauri::http::Response::builder().status(404).header("Cache-Control", "no-store").body(Vec::new()),
+                };
+                responder.respond(resp.unwrap_or_default());
+            });
+        })
         .on_window_event(|window, event| {
             if window.label() == "main" {
                 if let tauri::WindowEvent::Destroyed = event {
@@ -1988,6 +2266,11 @@ pub fn run() {
             ndi_status,
             ndi_test_pattern,
             ndi_start,
+            open_ndi_runtime_page,
+            ndi_audio,
+            set_window_look,
+            show_main_window,
+            ndi_sources,
             ndi_stop,
             list_announcements,
             get_announcement,

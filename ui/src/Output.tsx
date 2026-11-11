@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, onCaption, onHeartbeat, onIdentify, onLive, onOutputConfigChanged, onSettingsChanged, type Broadcast, type OutputConfig } from "./api";
 import { SlideView } from "./SlideView";
+import { NdiFeed } from "./NdiFeed";
 import { useThemes } from "./theme/store";
 import { StageView } from "./StageView";
 import { AlertOverlay, TimerOverlay } from "./Cues";
@@ -203,6 +204,11 @@ function Subtitles() {
 
 /** A live camera (USB, or a capture card that Windows shows as a camera). */
 function CameraFeed({ cam, corner }: { cam: { device_id: string; label: string; mode: string }; corner?: boolean }) {
+  if (cam.device_id.startsWith("ndi:")) return <NdiFeed id={cam.device_id} className={corner ? "camfeed camfeed--corner" : "camfeed"} />;
+  return <DeviceCamera cam={cam} corner={corner} />;
+}
+
+function DeviceCamera({ cam, corner }: { cam: { device_id: string; label: string; mode: string }; corner?: boolean }) {
   const ref = useRef<HTMLVideoElement>(null);
   const [problem, setProblem] = useState<string | null>(null);
   useEffect(() => {

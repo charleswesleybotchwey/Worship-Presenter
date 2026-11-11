@@ -43,7 +43,8 @@
   --wp-danger: #973a38;
 }
 :root {
-  --wp-font: "Inter Variable", Inter, "Noto Sans", "Segoe UI", sans-serif;
+  /* Windows' own interface font (Segoe UI Variable on Windows 11); slides keep theirs */
+  --wp-font: "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", "Inter Variable", Inter, "Noto Sans", sans-serif;
   --wp-text: 13px;
   --wp-lead: 20px;
   --wp-small: 12px;

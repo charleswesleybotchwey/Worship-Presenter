@@ -16,6 +16,8 @@ tauri-build = { version = "2.7", features = [] }
 wp-core = { path = "../crates/wp-core" }
 wp-remote = { path = "../crates/wp-remote" }
 wp-audio = { path = "../crates/wp-audio" }
+wp-render = { path = "../crates/wp-render" }
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 fontdb = { version = "=0.23.0", default-features = false, features = ["std", "fs", "memmap"] }
 ttf-parser = "0.25"
 cpal = "=0.18.2"

@@ -471,3 +471,4 @@ button.lt-th:hover { color: var(--wp-ink); }
 .ft-pic { border-radius: 3px; overflow: hidden; background: #000; }
 .ft-name { display: flex; gap: 6px; align-items: flex-start; font-size: var(--wp-small); font-weight: 600; }
 .ft-kind { color: var(--wp-muted); font-size: 11px; padding-left: 22px; }
+.cam-preview { position: relative; } .cam-preview canvas { border-radius: inherit; }

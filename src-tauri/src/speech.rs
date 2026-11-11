@@ -53,8 +53,10 @@ impl Speech {
     /// Sends what is being said to the outputs as subtitles, when they are switched on.
     fn subtitle(app: &AppHandle, text: &str, done: bool) {
         use tauri::Emitter;
-        let on = app.state::<AppState>().live.lock().unwrap().subtitles.is_some();
+        let st = app.state::<AppState>();
+        let on = st.live.lock().unwrap().subtitles.is_some();
         if on && !text.trim().is_empty() {
+            *st.caption_now.lock().unwrap() = (text.to_string(), Some(std::time::Instant::now()));
             let _ = app.emit("caption", serde_json::json!({ "text": text, "final": done }));
         }
     }

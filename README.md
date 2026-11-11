@@ -502,6 +502,61 @@ EasyWorship text effects and transitions). Fonts must be installed on this compu
 missing one is replaced by Noto Sans. Tested with a real EasyWorship theme (BLACK) and a
 ProPresenter pack of 17 themes (123 designs).
 
+## NDI: built-in renderer (learned from FreeShow)
+
+FreeShow draws its NDI output with Electron's offscreen rendering (a hidden window
+painted into memory with real transparency) and sends it from a background worker.
+Tauri's WebView2 has no offscreen rendering, so Worship Presenter does the same job
+another way:
+- The lower third is drawn by a built-in renderer (crates/wp-render) straight from the
+  theme: exact transparency (no green keying), no window, about 23 ms a frame, and only
+  when something changes. Same rules as the lower-third output: song and scripture words,
+  section labels, alert band and live subtitles; nothing for media, announcements, Blank,
+  Logo or held output. Noto Sans is built in (ɛ ɔ ŋ and tone marks); other fonts come
+  from the computer. Video backgrounds, tickers and animations are not drawn.
+- Window capture stays as a fallback (Settings → Outputs → NDI → Drawing), and is still
+  how "Main over NDI" is sent.
+- Like FreeShow: 1 frame a second while no receiver is connected, full rate once OBS or
+  vMix connects; frames go out in NDI's own UYVA layout (BT.709 video levels, separate
+  alpha); always the newest frame; NDI groups; "Get the NDI Runtime" when it is missing.
+- Sound over NDI: tick "With the computer's sound" on a running NDI source (Settings →
+  Outputs → NDI) to send everything this computer plays (music, video sound) with it.
+  Windows records it as loopback from the default sound output; the room still hears it.
+- NDI sources as inputs: Camera (service bar) → "Look for NDI sources" lists network
+  cameras, other computers and OBS outputs next to the USB cameras; choose one and show it
+  full screen, behind the words or in the corner, exactly like a USB camera. Screens fetch
+  its newest picture from the app (ndi://, JPEG up to 1280 wide); a source is received
+  only while a screen shows it, and stops 10 s after.
+Noto Sans: SIL Open Font License (crates/wp-render/fonts/OFL.txt).
+
+## EasyWorship-style operation (11 Nov 2026)
+
+- On opening, a connected projector or TV is found: the first time, the main output goes
+  on the first monitor that is not your own screen, is remembered, and shows at every
+  start (Options → outputs to change it). With one screen only, nothing opens on it.
+- Go live works with no projector too: the slide shows in Live (as in EasyWorship).
+- Double-click a schedule item: it goes live. Double-click a Preview slide or the
+  Preview picture: it goes live. Double-click in the library: it goes to Preview.
+- Arrow keys drive Live from anywhere you are not typing: → or ↓ next slide, ← or ↑
+  previous, Page Down/Up next/previous schedule item. Blank, Logo, Clear and the number
+  keys still need the Live monitor selected, so a stray letter never changes the screens.
+- Preview and Live each keep their own List/Pictures view.
+
+## Feels like a Windows program
+
+Worship Presenter is a Tauri app: the engine is native Rust, and the interface is drawn by
+Microsoft WebView2 (the Edge engine built into Windows), like the new Teams and Outlook.
+Browser habits are switched off so it behaves like a Windows program:
+- No browser right-click menu (text fields keep Cut/Copy/Paste; the app's own menus stay),
+  no reload/print/find/view-source/back keys, no Ctrl+wheel, Ctrl +/− or pinch zoom, and
+  pictures cannot be dragged out (ui/src/nativeGuard.ts; --disable-pinch for WebView2).
+- A Windows menu bar on the control window: File, Edit, Live, Profiles, View, Help, with
+  each shortcut shown (the keys are handled once, by the app's keyboard code).
+- The title bar follows Dark/Light; on Windows 11 the window gets the Mica backdrop.
+- Segoe UI (Windows' own font) for the interface; slides keep their theme fonts.
+- The window opens on a dark background and appears once drawn (no white flash; shown
+  after 4 s at the latest).
+
 ## Security
 
 See docs/security/audit-2026-11-11.md: findings, fixes and what remains. Before each release run `cargo audit` and `npm audit` (in ui/).

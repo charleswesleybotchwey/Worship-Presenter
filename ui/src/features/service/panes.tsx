@@ -32,6 +32,7 @@ export function SchedulePane({
   selected,
   liveItem,
   onSelect,
+  onActivate,
   onRemove,
   onMove,
   onAddFromLibrary,
@@ -43,6 +44,8 @@ export function SchedulePane({
   selected: number | null;
   liveItem: ProgramItem | null;
   onSelect: (i: number) => void;
+  /** Double-click: straight to the screens (as in EasyWorship). */
+  onActivate?: (i: number) => void;
   onRemove: (i: number) => void;
   onMove: (from: number, to: number) => void;
   onAddFromLibrary: () => void;
@@ -101,7 +104,7 @@ export function SchedulePane({
                 tabIndex={selected === i || (selected == null && i === 0) ? 0 : -1}
                 className={`wp-row ${selected === i ? "is-selected" : ""}`}
                 draggable
-                title={itemTitle(it)}
+                title={onActivate ? `${itemTitle(it)} (double-click to go live)` : itemTitle(it)}
                 onDragStart={() => (drag.current = i)}
                 onDragOver={(e) => e.preventDefault()}
                 onDrop={(e) => {
@@ -109,6 +112,7 @@ export function SchedulePane({
                   if (drag.current !== null) onMove(drag.current, i);
                 }}
                 onClick={() => onSelect(i)}
+                onDoubleClick={onActivate ? () => onActivate(i) : undefined}
                 onKeyDown={(e) => {
                   if (e.altKey && e.key === "ArrowUp" && i > 0) return e.preventDefault(), onMove(i, i - 1);
                   if (e.altKey && e.key === "ArrowDown" && i < items.length - 1) return e.preventDefault(), onMove(i, i + 1);

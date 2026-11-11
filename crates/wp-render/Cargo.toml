@@ -1,0 +1,12 @@
+[package]
+name = "wp-render"
+description = "Worship Presenter's built-in renderer: draws a theme natively (for NDI with exact transparency)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+tiny-skia = "=0.11.4"
+cosmic-text = { version = "=0.18.2", default-features = false, features = ["std", "swash"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
