@@ -42,8 +42,17 @@ export function SlideView({
   muted = true,
   themeId,
   alpha,
+  position,
+  adjust,
+  copyright,
 }: {
+  /** The song's copyright line, for a theme's copyright layer. */
+  copyright?: string | null;
+  /** The Live pane's quick change for this item (words larger/smaller, up/down). */
+  adjust?: { scale: number; shift: number };
   slide?: Slide;
+  /** Whether this is its item's first / last slide (layers shown only there). */
+  position?: { first: boolean; last: boolean };
   kind?: "song" | "scripture" | "media" | "announcement";
   caption?: string | null;
   media?: MediaItem | null;
@@ -80,6 +89,6 @@ export function SlideView({
     if (look?.lowerThird || !media) return <ThemeView theme={{ ...theme, background: CLEAR, layers: [] }} data={{ primary: [], second: [] }} />;
     return <MediaView item={media} playing={playing} restart={restart} muted={muted} still={still} />;
   }
-  const data = { primary: slide.primary, second: slide.second, reference: kind === "scripture" ? caption : null, title: kind === "song" ? caption : null, section: kind === "song" ? sectionName(slide.label) : null };
+  const data = { primary: slide.primary, second: slide.second, reference: kind === "scripture" ? caption : null, title: kind === "song" ? caption : null, section: kind === "song" ? sectionName(slide.label) : null, first: position?.first, last: position?.last, textScale: adjust?.scale, textShift: adjust?.shift, rotateKey: caption ?? slide.label, copyright: kind === "song" ? copyright ?? null : null };
   return <ThemeView theme={theme} data={data} phase={phase} showKey={showKey} textKey={textKey} hideText={hideText} still={still} />;
 }

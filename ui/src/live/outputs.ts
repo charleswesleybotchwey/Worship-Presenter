@@ -33,7 +33,23 @@ export function useLive() {
       setLive(b);
     }).then((u) => (stop = u));
     api.resync().catch(() => {}); // a recreated control window asks for a fresh snapshot
-    const poll = setInterval(() => api.outputStatus().then(setStatus).catch(() => {}), 400);
+    // redraw only when something shown changes (it used to redraw the whole service
+    // window 2.5 times a second): revision, monitor, lost or not; while an output is
+    // still catching up, keep refreshing so "sending" can become "not confirmed"
+    let sig = "";
+    const poll = setInterval(
+      () =>
+        api
+          .outputStatus()
+          .then((st) => {
+            const want = history.current[history.current.length - 1]?.state.revision ?? 0;
+            const behind = st.some((x) => x.revision < want);
+            const next = JSON.stringify(st.map((x) => [x.role, x.display_index, x.revision, x.silent_secs > 3])) + (behind ? Date.now() : "");
+            if (next !== sig) (sig = next), setStatus(st);
+          })
+          .catch(() => {}),
+      400,
+    );
     return () => (stop(), clearInterval(poll));
   }, []);
 

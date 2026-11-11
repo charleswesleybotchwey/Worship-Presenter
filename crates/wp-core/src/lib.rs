@@ -25,6 +25,7 @@ pub mod songs;
 pub mod speech_ref;
 pub mod splitter;
 pub mod text;
+pub mod theme_rules;
 pub mod themes;
 
 pub use error::{Error, Result};

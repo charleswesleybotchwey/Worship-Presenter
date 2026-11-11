@@ -1,0 +1,157 @@
+{
+ "schema_version": 1,
+ "name": "Announcements – bold",
+ "kind": "announcement",
+ "background": {
+  "kind": "gradient",
+  "color": "#000000",
+  "image": null,
+  "fit": "cover",
+  "dim": 0,
+  "gradient": {
+   "from": "brand:1",
+   "to": "brand:4",
+   "angle": 135
+  }
+ },
+ "transition": {
+  "kind": "zoom",
+  "ms": 350
+ },
+ "layers": [
+  {
+   "id": "rule",
+   "name": "Accent",
+   "kind": "shape",
+   "shape": "rect",
+   "x": 6,
+   "y": 30,
+   "w": 10,
+   "h": 0.8,
+   "opacity": 1,
+   "hidden": false,
+   "locked": false,
+   "onlyOn": null,
+   "fill": "brand:2",
+   "radius": 0,
+   "border": {
+    "color": "#ffffff00",
+    "width": 0
+   },
+   "animIn": {
+    "kind": "fade",
+    "ms": 300,
+    "delay": 0
+   },
+   "animOut": {
+    "kind": "fade",
+    "ms": 200,
+    "delay": 0
+   }
+  },
+  {
+   "id": "title",
+   "name": "Title",
+   "kind": "text",
+   "field": "title",
+   "text": "",
+   "x": 6,
+   "y": 12,
+   "w": 88,
+   "h": 17,
+   "solo": null,
+   "opacity": 1,
+   "hidden": false,
+   "locked": false,
+   "onlyOn": null,
+   "style": {
+    "font": "brand-heading",
+    "size": 8,
+    "weight": 800,
+    "italic": false,
+    "color": "brand:3",
+    "align": "left",
+    "valign": "bottom",
+    "lineHeight": 1.2,
+    "letterSpacing": 0,
+    "uppercase": true,
+    "autoFit": true,
+    "minSize": 3.5,
+    "shadow": {
+     "on": true,
+     "color": "#000000b3",
+     "blur": 0.6,
+     "x": 0,
+     "y": 0.25
+    },
+    "outline": {
+     "on": false,
+     "color": "#000000",
+     "width": 0.15
+    }
+   },
+   "animIn": {
+    "kind": "fade",
+    "ms": 300,
+    "delay": 0
+   },
+   "animOut": {
+    "kind": "fade",
+    "ms": 200,
+    "delay": 0
+   }
+  },
+  {
+   "id": "body",
+   "name": "Details",
+   "kind": "text",
+   "field": "lyrics",
+   "text": "",
+   "x": 6,
+   "y": 34,
+   "w": 88,
+   "h": 56,
+   "solo": null,
+   "opacity": 1,
+   "hidden": false,
+   "locked": false,
+   "onlyOn": null,
+   "style": {
+    "font": "brand",
+    "size": 5,
+    "weight": 500,
+    "italic": false,
+    "color": "brand:3",
+    "align": "left",
+    "valign": "top",
+    "lineHeight": 1.35,
+    "letterSpacing": 0,
+    "uppercase": false,
+    "autoFit": true,
+    "minSize": 3.5,
+    "shadow": {
+     "on": true,
+     "color": "#000000b3",
+     "blur": 0.6,
+     "x": 0,
+     "y": 0.25
+    },
+    "outline": {
+     "on": false,
+     "color": "#000000",
+     "width": 0.15
+    }
+   },
+   "animIn": {
+    "kind": "fade",
+    "ms": 300,
+    "delay": 0
+   },
+   "animOut": {
+    "kind": "fade",
+    "ms": 200,
+    "delay": 0
+   }
+  }
+ ]
+}

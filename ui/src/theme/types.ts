@@ -38,7 +38,26 @@ export interface TextStyle {
   minSize: number;
   shadow: { on: boolean; color: string; blur: number; x: number; y: number };
   outline: { on: boolean; color: string; width: number };
+  /** Words filled with a gradient instead of one colour. */
+  gradient?: Gradient | null;
+  /** ProPresenter-style box behind the words that grows with them. "block": one box
+   *  around all the text; "lines": a strip behind each line. Sizes are % of height. */
+  box?: TextBox;
 }
+
+export interface TextBox {
+  mode: "off" | "block" | "lines";
+  color: string;
+  padX: number;
+  padY: number;
+  radius: number;
+  /** Glide to the new size when the words change. */
+  animate: boolean;
+  /** Frosted glass: blur what is behind the box (% of height; 0 = off). */
+  blur?: number;
+}
+
+export const BOX_DEFAULT: TextBox = { mode: "off", color: "#000000d9", padX: 2, padY: 1, radius: 0.6, animate: true };
 
 interface LayerBase extends Rect {
   id: string;
@@ -46,6 +65,8 @@ interface LayerBase extends Rect {
   opacity: number;
   hidden: boolean;
   locked: boolean;
+  /** Show this layer on every slide (default), or only on an item's first or last slide. */
+  onlyOn?: "first" | "last" | null;
   animIn: Anim;
   animOut: Anim;
 }
@@ -59,10 +80,20 @@ export interface TextLayer extends LayerBase {
   style: TextStyle;
 }
 
+/** A two-colour gradient; angle in degrees (0 = upwards, 90 = to the right, as CSS). */
+export interface Gradient {
+  from: string;
+  to: string;
+  angle: number;
+}
+export const gradientCss = (g: Gradient) => `linear-gradient(${g.angle}deg, ${g.from}, ${g.to})`;
+
 export interface ShapeLayer extends LayerBase {
   kind: "shape";
   shape: "rect";
   fill: string;
+  /** Overrides the fill colour when set. */
+  gradient?: Gradient | null;
   radius: number;
   border: { color: string; width: number };
 }
@@ -88,9 +119,40 @@ export interface Theme {
   name: string;
   kind: ThemeKind;
   /** image/video/poster: a data: URL, or "media:<path>" for a file in the media library. */
-  background: { kind: "color" | "image" | "video" | "transparent"; color: string; image: string | null; video?: string | null; poster?: string | null; fit: "cover" | "contain"; dim: number };
-  transition: { kind: "cut" | "fade"; ms: number };
+  background: {
+    kind: "color" | "image" | "video" | "transparent" | "gradient";
+    color: string;
+    image: string | null;
+    video?: string | null;
+    poster?: string | null;
+    fit: "cover" | "contain";
+    dim: number;
+    gradient?: Gradient | null;
+    /** More moving backgrounds that take turns with the main one. */
+    set?: { video: string; poster: string | null }[];
+    /** When the turn passes: each song/reading gets its own, or one per service (day). */
+    rotate?: "item" | "service";
+  };
+  transition: { kind: "cut" | "fade" | "slide-up" | "wipe" | "zoom" | "push"; ms: number };
   layers: Layer[];
+  /** Choruses, bridges… styled apart from the verses. */
+  sections?: Partial<Record<SectionKind, SectionStyle>>;
+}
+
+/** How a chorus, bridge… looks different from the verses (song themes). */
+export interface SectionStyle {
+  italic?: boolean;
+  color?: string | null;
+  weight?: number | null;
+}
+export type SectionKind = "chorus" | "bridge" | "pre-chorus" | "tag" | "ending";
+
+/** "Chorus 2" → chorus, "Pre-chorus" → pre-chorus; verses have no section style. */
+export function sectionKindOf(label: string | null | undefined): SectionKind | null {
+  const l = (label ?? "").toLowerCase();
+  if (l.startsWith("pre-chorus")) return "pre-chorus";
+  for (const k of ["chorus", "bridge", "tag", "ending"] as const) if (l.startsWith(k)) return k;
+  return null;
 }
 
 export interface ThemeRow {
@@ -175,6 +237,14 @@ export interface SlideData {
   second: string[];
   /** "Verse 1", "Chorus"… for songs (shown only by a section-label layer). */
   section?: string | null;
+  /** The slide is its item's first / last (for layers shown only there). */
+  first?: boolean;
+  last?: boolean;
+  /** The operator's quick change for this item: words larger (×) and moved (% of height). */
+  textScale?: number;
+  textShift?: number;
+  /** Picks the moving background from a set: the item's title (per song/reading). */
+  rotateKey?: string | null;
   reference?: string | null;
   title?: string | null;
   copyright?: string | null;

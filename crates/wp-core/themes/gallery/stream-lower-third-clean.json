@@ -1,0 +1,240 @@
+{
+ "schema_version": 1,
+ "name": "Stream lower third – clean",
+ "kind": "lower_third",
+ "background": {
+  "kind": "transparent",
+  "color": "#000000",
+  "image": null,
+  "fit": "cover",
+  "dim": 0,
+  "gradient": null
+ },
+ "transition": {
+  "kind": "fade",
+  "ms": 250
+ },
+ "layers": [
+  {
+   "id": "band",
+   "name": "Band",
+   "kind": "shape",
+   "shape": "rect",
+   "x": 0,
+   "y": 72,
+   "w": 100,
+   "h": 28,
+   "opacity": 1,
+   "hidden": false,
+   "locked": false,
+   "onlyOn": null,
+   "fill": "brand:4",
+   "radius": 0,
+   "border": {
+    "color": "#ffffff00",
+    "width": 0
+   },
+   "animIn": {
+    "kind": "fade",
+    "ms": 300,
+    "delay": 0
+   },
+   "animOut": {
+    "kind": "fade",
+    "ms": 200,
+    "delay": 0
+   },
+   "gradient": {
+    "from": "brand:4/f2",
+    "to": "brand:4/00",
+    "angle": 90
+   }
+  },
+  {
+   "id": "accent",
+   "name": "Accent",
+   "kind": "shape",
+   "shape": "rect",
+   "x": 4,
+   "y": 74,
+   "w": 0.5,
+   "h": 22,
+   "opacity": 1,
+   "hidden": false,
+   "locked": false,
+   "onlyOn": null,
+   "fill": "brand:2",
+   "radius": 0,
+   "border": {
+    "color": "#ffffff00",
+    "width": 0
+   },
+   "animIn": {
+    "kind": "fade",
+    "ms": 300,
+    "delay": 0
+   },
+   "animOut": {
+    "kind": "fade",
+    "ms": 200,
+    "delay": 0
+   }
+  },
+  {
+   "id": "lyrics",
+   "name": "Words",
+   "kind": "text",
+   "field": "lyrics",
+   "text": "",
+   "x": 6,
+   "y": 73,
+   "w": 80,
+   "h": 14,
+   "solo": null,
+   "opacity": 1,
+   "hidden": false,
+   "locked": false,
+   "onlyOn": null,
+   "style": {
+    "font": "brand",
+    "size": 4.4,
+    "weight": 700,
+    "italic": false,
+    "color": "brand:3",
+    "align": "left",
+    "valign": "middle",
+    "lineHeight": 1.2,
+    "letterSpacing": 0,
+    "uppercase": false,
+    "autoFit": true,
+    "minSize": 3.5,
+    "shadow": {
+     "on": true,
+     "color": "#000000b3",
+     "blur": 0.6,
+     "x": 0,
+     "y": 0.25
+    },
+    "outline": {
+     "on": false,
+     "color": "#000000",
+     "width": 0.15
+    }
+   },
+   "animIn": {
+    "kind": "fade",
+    "ms": 300,
+    "delay": 0
+   },
+   "animOut": {
+    "kind": "fade",
+    "ms": 200,
+    "delay": 0
+   }
+  },
+  {
+   "id": "second",
+   "name": "Second language",
+   "kind": "text",
+   "field": "second",
+   "text": "",
+   "x": 6,
+   "y": 87,
+   "w": 80,
+   "h": 9,
+   "solo": null,
+   "opacity": 1,
+   "hidden": false,
+   "locked": false,
+   "onlyOn": null,
+   "style": {
+    "font": "brand",
+    "size": 3.2,
+    "weight": 500,
+    "italic": true,
+    "color": "brand:2",
+    "align": "left",
+    "valign": "middle",
+    "lineHeight": 1.2,
+    "letterSpacing": 0,
+    "uppercase": false,
+    "autoFit": true,
+    "minSize": 3.5,
+    "shadow": {
+     "on": true,
+     "color": "#000000b3",
+     "blur": 0.6,
+     "x": 0,
+     "y": 0.25
+    },
+    "outline": {
+     "on": false,
+     "color": "#000000",
+     "width": 0.15
+    }
+   },
+   "animIn": {
+    "kind": "fade",
+    "ms": 300,
+    "delay": 0
+   },
+   "animOut": {
+    "kind": "fade",
+    "ms": 200,
+    "delay": 0
+   }
+  },
+  {
+   "id": "reference",
+   "name": "Reference",
+   "kind": "text",
+   "field": "reference",
+   "text": "",
+   "x": 70,
+   "y": 92,
+   "w": 26,
+   "h": 6,
+   "solo": null,
+   "opacity": 1,
+   "hidden": false,
+   "locked": false,
+   "onlyOn": null,
+   "style": {
+    "font": "brand-heading",
+    "size": 2.6,
+    "weight": 700,
+    "italic": false,
+    "color": "brand:3",
+    "align": "right",
+    "valign": "middle",
+    "lineHeight": 1.2,
+    "letterSpacing": 0,
+    "uppercase": false,
+    "autoFit": false,
+    "minSize": 3.5,
+    "shadow": {
+     "on": true,
+     "color": "#000000b3",
+     "blur": 0.6,
+     "x": 0,
+     "y": 0.25
+    },
+    "outline": {
+     "on": false,
+     "color": "#000000",
+     "width": 0.15
+    }
+   },
+   "animIn": {
+    "kind": "fade",
+    "ms": 300,
+    "delay": 0
+   },
+   "animOut": {
+    "kind": "fade",
+    "ms": 200,
+    "delay": 0
+   }
+  }
+ ]
+}

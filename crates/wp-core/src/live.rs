@@ -57,6 +57,10 @@ pub struct Camera {
     pub mode: String,
 }
 
+fn one() -> f32 {
+    1.0
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LiveState {
     pub revision: u64,
@@ -97,6 +101,12 @@ pub struct LiveState {
     /// Semitones the musicians' chords are moved up (+) or down (−) on the stage view.
     #[serde(default)]
     pub transpose: i8,
+    /// The operator's quick change for the current item only: words larger or smaller
+    /// (1.0 = as the theme says) and moved up (−) or down (+), in % of the screen height.
+    #[serde(default = "one")]
+    pub text_scale: f32,
+    #[serde(default)]
+    pub text_shift: f32,
     /// A camera on the main screen: full screen, behind the words, or in a corner.
     #[serde(default)]
     pub camera: Option<Camera>,
@@ -187,6 +197,8 @@ impl Default for LiveState {
             subtitles: None,
             camera: None,
             transpose: 0,
+            text_scale: 1.0,
+            text_shift: 0.0,
             state_version: STATE_VERSION,
         }
     }
@@ -212,6 +224,8 @@ pub enum Command {
     SetSubtitles { target: Option<String> },
     SetCamera { camera: Option<Camera> },
     SetTranspose { semitones: i8 },
+    /// Words larger/smaller and up/down for the current item (reset on the next item).
+    SetTextAdjust { scale: f32, shift: f32 },
 }
 
 impl LiveState {
@@ -254,6 +268,10 @@ impl LiveState {
             Command::SetRepeat { repeat } => n.repeat = repeat,
             Command::SetLiningOut { on } => n.lining_out = on,
             Command::SetTranspose { semitones } => n.transpose = semitones.clamp(-11, 11),
+            Command::SetTextAdjust { scale, shift } => {
+                n.text_scale = if scale.is_finite() { scale.clamp(0.6, 1.6) } else { 1.0 };
+                n.text_shift = if shift.is_finite() { shift.clamp(-30.0, 30.0) } else { 0.0 };
+            }
             Command::SetCamera { camera } => n.camera = camera.filter(|c| ["full", "behind", "corner"].contains(&c.mode.as_str())),
             Command::SetSubtitles { target } => n.subtitles = target.filter(|t| ["stream", "screens", "both"].contains(&t.as_str())),
             Command::SetStageMessage { message } => n.stage_message = message.map(|m| m.trim().to_string()).filter(|m| !m.is_empty()),
@@ -306,6 +324,21 @@ impl LiveState {
         s.state_version = STATE_VERSION;
         s.revision += 1;
         s
+    }
+}
+
+#[cfg(test)]
+mod adjust_tests {
+    use super::*;
+    #[test]
+    fn text_adjust_is_kept_in_range() {
+        let s = LiveState::default().apply(Command::SetTextAdjust { scale: 3.0, shift: -99.0 });
+        assert_eq!((s.text_scale, s.text_shift), (1.6, -30.0));
+        let s = s.apply(Command::SetTextAdjust { scale: f32::NAN, shift: 2.5 });
+        assert_eq!((s.text_scale, s.text_shift), (1.0, 2.5));
+        // an older saved state without these fields loads as "no change"
+        let old: LiveState = serde_json::from_str(&serde_json::to_string(&LiveState::default()).unwrap().replace("\"text_scale\":1.0,", "").replace("\"text_shift\":0.0,", "")).unwrap();
+        assert_eq!((old.text_scale, old.text_shift), (1.0, 0.0));
     }
 }
 

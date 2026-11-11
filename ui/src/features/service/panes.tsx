@@ -1,3 +1,4 @@
+import { dragItem, ItemMenu } from "../../dnd";
 import { useEffect, useRef, useState } from "react";
 import { api, pickPresentation, type Display, type MediaItem, type ProgramItem, type Slide, type SongHit, type Version } from "../../api";
 import { SlideView } from "../../SlideView";
@@ -406,7 +407,7 @@ export function SlideGrid({
                 </span>
               )}
             </span>
-            <SlideView slide={s} kind={kind} media={media} themeId={themeId} still />
+            <SlideView slide={s} position={{ first: i === 0, last: i === slides.length - 1 }} kind={kind} media={media} themeId={themeId} still />
           </button>
         );
       })}
@@ -495,6 +496,7 @@ export function AnnouncementList({
   const [decks, setDecks] = useState<import("../../api").DeckSummary[]>([]);
   const [templates, setTemplates] = useState<import("../../api").Deck[]>([]);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const [deckMenu, setDeckMenu] = useState<{ d: import("../../api").DeckSummary; x: number; y: number } | null>(null);
   const [active, setActive] = useState<number | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [report, setReport] = useState<{ text: string; lines: string[]; bad?: boolean } | null>(null);
@@ -547,7 +549,16 @@ export function AnnouncementList({
       )}
       <ul className="wp-rows" role="listbox" aria-label="Announcements">
         {decks.map((d) => (
-          <li key={d.id} role="option" aria-selected={active === d.id} className={`wp-row wp-row--lib ${active === d.id ? "is-selected" : ""}`} onClick={() => (setActive(d.id), onPreview(d))}>
+          <li
+            key={d.id}
+            role="option"
+            aria-selected={active === d.id}
+            className={`wp-row wp-row--lib ${active === d.id ? "is-selected" : ""}`}
+            draggable
+            onDragStart={(e) => dragItem(e, { kind: "announcement", presentation_id: d.id, title: d.title })}
+            onContextMenu={(e) => (e.preventDefault(), setActive(d.id), setDeckMenu({ d, x: e.clientX, y: e.clientY }))}
+            onClick={() => (setActive(d.id), onPreview(d))}
+          >
             <Icon name="slides" />
             <span className="wp-row__title">{d.title}</span>
             <span className="wp-row__meta">
@@ -581,6 +592,20 @@ export function AnnouncementList({
             </button>
           ))}
         </ContextMenu>
+      )}
+      {deckMenu && (
+        <ItemMenu
+          x={deckMenu.x}
+          y={deckMenu.y}
+          item={{ kind: "announcement", presentation_id: deckMenu.d.id, title: deckMenu.d.title }}
+          onClose={() => setDeckMenu(null)}
+          onPreview={() => onPreview(deckMenu.d)}
+          onAdd={() => onAdd(deckMenu.d)}
+        >
+          <button role="menuitem" onClick={() => (setDeckMenu(null), onEdit(deckMenu.d.id))}>
+            Edit
+          </button>
+        </ItemMenu>
       )}
     </>
   );

@@ -1,15 +1,18 @@
 import { useEffect, useState } from "react";
 import { api, pickCsvSave, type SpeechStatus, type NdiStatus, type RemoteStatus, type ServiceInterval, type UsageRow } from "../../api";
 import { OutputOptions } from "./OutputOptions";
+import { BRAND_DEFAULT, BRAND_NAMES, parseBrand, type Brand } from "../../theme/brand";
+import { FontPicker } from "../../theme/FontPicker";
 import { ACTION_NAMES, DEFAULT_KEYS, RESERVED, conflict, isSingleLetter, keyName, usePrefs, type Action } from "../../ui/prefs";
 import type { OutputView } from "../../live/outputs";
 
 // Settings (design brief §5): compact category list, one 680 px column of labelled
 // rows with short explanations.
 
-type Cat = "appearance" | "keyboard" | "projection" | "outputs" | "intervals" | "speech" | "remote" | "library" | "about";
+type Cat = "appearance" | "brand" | "keyboard" | "projection" | "outputs" | "intervals" | "speech" | "remote" | "library" | "about";
 const CATS: { id: Cat; label: string }[] = [
   { id: "appearance", label: "Appearance" },
+  { id: "brand", label: "Brand kit" },
   { id: "keyboard", label: "Keyboard" },
   { id: "projection", label: "Projection" },
   { id: "outputs", label: "Outputs" },
@@ -218,6 +221,7 @@ export function Settings({
 
           {cat === "remote" && <RemotePanel />}
 
+          {cat === "brand" && <BrandKit />}
           {cat === "library" && (
             <>
               <h2>Library</h2>
@@ -666,5 +670,51 @@ function SpeechPanel({ core, setCoreKey }: { core: Record<string, string>; setCo
       )}
       {(msg || st?.problem) && <p className={`wp-banner ${msg?.bad || (!msg && st?.problem) ? "wp-banner--bad" : ""}`}>{msg?.text ?? st?.problem}</p>}
     </>
+  );
+}
+
+/** The church's colours and fonts, used by every theme linked to them. */
+function BrandKit() {
+  const [b, setB] = useState<Brand>(BRAND_DEFAULT);
+  const [note, setNote] = useState<string | null>(null);
+  useEffect(() => {
+    api.getSettings().then((x) => setB(parseBrand(x))).catch(() => {});
+  }, []);
+  const save = async (n: Brand) => {
+    setB(n);
+    try {
+      await api.setSetting("brand_colors", JSON.stringify(n.colors));
+      await api.setSetting("brand_font", n.font);
+      await api.setSetting("brand_heading_font", n.heading);
+      setNote("Saved. Themes linked to the brand show the change everywhere.");
+    } catch (e) {
+      setNote(String(e instanceof Error ? e.message : e));
+    }
+  };
+  return (
+    <section>
+      <h2>Brand kit</h2>
+      <p className="wp-note">
+        Your church’s colours and fonts. In the theme editor, click a brand swatch next to any colour (or choose “Brand font”) to link it; changing the brand here then changes every
+        linked theme. Themes → right-click → “Re-colour to Brand” links a whole theme (handy for imported EasyWorship or ProPresenter themes).
+      </p>
+      {b.colors.map((c, i) => (
+        <Row key={i} name={`${BRAND_NAMES[i]} colour`} hint={["Bars, boxes and highlights", "Accents, lines, choruses and second language", "The words", "Dark areas and backgrounds"][i]}>
+          <input type="color" value={c} aria-label={`${BRAND_NAMES[i]} colour`} onChange={(e) => void save({ ...b, colors: b.colors.map((x, j) => (j === i ? e.target.value : x)) })} />
+        </Row>
+      ))}
+      <Row name="Text font" hint="For lyrics and scripture">
+        <FontPicker value={b.font} onChange={(font) => void save({ ...b, font })} />
+      </Row>
+      <Row name="Heading font" hint="For titles and section labels">
+        <FontPicker value={b.heading} onChange={(heading) => void save({ ...b, heading })} />
+      </Row>
+      <div className="brand-sample" style={{ background: b.colors[3], color: b.colors[2], borderLeft: `6px solid ${b.colors[1]}` }}>
+        <strong style={{ fontFamily: b.heading, color: b.colors[1] }}>MHB 1</strong>
+        <span style={{ fontFamily: b.font }}>O for a thousand tongues to sing</span>
+        <span style={{ background: b.colors[0], padding: "2px 8px", fontFamily: b.font }}>Meyi mo Pomfò ayɛw</span>
+      </div>
+      {note && <p className="wp-note">{note}</p>}
+    </section>
   );
 }

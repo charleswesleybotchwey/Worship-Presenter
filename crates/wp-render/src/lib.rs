@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, PixmapPaint, Rect, Stroke, Transform};
 
 /// What a slide shows.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Content {
     pub primary: Vec<String>,
     pub second: Vec<String>,
@@ -28,6 +28,92 @@ pub struct Content {
     pub hide_text: bool,
     pub alert: Option<String>,
     pub subtitle: Option<String>,
+    /// The operator's quick change for this item: 1.0 = the theme's size.
+    pub text_scale: f32,
+    /// Moved down (+) or up (−), in % of the height.
+    pub text_shift: f32,
+    /// The item's first / last slide (for layers shown only there).
+    pub first: bool,
+    pub last: bool,
+}
+
+impl Default for Content {
+    fn default() -> Self {
+        Content {
+            primary: vec![],
+            second: vec![],
+            reference: None,
+            title: None,
+            copyright: None,
+            section: None,
+            clock: String::new(),
+            hide_text: false,
+            alert: None,
+            subtitle: None,
+            text_scale: 1.0,
+            text_shift: 0.0,
+            first: true,
+            last: true,
+        }
+    }
+}
+
+/// The church's brand kit (Settings → Brand kit): themes may refer to its colours as
+/// "brand:N" (or "brand:N/AA" with opacity) and to its fonts as "brand"/"brand-heading".
+#[derive(Debug, Clone, PartialEq)]
+pub struct Brand {
+    pub colors: [String; 4],
+    pub font: String,
+    pub heading: String,
+}
+
+impl Brand {
+    pub fn from_settings(colors: Option<&str>, font: Option<&str>, heading: Option<&str>) -> Brand {
+        let mut c = ["#1f4e9c".to_string(), "#f2b705".into(), "#ffffff".into(), "#0d1424".into()];
+        if let Some(Ok(Value::Array(v))) = colors.map(serde_json::from_str::<Value>) {
+            for (i, x) in v.iter().take(4).enumerate() {
+                if let Some(h) = x.as_str().filter(|h| h.len() == 7 && h.starts_with('#')) {
+                    c[i] = h.to_string();
+                }
+            }
+        }
+        let font = font.filter(|f| !f.is_empty()).unwrap_or("Noto Sans").to_string();
+        let heading = heading.filter(|f| !f.is_empty()).map(str::to_string).unwrap_or_else(|| font.clone());
+        Brand { colors: c, font, heading }
+    }
+
+    /// A number that changes when the brand changes (for caches).
+    pub fn key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (&self.colors, &self.font, &self.heading).hash(&mut h);
+        h.finish()
+    }
+
+    fn color(&self, v: &str) -> Option<String> {
+        let rest = v.strip_prefix("brand:")?;
+        let (n, alpha) = rest.split_once('/').map(|(n, a)| (n, Some(a))).unwrap_or((rest, None));
+        let base = self.colors.get(n.parse::<usize>().ok()?.checked_sub(1)?)?.clone();
+        Some(match alpha.filter(|a| a.len() == 2 && !a.eq_ignore_ascii_case("ff")) {
+            Some(a) => format!("{base}{a}"),
+            None => base,
+        })
+    }
+
+    /// The theme with brand references replaced by the real colours and fonts.
+    pub fn resolve(&self, t: &Value) -> Value {
+        fn walk(b: &Brand, v: &Value, key: &str) -> Value {
+            match v {
+                Value::String(s) if key == "font" && s == "brand" => Value::String(b.font.clone()),
+                Value::String(s) if key == "font" && s == "brand-heading" => Value::String(b.heading.clone()),
+                Value::String(s) => b.color(s).map(Value::String).unwrap_or_else(|| v.clone()),
+                Value::Array(a) => Value::Array(a.iter().map(|x| walk(b, x, "")).collect()),
+                Value::Object(o) => Value::Object(o.iter().map(|(k, x)| (k.clone(), walk(b, x, k))).collect()),
+                _ => v.clone(),
+            }
+        }
+        walk(self, t, "")
+    }
 }
 
 pub struct Renderer {
@@ -66,6 +152,12 @@ impl Renderer {
         let bg = &theme["background"];
         match bg["kind"].as_str().unwrap_or("color") {
             "transparent" => {}
+            "gradient" => {
+                let full = Rect::from_xywh(0.0, 0.0, w, h).unwrap();
+                if let Some(sh) = gradient_shader(&bg["gradient"], full, 1.0) {
+                    fill_rect_shader(&mut px, full, sh, 0.0);
+                }
+            }
             kind => {
                 if let Some(col) = parse_color(bg["color"].as_str().unwrap_or("#000000")) {
                     px.fill(col);
@@ -82,9 +174,19 @@ impl Renderer {
             }
         }
         let empty = Vec::new();
+        // a chorus, bridge… may look different from the verses
+        let sec_kind = c.section.as_deref().map(|s| s.to_lowercase()).and_then(|s| {
+            if s.starts_with("pre-chorus") { Some("pre-chorus") } else { ["chorus", "bridge", "tag", "ending"].into_iter().find(|k| s.starts_with(k)) }
+        });
+        let sec_style = sec_kind.map(|k| &theme["sections"][k]).filter(|v| v.is_object());
         for l in theme["layers"].as_array().unwrap_or(&empty) {
             if l["hidden"].as_bool() == Some(true) {
                 continue;
+            }
+            match l["onlyOn"].as_str() {
+                Some("first") if !c.first => continue,
+                Some("last") if !c.last => continue,
+                _ => {}
             }
             let opacity = l["opacity"].as_f64().unwrap_or(1.0) as f32;
             let rect = |r: &Value| Rect::from_xywh(pc(r["x"].as_f64()) * w, pc(r["y"].as_f64()) * h, pc(r["w"].as_f64()) * w, pc(r["h"].as_f64()) * h);
@@ -96,8 +198,13 @@ impl Renderer {
                     let border = &l["border"];
                     let bw = border["width"].as_f64().unwrap_or(0.0) as f32 / 100.0 * h;
                     let bc = parse_color(border["color"].as_str().unwrap_or("#00000000"));
-                    if let Some(f) = fill {
-                        fill_rect(&mut px, r, with_alpha(f, opacity), radius, None);
+                    match gradient_shader(&l["gradient"], r, opacity) {
+                        Some(sh) => fill_rect_shader(&mut px, r, sh, radius),
+                        None => {
+                            if let Some(f) = fill {
+                                fill_rect(&mut px, r, with_alpha(f, opacity), radius, None);
+                            }
+                        }
                     }
                     if bw > 0.0 {
                         if let Some(b) = bc {
@@ -132,7 +239,31 @@ impl Renderer {
                     // the box to use when there is no second language
                     let r = if l["field"] == "lyrics" && c.second.is_empty() && l["solo"].is_object() { rect(&l["solo"]) } else { rect(l) };
                     let Some(r) = r else { continue };
-                    self.text(&mut px, r, &lines.join("\n"), &l["style"], opacity);
+                    let field = l["field"].as_str().unwrap_or("");
+                    let mut style = l["style"].clone();
+                    if let (Some(sec), true) = (sec_style, field == "lyrics" || field == "second") {
+                        if let Some(i) = sec["italic"].as_bool() {
+                            style["italic"] = i.into();
+                        }
+                        if let Some(w) = sec["weight"].as_u64() {
+                            style["weight"] = w.into();
+                        }
+                        if let (Some(col), "lyrics") = (sec["color"].as_str(), field) {
+                            style["color"] = col.into();
+                        }
+                    }
+                    // the operator's quick change applies to the slide's own words
+                    let r = if matches!(field, "lyrics" | "second" | "reference" | "section") && (c.text_scale != 1.0 || c.text_shift != 0.0) {
+                        for k in ["size", "minSize"] {
+                            if let Some(v) = style[k].as_f64() {
+                                style[k] = (v * c.text_scale as f64).into();
+                            }
+                        }
+                        Rect::from_xywh(r.left(), r.top() + c.text_shift / 100.0 * h, r.width(), r.height()).unwrap_or(r)
+                    } else {
+                        r
+                    };
+                    self.text(&mut px, r, &lines.join("\n"), &style, opacity);
                 }
                 _ => {}
             }
@@ -209,6 +340,12 @@ impl Renderer {
 
     fn text(&mut self, px: &mut Pixmap, r: Rect, text: &str, s: &Value, opacity: f32) {
         let h = px.height() as f32;
+        // ProPresenter-style box behind the words: the padding comes out of the text area
+        let bx = &s["box"];
+        let mode = bx["mode"].as_str().unwrap_or("off");
+        let (pad_x, pad_y) = if mode == "off" { (0.0, 0.0) } else { (bx["padX"].as_f64().unwrap_or(2.0) as f32 / 100.0 * h, bx["padY"].as_f64().unwrap_or(1.0) as f32 / 100.0 * h) };
+        let outer = r;
+        let Some(r) = Rect::from_xywh(r.left() + pad_x, r.top() + pad_y, (r.width() - 2.0 * pad_x).max(1.0), (r.height() - 2.0 * pad_y).max(1.0)) else { return };
         let mut size = s["size"].as_f64().unwrap_or(5.0) as f32;
         let min = s["minSize"].as_f64().map(|m| m as f32).filter(|m| *m < size).unwrap_or(size * 0.6);
         // shrink to fit, as the screens do
@@ -229,6 +366,47 @@ impl Renderer {
             Some("bottom") => r.bottom() - eh,
             _ => r.top() + (r.height() - eh) / 2.0,
         };
+        if mode == "block" || mode == "lines" {
+            if let Some(col) = parse_color(bx["color"].as_str().unwrap_or("#000000d9")) {
+                let radius = bx["radius"].as_f64().unwrap_or(0.6) as f32 / 100.0 * h;
+                // each line's inked extent (alignment is already in the glyph positions)
+                let mut lines: Vec<(f32, f32, f32, f32)> = vec![];
+                for run in buf.layout_runs() {
+                    let (mut x0, mut x1) = (f32::MAX, f32::MIN);
+                    for g in run.glyphs.iter() {
+                        x0 = x0.min(g.x);
+                        x1 = x1.max(g.x + g.w);
+                    }
+                    if x0 <= x1 {
+                        lines.push((x0, x1, run.line_top, run.line_height));
+                    }
+                }
+                let col = with_alpha(col, opacity);
+                let blur = (bx["blur"].as_f64().unwrap_or(0.0) as f32 / 100.0 * h).round() as usize;
+                if mode == "block" && !lines.is_empty() {
+                    let x0 = lines.iter().map(|l| l.0).fold(f32::MAX, f32::min);
+                    let x1 = lines.iter().map(|l| l.1).fold(f32::MIN, f32::max);
+                    let y0 = lines.first().unwrap().2;
+                    let y1 = lines.last().map(|l| l.2 + l.3).unwrap();
+                    if let Some(b) = Rect::from_ltrb(r.left() + x0 - pad_x, top + y0 - pad_y, r.left() + x1 + pad_x, top + y1 + pad_y) {
+                        let b = b.intersect(&outer).unwrap_or(b);
+                        if blur > 0 {
+                            blur_region(px, b, blur);
+                        }
+                        fill_rect(px, b, col, radius, None);
+                    }
+                } else {
+                    for (x0, x1, y, lh) in &lines {
+                        if let Some(b) = Rect::from_ltrb(r.left() + x0 - pad_x, top + y - pad_y * 0.5, r.left() + x1 + pad_x, top + y + lh + pad_y * 0.5) {
+                            if blur > 0 {
+                                blur_region(px, b, blur);
+                            }
+                            fill_rect(px, b, col, radius, None);
+                        }
+                    }
+                }
+            }
+        }
         // glyph coverage into a mask the size of the frame
         let (fw, fh) = (px.width() as i32, px.height() as i32);
         let mut mask = vec![0u8; (fw * fh) as usize];
@@ -266,8 +444,14 @@ impl Renderer {
                 paint_mask(px, &dilated(&mask, fw as usize, fh as usize, rad), with_alpha(col, opacity));
             }
         }
-        if let Some(col) = parse_color(s["color"].as_str().unwrap_or("#ffffff")) {
-            paint_mask(px, &mask, with_alpha(col, opacity));
+        let g = &s["gradient"];
+        match (parse_color(g["from"].as_str().unwrap_or("")), parse_color(g["to"].as_str().unwrap_or(""))) {
+            (Some(a), Some(b)) if g.is_object() => paint_mask_gradient(px, &mask, outer, a, b, g["angle"].as_f64().unwrap_or(180.0) as f32, opacity),
+            _ => {
+                if let Some(col) = parse_color(s["color"].as_str().unwrap_or("#ffffff")) {
+                    paint_mask(px, &mask, with_alpha(col, opacity));
+                }
+            }
         }
     }
 }
@@ -309,29 +493,33 @@ fn with_alpha(c: tiny_skia::Color, opacity: f32) -> tiny_skia::Color {
     c
 }
 
+/// A rectangle with rounded corners (square when the radius is tiny).
+fn rounded(r: Rect, radius: f32) -> Option<tiny_skia::Path> {
+    if radius <= 0.5 {
+        return Some(PathBuilder::from_rect(r));
+    }
+    let rad = radius.min(r.width() / 2.0).min(r.height() / 2.0);
+    let (l, t, rt, b) = (r.left(), r.top(), r.right(), r.bottom());
+    let k = 0.552_284_8 * rad;
+    let mut pb = PathBuilder::new();
+    pb.move_to(l + rad, t);
+    pb.line_to(rt - rad, t);
+    pb.cubic_to(rt - rad + k, t, rt, t + rad - k, rt, t + rad);
+    pb.line_to(rt, b - rad);
+    pb.cubic_to(rt, b - rad + k, rt - rad + k, b, rt - rad, b);
+    pb.line_to(l + rad, b);
+    pb.cubic_to(l + rad - k, b, l, b - rad + k, l, b - rad);
+    pb.line_to(l, t + rad);
+    pb.cubic_to(l, t + rad - k, l + rad - k, t, l + rad, t);
+    pb.close();
+    pb.finish()
+}
+
 fn fill_rect(px: &mut Pixmap, r: Rect, col: tiny_skia::Color, radius: f32, stroke: Option<f32>) {
     let mut paint = Paint::default();
     paint.set_color(col);
     paint.anti_alias = true;
-    let path = if radius > 0.5 {
-        let rad = radius.min(r.width() / 2.0).min(r.height() / 2.0);
-        let (l, t, rt, b) = (r.left(), r.top(), r.right(), r.bottom());
-        let k = 0.552_284_8 * rad;
-        let mut pb = PathBuilder::new();
-        pb.move_to(l + rad, t);
-        pb.line_to(rt - rad, t);
-        pb.cubic_to(rt - rad + k, t, rt, t + rad - k, rt, t + rad);
-        pb.line_to(rt, b - rad);
-        pb.cubic_to(rt, b - rad + k, rt - rad + k, b, rt - rad, b);
-        pb.line_to(l + rad, b);
-        pb.cubic_to(l + rad - k, b, l, b - rad + k, l, b - rad);
-        pb.line_to(l, t + rad);
-        pb.cubic_to(l, t + rad - k, l + rad - k, t, l + rad, t);
-        pb.close();
-        pb.finish()
-    } else {
-        Some(PathBuilder::from_rect(r))
-    };
+    let path = rounded(r, radius);
     let Some(path) = path else { return };
     match stroke {
         Some(width) => {
@@ -378,6 +566,79 @@ fn paint_mask(px: &mut Pixmap, mask: &[u8], col: tiny_skia::Color) {
         let src = [c.red() as u32 * m as u32 / 255, c.green() as u32 * m as u32 / 255, c.blue() as u32 * m as u32 / 255, a];
         for k in 0..4 {
             data[o + k] = (src[k] + data[o + k] as u32 * inv / 255).min(255) as u8;
+        }
+    }
+}
+
+/// CSS linear-gradient geometry: 0° points up, 90° right; the line spans the box.
+fn gradient_line(r: Rect, angle: f32) -> (tiny_skia::Point, tiny_skia::Point) {
+    let a = angle.to_radians();
+    let (dx, dy) = (a.sin(), -a.cos());
+    let len = (r.width() * dx).abs() + (r.height() * dy).abs();
+    let (cx, cy) = (r.left() + r.width() / 2.0, r.top() + r.height() / 2.0);
+    (tiny_skia::Point::from_xy(cx - dx * len / 2.0, cy - dy * len / 2.0), tiny_skia::Point::from_xy(cx + dx * len / 2.0, cy + dy * len / 2.0))
+}
+
+fn gradient_shader(g: &Value, r: Rect, opacity: f32) -> Option<tiny_skia::Shader<'static>> {
+    if !g.is_object() {
+        return None;
+    }
+    let from = with_alpha(parse_color(g["from"].as_str()?)?, opacity);
+    let to = with_alpha(parse_color(g["to"].as_str()?)?, opacity);
+    let (a, b) = gradient_line(r, g["angle"].as_f64().unwrap_or(180.0) as f32);
+    tiny_skia::LinearGradient::new(a, b, vec![tiny_skia::GradientStop::new(0.0, from), tiny_skia::GradientStop::new(1.0, to)], tiny_skia::SpreadMode::Pad, Transform::identity())
+}
+
+fn fill_rect_shader(px: &mut Pixmap, r: Rect, shader: tiny_skia::Shader<'static>, radius: f32) {
+    let mut paint = Paint::default();
+    paint.shader = shader;
+    paint.anti_alias = true;
+    if let Some(path) = rounded(r, radius) {
+        px.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+    }
+}
+
+/// Words filled with a gradient across their layer.
+fn paint_mask_gradient(px: &mut Pixmap, mask: &[u8], r: Rect, from: tiny_skia::Color, to: tiny_skia::Color, angle: f32, opacity: f32) {
+    let w = px.width() as usize;
+    let (a, b) = gradient_line(r, angle);
+    let (vx, vy) = (b.x - a.x, b.y - a.y);
+    let len2 = (vx * vx + vy * vy).max(1.0);
+    let (f, t) = (from.to_color_u8(), to.to_color_u8());
+    let data = px.data_mut();
+    for (i, &m) in mask.iter().enumerate() {
+        if m == 0 {
+            continue;
+        }
+        let (x, y) = ((i % w) as f32, (i / w) as f32);
+        let k = (((x - a.x) * vx + (y - a.y) * vy) / len2).clamp(0.0, 1.0);
+        let mix = |p: u8, q: u8| p as f32 + (q as f32 - p as f32) * k;
+        let alpha = mix(f.alpha(), t.alpha()) / 255.0 * opacity * m as f32 / 255.0;
+        let src = [mix(f.red(), t.red()) * alpha, mix(f.green(), t.green()) * alpha, mix(f.blue(), t.blue()) * alpha, alpha * 255.0];
+        let o = i * 4;
+        for c in 0..4 {
+            data[o + c] = (src[c] + data[o + c] as f32 * (1.0 - alpha)).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+}
+
+/// Frosted glass: blurs what is already drawn inside a rectangle.
+fn blur_region(px: &mut Pixmap, r: Rect, radius: usize) {
+    let (fw, fh) = (px.width() as i32, px.height() as i32);
+    let (x0, y0) = ((r.left().floor() as i32).clamp(0, fw), (r.top().floor() as i32).clamp(0, fh));
+    let (x1, y1) = ((r.right().ceil() as i32).clamp(0, fw), (r.bottom().ceil() as i32).clamp(0, fh));
+    let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
+    if w < 2 || h < 2 || radius == 0 {
+        return;
+    }
+    let data = px.data_mut();
+    for c in 0..4 {
+        let chan: Vec<u8> = (0..h).flat_map(|y| (0..w).map(move |x| (y, x))).map(|(y, x)| data[((y0 as usize + y) * fw as usize + x0 as usize + x) * 4 + c]).collect();
+        let out = blurred(&chan, w, h, radius);
+        for y in 0..h {
+            for x in 0..w {
+                data[((y0 as usize + y) * fw as usize + x0 as usize + x) * 4 + c] = out[y * w + x];
+            }
         }
     }
 }
@@ -486,6 +747,47 @@ mod tests {
     }
 
     #[test]
+    fn gradients_and_frosted_glass() {
+        let mut r = Renderer::new();
+        let theme = serde_json::json!({ "background": { "kind": "gradient", "gradient": { "from": "#ff0000", "to": "#0000ff", "angle": 90 } },
+            "layers": [{ "kind": "text", "field": "lyrics", "x": 10, "y": 40, "w": 80, "h": 20,
+                "style": { "font": "Noto Sans", "size": 8, "weight": 800, "color": "#ffffff", "align": "center", "valign": "middle", "autoFit": false,
+                    "gradient": { "from": "#ffffff", "to": "#ffd000", "angle": 180 },
+                    "box": { "mode": "block", "color": "#ffffff40", "padX": 2, "padY": 1, "radius": 0, "blur": 1.5, "animate": true } } }] });
+        let f = r.render(&theme, &Content { primary: vec!["Blessed assurance".into()], ..Content::default() }, 960, 540, Path::new("/x"));
+        // a gradient box with round corners: the very corner stays clear
+        let boxy = serde_json::json!({ "background": { "kind": "transparent" }, "layers": [{ "kind": "shape", "x": 10, "y": 10, "w": 50, "h": 50, "radius": 8, "fill": "#000000", "gradient": { "from": "#ff0000", "to": "#0000ff", "angle": 90 }, "border": { "color": "#0000", "width": 0 } }] });
+        let g = r.render(&boxy, &Content::default(), 960, 540, Path::new("/x"));
+        assert_eq!(g[(54 * 960 + 96) * 4 + 3], 0, "rounded corner");
+        assert_eq!(g[(200 * 960 + 300) * 4 + 3], 255, "inside");
+        save_png(&std::env::temp_dir().join("render-gradient.png").to_string_lossy(), &f, 960, 540);
+        let px = |x: usize, y: usize| (f[(y * 960 + x) * 4 + 2], f[(y * 960 + x) * 4], f[(y * 960 + x) * 4 + 3]); // r, b, a
+        let (lr, lb, _) = px(5, 10);
+        let (rr, rb, _) = px(954, 10);
+        assert!(lr > 200 && lb < 60 && rb > 200 && rr < 60, "red on the left, blue on the right: {:?} {:?}", (lr, lb), (rr, rb));
+        // gradient words: white at the top of the layer turning yellow (less blue) lower down
+        let blue_in_words = |y: usize| -> Option<f32> {
+            let v: Vec<f32> = (0..960).filter_map(|x| { let p = &f[(y * 960 + x) * 4..]; (p[2] > 230 && p[1] > 200 && p[3] > 250).then_some(p[0] as f32) }).collect();
+            (v.len() > 3).then(|| v.iter().sum::<f32>() / v.len() as f32)
+        };
+        let rows: Vec<(usize, f32)> = (200..340).filter_map(|y| blue_in_words(y).map(|b| (y, b))).collect();
+        let (top, bottom) = (rows.first().unwrap().1, rows.last().unwrap().1);
+        assert!(top > bottom + 25.0, "letters less blue lower down: top {top}, bottom {bottom}");
+    }
+
+    #[test]
+    fn brand_references_resolve() {
+        let b = Brand::from_settings(Some(r##"["#112233","#ffcc00","#ffffff","#000000"]"##), Some("Ubuntu"), None);
+        let t = serde_json::json!({ "background": { "kind": "color", "color": "brand:4" }, "layers": [{ "kind": "shape", "fill": "brand:1/80" }, { "kind": "text", "style": { "font": "brand-heading", "color": "brand:2" } }] });
+        let r = b.resolve(&t);
+        assert_eq!(r["background"]["color"], "#000000");
+        assert_eq!(r["layers"][0]["fill"], "#11223380");
+        assert_eq!(r["layers"][1]["style"]["font"], "Ubuntu", "the heading font falls back to the text font");
+        assert_eq!(r["layers"][1]["style"]["color"], "#ffcc00");
+        assert_ne!(b.key(), Brand::from_settings(None, None, None).key());
+    }
+
+    #[test]
     fn colours() {
         assert_eq!(parse_color("#fff").unwrap().to_color_u8().red(), 255);
         assert_eq!(parse_color("#0c0d10db").unwrap().to_color_u8().alpha(), 219);
@@ -512,6 +814,31 @@ mod tests {
         // blank-style content: nothing at all
         let empty = r.render(&serde_json::json!({ "background": { "kind": "transparent" }, "layers": [] }), &Content::default(), 64, 36, Path::new("/x"));
         assert!(empty.chunks_exact(4).all(|p| p[3] == 0));
+    }
+
+    #[test]
+    fn box_grows_with_the_words() {
+        let mut r = Renderer::new();
+        let theme = |mode: &str| {
+            serde_json::json!({ "background": { "kind": "transparent" }, "layers": [{ "kind": "text", "field": "lyrics", "x": 5, "y": 60, "w": 90, "h": 30,
+                "style": { "font": "Noto Sans", "size": 6, "weight": 700, "color": "#ffffff", "align": "center", "valign": "middle", "lineHeight": 1.2, "autoFit": true, "minSize": 3,
+                    "box": { "mode": mode, "color": "#000000ff", "padX": 2, "padY": 1, "radius": 0, "animate": true } } }] })
+        };
+        let width_of = |f: &[u8]| {
+            let row = 810; // a row through the text
+            let xs: Vec<usize> = (0..1920).filter(|x| f[(row * 1920 + x) * 4 + 3] > 200).collect();
+            xs.last().map(|l| l - xs[0]).unwrap_or(0)
+        };
+        let short = r.render(&theme("block"), &Content { primary: vec!["The Lord".into()], ..Content::default() }, 1920, 1080, Path::new("/x"));
+        let long = r.render(&theme("block"), &Content { primary: vec!["The Lord is my shepherd, I shall not want".into()], ..Content::default() }, 1920, 1080, Path::new("/x"));
+        let (ws, wl) = (width_of(&short), width_of(&long));
+        println!("box width: short {ws}px, long {wl}px");
+        assert!(ws > 200 && wl > ws + 600, "the box follows the words ({ws} vs {wl})");
+        assert_eq!(short[(810 * 1920 + 100) * 4 + 3], 0, "outside the box stays clear");
+        save_png(&std::env::temp_dir().join("render-box.png").to_string_lossy(), &long, 1920, 1080);
+        let lines = r.render(&theme("lines"), &Content { primary: vec!["The Lord is my shepherd".into(), "I shall not want".into()], ..Content::default() }, 1920, 1080, Path::new("/x"));
+        save_png(&std::env::temp_dir().join("render-lines.png").to_string_lossy(), &lines, 1920, 1080);
+        assert!(lines.chunks_exact(4).filter(|p| p[3] == 255 && p[0] < 10).count() > 20_000, "strips drawn behind the lines");
     }
 
     #[test]

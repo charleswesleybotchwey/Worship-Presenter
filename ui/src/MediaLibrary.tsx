@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { dragItem, useGoLive } from "./dnd";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { PopupMenu, type MenuEntry } from "./PopupMenu";
 import { api, pickMediaFiles, type MediaItem } from "./api";
 import { makeThumb, useMediaUrl } from "./theme/media";
 import type { ThemeKind } from "./theme/types";
@@ -36,7 +38,51 @@ async function fillThumbs(items: MediaItem[], url: (s: string) => string) {
   }
 }
 
-export function MediaGrid({ kind, onPick, selectedId, actions }: { kind?: MediaItem["kind"] | ""; onPick: (m: MediaItem) => void; selectedId?: number | null; actions?: (m: MediaItem) => React.ReactNode }) {
+export type MediaSort = "title" | "file" | "newest" | "size";
+export type MediaGridControl = {
+  importFiles: () => void;
+  layout: "list" | "thumbs";
+  setLayout: (l: "list" | "thumbs") => void;
+  sort: MediaSort;
+  setSort: (s: MediaSort) => void;
+  refresh: () => void;
+};
+
+export function MediaGrid({
+  kind,
+  onPick,
+  selectedId,
+  actions,
+  menuFor,
+  draggableItems,
+}: {
+  kind?: MediaItem["kind"] | "";
+  onPick: (m: MediaItem) => void;
+  selectedId?: number | null;
+  actions?: (m: MediaItem) => React.ReactNode;
+  /** The right-click menu for an item (the media library's EasyWorship menu). */
+  menuFor?: (m: MediaItem, ctl: MediaGridControl) => MenuEntry[] | Promise<MenuEntry[]>;
+  /** Items can be dragged to the schedule. */
+  draggableItems?: boolean;
+}) {
+  const dragProps = (m: MediaItem) =>
+    draggableItems && !m.missing
+      ? { draggable: true, onDragStart: (e: React.DragEvent) => dragItem(e, { kind: "media", media_id: m.id, title: m.title }) }
+      : {};
+  const [itemMenu, setItemMenu] = useState<{ x: number; y: number; entries: MenuEntry[] } | null>(null);
+  const [sort, setSort] = useState<MediaSort>(() => (localStorage.getItem("wp-media-sort") as MediaSort) || "title");
+  const setSortSaved = (v: MediaSort) => (setSort(v), localStorage.setItem("wp-media-sort", v));
+  const menuProps = (m: MediaItem) =>
+    menuFor
+      ? {
+          onContextMenu: async (e: React.MouseEvent) => {
+            e.preventDefault();
+            const { clientX: x, clientY: y } = e;
+            const entries = await menuFor(m, { importFiles, layout, setLayout: setLayoutSaved, sort, setSort: setSortSaved, refresh: () => void refresh() });
+            setItemMenu({ x, y, entries });
+          },
+        }
+      : {};
   const url = useMediaUrl();
   const [items, setItems] = useState<MediaItem[]>([]);
   const [filter, setFilter] = useState<string>(kind ?? "");
@@ -73,6 +119,16 @@ export function MediaGrid({ kind, onPick, selectedId, actions }: { kind?: MediaI
     const t = setTimeout(() => void refresh().catch((e) => setProblem(String(e))), 120);
     return () => clearTimeout(t);
   }, [refresh]);
+  const shown = useMemo(() => {
+    const file = (m: MediaItem) => m.path.split("/").pop() ?? m.path;
+    const by: Record<MediaSort, (a: MediaItem, b: MediaItem) => number> = {
+      title: (a, b) => a.title.localeCompare(b.title, undefined, { numeric: true }),
+      file: (a, b) => file(a).localeCompare(file(b), undefined, { numeric: true }),
+      newest: (a, b) => b.id - a.id,
+      size: (a, b) => b.bytes - a.bytes,
+    };
+    return [...items].sort(by[sort]);
+  }, [items, sort]);
 
   const importFiles = async () => {
     const paths = await pickMediaFiles();
@@ -122,13 +178,15 @@ export function MediaGrid({ kind, onPick, selectedId, actions }: { kind?: MediaI
       {problem && <p className="form-error">{problem}</p>}
       {layout === "list" && (
         <ul className="wp-rows" role="listbox" aria-label="Media">
-          {items.map((m) => (
+          {shown.map((m) => (
             <li
               key={m.id}
               role="option"
               aria-selected={m.id === selectedId}
               className={`wp-row wp-row--lib ${m.id === selectedId ? "is-selected" : ""}`}
               title={m.title}
+              {...dragProps(m)}
+              {...menuProps(m)}
               onClick={() => (m.missing ? setProblem(`“${m.title}” is missing from the media folder. Use Relink to point it at the file.`) : onPick(m))}
             >
               <Icon name={m.kind === "image" ? "image" : m.kind === "video" ? "video" : "speaker"} />
@@ -150,10 +208,10 @@ export function MediaGrid({ kind, onPick, selectedId, actions }: { kind?: MediaI
         </ul>
       )}
       <ul className="media__grid" hidden={layout !== "thumbs"}>
-        {layout === "thumbs" && items.map((m) => {
+        {layout === "thumbs" && shown.map((m) => {
           const t = thumbSrc(m, url);
           return (
-            <li key={m.id} className={m.id === selectedId ? "is-current" : ""}>
+            <li key={m.id} className={m.id === selectedId ? "is-current" : ""} {...dragProps(m)} {...menuProps(m)}>
               <button className="media__card" onClick={() => onPick(m)} title={m.title}>
                 <span className="media__thumb">{t ? <img src={t} alt="" loading="lazy" /> : <span className="media__icon">{m.kind === "audio" ? "♪" : "▶"}</span>}</span>
                 <span className="media__title">{m.title}</span>
@@ -165,6 +223,7 @@ export function MediaGrid({ kind, onPick, selectedId, actions }: { kind?: MediaI
         })}
         {layout === "thumbs" && !items.length && <p className="empty">{q ? `Nothing matches “${q}”.` : "No media yet. Import pictures, videos or sound; they are copied into this profile."}</p>}
       </ul>
+      {itemMenu && <PopupMenu x={itemMenu.x} y={itemMenu.y} entries={itemMenu.entries} onClose={() => setItemMenu(null)} />}
     </div>
   );
 }
@@ -192,6 +251,93 @@ export function MediaLibrary({ onPreview, onAdd, version }: { onPreview: (m: Med
     }
   };
 
+  const live = useGoLive();
+  // EasyWorship's media menu (right-click a picture, video or sound), then the extras
+  const menuFor = async (m: MediaItem, g: MediaGridControl): Promise<MenuEntry[]> => {
+    const what = m.kind === "image" ? "Image" : m.kind === "video" ? "Video" : "Audio";
+    const used = await api.mediaUsedBy(m.id).catch(() => [] as string[]);
+    const logo = (await api.getSettings().catch(() => ({}) as Record<string, string>)).logo_media_id;
+    const set = (repeat: MediaItem["repeat"], fit: MediaItem["fit"]) =>
+      void api.setMediaOptions(m.id, repeat ?? null, fit ?? null).then(g.refresh, (e) => setNote({ text: String(e), bad: true }));
+    const item = { kind: "media" as const, media_id: m.id, title: m.title };
+    return [
+      { label: `&Import New ${what} File...`, run: g.importFiles },
+      "-",
+      { label: "Media &Usage", sub: used.length ? used.map((u) => ({ label: u, disabled: true })) : [{ label: "Not used by any theme", disabled: true }] },
+      ...(m.kind !== "image"
+        ? [{ label: "Re&peating", sub: [{ label: "Repeat &Off", checked: m.repeat !== "loop", run: () => set("once", m.fit) }, { label: "Repeat O&n", checked: m.repeat === "loop", run: () => set("loop", m.fit) }] } as MenuEntry]
+        : []),
+      ...(m.kind !== "audio"
+        ? [
+            {
+              label: "&Aspect Ratio",
+              sub: [
+                { label: "&Fit (whole picture)", checked: !m.fit || m.fit === "fit", run: () => set(m.repeat, "fit") },
+                { label: "F&ill (crop to the screen)", checked: m.fit === "fill", run: () => set(m.repeat, "fill") },
+                { label: "&Stretch", checked: m.fit === "stretch", run: () => set(m.repeat, "stretch") },
+              ],
+            } as MenuEntry,
+          ]
+        : []),
+      {
+        label: `&Edit ${what} Properties...`,
+        run: async () => {
+          const t = prompt(`Title (${m.path.split("/").pop()}${m.width ? `, ${m.width}×${m.height}` : ""}${m.duration_ms ? `, ${Math.round(m.duration_ms / 1000)} s` : ""})`, m.title);
+          if (t?.trim()) await api.renameMedia(m.id, t.trim(), m.tags).then(() => (setNote({ text: "Renamed." }), g.refresh()));
+        },
+      },
+      "-",
+      ...(m.kind !== "audio"
+        ? [
+            {
+              label: "Cop&y to Theme",
+              sub: [
+                { label: "&Song theme", run: () => void useAsBackground(m, "song") },
+                { label: "S&cripture theme", run: () => void useAsBackground(m, "scripture") },
+                { label: "&Presentation theme", run: () => void useAsBackground(m, "announcement") },
+              ],
+            } as MenuEntry,
+            {
+              label: "Use As &Logo Background",
+              checked: logo === String(m.id),
+              run: () =>
+                void api
+                  .setSetting("logo_media_id", logo === String(m.id) ? "" : String(m.id))
+                  .then(() => setNote({ text: logo === String(m.id) ? "The logo screen is plain again." : `The logo screen now shows “${m.title}”.` })),
+            } as MenuEntry,
+            "-" as MenuEntry,
+          ]
+        : []),
+      { label: "&Delete", run: () => void remove(m) },
+      "-",
+      { label: "Up&date items in Schedule", disabled: true },
+      "-",
+      { label: "&Open File Location", disabled: m.missing, run: () => void api.revealMedia(m.id).catch((e) => setNote({ text: String(e), bad: true })) },
+      "-",
+      {
+        label: "&View",
+        sub: [
+          { label: "&List", checked: g.layout === "list", run: () => g.setLayout("list") },
+          { label: "&Pictures", checked: g.layout === "thumbs", run: () => g.setLayout("thumbs") },
+        ],
+      },
+      {
+        label: "&Sort by",
+        sub: [
+          { label: "&Title", checked: g.sort === "title", run: () => g.setSort("title") },
+          { label: "&File name", checked: g.sort === "file", run: () => g.setSort("file") },
+          { label: "Date &added", checked: g.sort === "newest", run: () => g.setSort("newest") },
+          { label: "&Size", checked: g.sort === "size", run: () => g.setSort("size") },
+        ],
+      },
+      { label: "&Refresh", run: g.refresh },
+      "-",
+      { label: "Pre&view", run: () => onPreview(m) },
+      { label: "&Go live", run: () => live(item) },
+      { label: "Add to sc&hedule", run: () => onAdd(m) },
+    ];
+  };
+
   const remove = async (m: MediaItem) => {
     setMenu(null);
     const used = await api.mediaUsedBy(m.id);
@@ -207,6 +353,8 @@ export function MediaLibrary({ onPreview, onAdd, version }: { onPreview: (m: Med
       <MediaGrid
         key={version + (note?.text ?? "")}
         onPick={onPreview}
+        draggableItems
+        menuFor={menuFor}
         actions={(m) => (
           <>
             <button className="icon-btn" aria-label={`Add ${m.title} to the service`} title="Add to the service" onClick={() => onAdd(m)}>
@@ -245,6 +393,6 @@ export function MediaLibrary({ onPreview, onAdd, version }: { onPreview: (m: Med
           </>
         )}
       />
-    </>
+        </>
   );
 }

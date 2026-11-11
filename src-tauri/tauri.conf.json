@@ -23,7 +23,8 @@
         "visible": false,
         "backgroundColor": "#191918",
         "zoomHotkeysEnabled": false,
-        "theme": "Dark"
+        "theme": "Dark",
+        "dragDropEnabled": false
       }
     ],
     "security": {

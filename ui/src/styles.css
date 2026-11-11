@@ -482,3 +482,41 @@ p { margin: 0; }
 .chordline__chord { color: #ffb84d; font-weight: 700; font-size: 0.72em; line-height: 1.05; }
 .chordline__text { line-height: 1.15; }
 .stage-view__key { color: #ffb84d; font-weight: 700; }
+
+/* EasyWorship's checkerboard for see-through areas, in the operator's views only
+   (Preview, Live, slide pictures, theme thumbnails, editors). Projector, NDI and
+   other output windows are not inside .wp-control and stay truly clear. */
+.tv--tinted { background: linear-gradient(var(--tv-tint), var(--tv-tint)); }
+.wp-control .tv--keyed {
+  background-color: #1b1b1b !important;
+  background-image: conic-gradient(#272727 25%, #1b1b1b 0 50%, #272727 0 75%, #1b1b1b 0) !important;
+  background-size: 14px 14px !important;
+}
+.wp-control .tv--tinted {
+  background: linear-gradient(var(--tv-tint), var(--tv-tint)), conic-gradient(#272727 25%, #1b1b1b 0 50%, #272727 0 75%, #1b1b1b 0) 0 0 / 14px 14px, #1b1b1b !important;
+}
+
+/* ProPresenter-style box that grows with the words */
+.tl-growbox { position: absolute; pointer-events: none; z-index: 0; }
+.tl-hug { position: relative; z-index: 1; width: fit-content; max-width: 100%; }
+.tl-line { line-height: inherit; }
+
+/* text changes between slides (theme → Between slides) */
+.anim-slideup { animation: wp-slideup ease-out both; }
+.anim-wipe { animation: wp-wipe ease-in-out both; }
+.anim-zoom { animation: wp-zoom ease-out both; }
+.anim-push { animation: wp-push ease-out both; }
+@keyframes wp-slideup { from { opacity: 0; transform: translateY(6cqh); } to { opacity: 1; transform: none; } }
+@keyframes wp-wipe { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0 0 0 0); } }
+@keyframes wp-zoom { from { opacity: 0; transform: scale(0.92); } to { opacity: 1; transform: none; } }
+@keyframes wp-push { from { opacity: 0.2; transform: translateX(12cqw); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .anim-slideup, .anim-wipe, .anim-zoom, .anim-push { animation: none !important; } }
+.te__section { display: grid; gap: 4px; padding: 6px 0; border-top: 1px solid var(--wp-line); }
+
+/* theme editor: TV-safe guides and readability notes */
+.te__safe { position: absolute; inset: 0; pointer-events: none; z-index: 50; }
+.te__safe-action, .te__safe-title { position: absolute; border: 1px dashed rgba(255, 210, 63, 0.75); }
+.te__safe-action { inset: 5%; }
+.te__safe-title { inset: 10%; border-color: rgba(120, 200, 255, 0.6); }
+.te__issues { display: grid; gap: 4px; margin-top: 8px; }
+.te__issue { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 6px 10px; border-radius: 6px; background: rgba(255, 170, 0, 0.12); border: 1px solid rgba(255, 170, 0, 0.4); font-size: 13px; }

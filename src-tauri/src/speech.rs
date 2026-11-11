@@ -101,7 +101,7 @@ pub struct SpeechStatus {
     windows_speech: bool,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn speech_status(st: State<'_, AppState>) -> SpeechStatus {
     let s = &st.speech;
     SpeechStatus {
@@ -115,7 +115,7 @@ pub fn speech_status(st: State<'_, AppState>) -> SpeechStatus {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn speech_dismiss(st: State<'_, AppState>, reference: Option<String>) {
     let mut r = st.speech.recent.lock().unwrap();
     match reference {
@@ -136,7 +136,7 @@ pub async fn speech_mics() -> Vec<String> {
     .unwrap_or_default()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn speech_stop(st: State<'_, AppState>) {
     if let Some(s) = st.speech.stop.lock().unwrap().take() {
         s.store(true, Ordering::Relaxed);

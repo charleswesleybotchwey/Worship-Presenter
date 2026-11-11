@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { onMenu } from "./api";
+import { GoLiveContext } from "./dnd";
 import { api, isDesktop, type PulpitNote, type SpeechStatus, onLibraryRestored, onProfileChanged, onSettingsChanged, type LangMode, type LiveState, type MediaItem, type Mode, type ProgramItem, type Schedule, type Slide, type Timer } from "./api";
 import { SlideView } from "./SlideView";
 import { Icon } from "./Icon";
@@ -152,9 +153,24 @@ export function Control() {
   }, []);
   useEffect(() => {
     let alive = true;
+    // only store what changed: a fresh object every 0.7 s redrew the whole window
+    let lastSpeech = "";
+    let lastNotes = "";
     const tick = () => {
-      api.speechStatus().then((s) => alive && setSpeech(s)).catch(() => {});
-      api.pulpitNotes().then((n) => alive && setNotes(n)).catch(() => {});
+      api
+        .speechStatus()
+        .then((s) => {
+          const k = JSON.stringify(s);
+          if (alive && k !== lastSpeech) (lastSpeech = k), setSpeech(s);
+        })
+        .catch(() => {});
+      api
+        .pulpitNotes()
+        .then((n) => {
+          const k = JSON.stringify(n);
+          if (alive && k !== lastNotes) (lastNotes = k), setNotes(n);
+        })
+        .catch(() => {});
     };
     tick();
     const t = setInterval(tick, 700);
@@ -462,6 +478,24 @@ export function Control() {
 
   // The Windows menu bar: each choice runs the same action as the palette or a key.
   const [settingsPage, setSettingsPage] = useState<string | undefined>(undefined);
+  // the theme the theme rules choose for the item in Preview
+  const [previewRule, setPreviewRule] = useState<number | null>(null);
+  const [rulesRev, setRulesRev] = useState(0);
+  useEffect(() => {
+    let stop = () => {};
+    onSettingsChanged(() => setRulesRev((n) => n + 1)).then((u) => (stop = u));
+    return () => stop();
+  }, []);
+  useEffect(() => {
+    const it = preview?.item;
+    if (!it || (it.kind !== "song" && it.kind !== "scripture")) return setPreviewRule(null);
+    let alive = true;
+    api.resolveTheme(it).then((id) => alive && setPreviewRule(id ?? null)).catch(() => alive && setPreviewRule(null));
+    return () => {
+      alive = false;
+    };
+  }, [preview?.item, rulesRev]);
+  const [themeRequest, setThemeRequest] = useState<{ id?: number; newKind?: import("./theme/types").ThemeKind; n: number } | undefined>(undefined);
   const menuRef = useRef<(id: string) => void>(() => {});
   menuRef.current = (id: string) => {
     const palette = (pid: string) => commands.find((c) => c.id === pid)?.run();
@@ -555,7 +589,8 @@ export function Control() {
       { id: "music", group: "Service", label: "Background music…", keywords: "audio playlist songs instrumental", run: () => setLayer("music") },
       { id: "live", group: "Service", label: "Focus Live (keyboard drives the screens)", run: () => (setActiveTab("service"), setTimeout(() => liveSurface.current?.focus())) },
       { id: "outputs", group: "Outputs", label: "Output setup…", run: () => setLayer("outputs") },
-      { id: "themes", group: "Design", label: "Themes", run: () => openTab({ id: "themes" }) },
+      // themes are chosen in the library; the editor opens on one theme only
+      { id: "themes", group: "Design", label: "Themes", run: () => (setActiveTab("service"), setLibTab("themes"), setSourceTab("library")) },
       { id: "settings", group: "Appearance", label: "Settings", keywords: "preferences keyboard shortcuts low spec", run: () => openTab({ id: "settings" }) },
       { id: "rehearsal", group: "Service", label: "Rehearsal mode on or off", keywords: "practice simulate", run: () => setRehearsal((r) => (setReh(null), !r)) },
       { id: "ui-dark", group: "Appearance", label: "Appearance: Dark", keywords: "theme colour", run: () => setUiTheme("dark") },
@@ -676,6 +711,10 @@ export function Control() {
   );
 
   const libraryDock = (
+    <GoLiveContext.Provider value={(item) => {
+      pendingLive.current = { item, idx: 0 };
+      void load(item);
+    }}>
     <LibraryDock
       tab={libTab}
       setTab={setLibTab}
@@ -691,9 +730,10 @@ export function Control() {
       onEditDeck={(id) => openTab({ id: "ann", deckId: id, template: null })}
       onNewDeck={(template) => openTab({ id: "ann", deckId: null, template })}
       onUseTheme={(id) => setLook(id)}
-      onEditThemes={() => openTab({ id: "themes" })}
+      onEditThemes={(req) => (setThemeRequest(req ? { ...req, n: Date.now() } : undefined), openTab({ id: "themes" }))}
       extraTab={wide ? undefined : { label: "Schedule", node: schedulePane }}
     />
+    </GoLiveContext.Provider>
   );
 
   const previewSlide = preview?.slides[previewIdx];
@@ -735,7 +775,7 @@ export function Control() {
             slides={preview.slides}
             kind={preview.item.kind}
             media={preview.media}
-            themeId={themeIdOf(preview.item)}
+            themeId={themeIdOf(preview.item) ?? previewRule}
             current={previewIdx}
             onPick={setPreviewIdx}
             onActivate={(i) => (setPreviewIdx(i), void goLive(i))}
@@ -748,7 +788,7 @@ export function Control() {
           {preview?.media && preview.media.kind !== "image" ? (
             <PreviewMedia item={preview.media} />
           ) : (
-            <SlideView slide={previewSlide} kind={preview?.item.kind} caption={preview?.caption} media={preview?.media} themeId={themeIdOf(preview?.item)} still />
+            <SlideView slide={previewSlide} position={{ first: previewIdx === 0, last: previewIdx >= (preview?.slides.length ?? 1) - 1 }} kind={preview?.item.kind} caption={preview?.caption} media={preview?.media} themeId={themeIdOf(preview?.item) ?? previewRule} still />
           )}
         </div>
         <div className="ew-out__info">
@@ -864,7 +904,7 @@ export function Control() {
         slides={gridSlides}
         kind={gridItem?.kind}
         media={rehearsal ? reh?.media : live?.media}
-        themeId={themeIdOf(gridItem)}
+        themeId={themeIdOf(gridItem) ?? (rehearsal ? previewRule : live?.rule_theme_id ?? null)}
         current={latched ? -1 : rehearsal ? reh?.slide_idx ?? -1 : state?.slide_idx ?? -1}
         onPick={(i) => (latched ? say("Output is held. Choose Resume output first.", true) : show(i))}
         empty={rehearsal ? "Rehearsal: stage an item in Preview, then Go live. Nothing reaches the screens." : "Nothing live yet. Stage an item in Preview, then Go live."}
@@ -878,10 +918,12 @@ export function Control() {
           <div className="wp-monitor wp-monitor--flush">
             <SlideView
               slide={confSlide}
+              position={{ first: (confState?.slide_idx ?? 0) === 0, last: (confState?.slide_idx ?? 0) >= confSlides.length - 1 }}
+              adjust={{ scale: confState?.text_scale ?? 1, shift: confState?.text_shift ?? 0 }}
               kind={conf?.item?.kind}
               caption={conf?.caption}
               media={conf?.media}
-              themeId={conf?.item && themeIdOf(conf.item)}
+              themeId={(conf?.item && themeIdOf(conf.item)) ?? conf?.rule_theme_id ?? null}
               playing={confState?.media_playing}
               restart={confState?.media_restart}
               blank={!conf?.item || confState?.mode === "blank" || confState?.mode === "logo"}
@@ -936,6 +978,28 @@ export function Control() {
           </button>
         )}
         <span className="wp-spacer" />
+        {!rehearsal && (live?.item?.kind === "song" || live?.item?.kind === "scripture") && (
+          <span className="wp-transpose" title="For this item only: the words larger or smaller, higher or lower on every screen. Resets on the next item.">
+            Words
+            <button className="wp-icon-btn" aria-label="Words smaller" onClick={() => run(api.setTextAdjust((state?.text_scale ?? 1) - 0.1, state?.text_shift ?? 0))}>
+              A−
+            </button>
+            <button className="wp-icon-btn" aria-label="Words larger" onClick={() => run(api.setTextAdjust((state?.text_scale ?? 1) + 0.1, state?.text_shift ?? 0))}>
+              A+
+            </button>
+            <button className="wp-icon-btn" aria-label="Words up" onClick={() => run(api.setTextAdjust(state?.text_scale ?? 1, (state?.text_shift ?? 0) - 2))}>
+              ↑
+            </button>
+            <button className="wp-icon-btn" aria-label="Words down" onClick={() => run(api.setTextAdjust(state?.text_scale ?? 1, (state?.text_shift ?? 0) + 2))}>
+              ↓
+            </button>
+            {((state?.text_scale ?? 1) !== 1 || (state?.text_shift ?? 0) !== 0) && (
+              <button className="wp-icon-btn" aria-label="Words as the theme has them" title={`${Math.round((state?.text_scale ?? 1) * 100)}%, ${state?.text_shift ?? 0 > 0 ? "+" : ""}${state?.text_shift ?? 0}`} onClick={() => run(api.setTextAdjust(1, 0))}>
+                ⟲
+              </button>
+            )}
+          </span>
+        )}
         {!rehearsal && live?.item?.kind === "song" && liveSlides.some((x) => x.chords?.length) && (
           <span className="wp-transpose" title="Moves the chords on the stage display for the musicians; the congregation sees no change">
             Chords
@@ -1213,7 +1277,7 @@ export function Control() {
             <div className="ew-bottom">{libraryDock}</div>
           </div>
         ) : editorTab?.id === "themes" ? (
-          <ThemeEditor onClose={() => closeTab("themes")} />
+          <ThemeEditor request={themeRequest} onClose={() => closeTab("themes")} />
         ) : editorTab?.id === "ann" ? (
           <AnnouncementEditor
             key={`${editorTab.deckId}-${editorTab.template?.title ?? ""}`}

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { api, onCaption, onHeartbeat, onIdentify, onLive, onOutputConfigChanged, onSettingsChanged, type Broadcast, type OutputConfig } from "./api";
+import { api, onCaption, onHeartbeat, onIdentify, onLive, onOutputConfigChanged, onSettingsChanged, type Broadcast, type MediaItem, type OutputConfig } from "./api";
 import { SlideView } from "./SlideView";
+import { MediaView } from "./MediaView";
 import { NdiFeed } from "./NdiFeed";
 import { useThemes } from "./theme/store";
 import { StageView } from "./StageView";
@@ -109,6 +110,7 @@ export function Output({ role }: { role: string }) {
   }, [onAir, b]);
 
   const mode = b?.state.mode ?? "blank";
+  const logoMedia = useLogoMedia();
   const showLogo = !lost && !isHeld && !onAir && mode === "logo" && (cfg ? cfg.on_logo === "logo" : rule.onLogo === "logo");
   // with the alpha channel on, nothing is drawn where the theme would show its background
   const seeThrough = !!cfg?.alpha || (!onAir && ((mode === "blank" && cfg?.on_blank === "transparent") || (mode === "logo" && cfg?.on_logo === "transparent")));
@@ -133,10 +135,13 @@ export function Output({ role }: { role: string }) {
         {cam && cam.mode !== "corner" && <CameraFeed cam={cam} />}
         <SlideView
           slide={slide}
+          adjust={{ scale: shown?.state.text_scale ?? 1, shift: shown?.state.text_shift ?? 0 }}
+          copyright={shown?.song_copyright}
+          position={{ first: (shown?.state.slide_idx ?? 0) === 0, last: (shown?.state.slide_idx ?? 0) >= (shown?.slides.length ?? 1) - 1 }}
           kind={shown?.item?.kind ?? "song"}
           caption={shown?.caption}
           media={shown?.media}
-          themeId={(shown?.item && (shown.item.kind === "song" || shown.item.kind === "scripture") ? shown.item.theme_id : null) ?? outputTheme ?? null}
+          themeId={(shown?.item && (shown.item.kind === "song" || shown.item.kind === "scripture") ? shown.item.theme_id : null) ?? outputTheme ?? shown?.rule_theme_id ?? null}
           playing={b?.state.media_playing}
           restart={b?.state.media_restart}
           muted={role !== "main"}
@@ -149,7 +154,11 @@ export function Output({ role }: { role: string }) {
           textKey={`${s?.slide_idx}-${s?.lines_per_slide}-${s?.lang_mode}-${shown?.slides.length}`}
         />
       </div>
-      {showLogo && <div className="output__logo" aria-label="Logo" />}
+      {showLogo && (
+        <div className="output__logo" aria-label="Logo">
+          {logoMedia && <MediaView item={{ ...logoMedia, repeat: "loop", fit: logoMedia.fit ?? "fill" }} muted />}
+        </div>
+      )}
       {identify && (
         <div className="identify" aria-label="Test pattern">
           <div className="identify__bars">
@@ -248,4 +257,26 @@ function DeviceCamera({ cam, corner }: { cam: { device_id: string; label: string
       {problem && <span className="camfeed__problem">{problem}</span>}
     </div>
   );
+}
+
+/** The picture or video chosen with "Use As Logo Background" (none: the plain logo). */
+function useLogoMedia(): MediaItem | null {
+  const [m, setM] = useState<MediaItem | null>(null);
+  useEffect(() => {
+    const load = () =>
+      api
+        .getSettings()
+        .then(async (x) => {
+          const id = Number(x.logo_media_id || 0);
+          if (!id) return setM(null);
+          const all = await api.listMedia(null, "");
+          setM(all.find((i) => i.id === id && !i.missing) ?? null);
+        })
+        .catch(() => setM(null));
+    load();
+    let stop = () => {};
+    onSettingsChanged(load).then((u) => (stop = u));
+    return () => stop();
+  }, []);
+  return m;
 }

@@ -1,6 +1,7 @@
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { resolveBrand, useBrand } from "./brand";
 import { useMediaUrl } from "./media";
-import { fontStack, type Layer, type SlideData, type TextLayer, type TextStyle, type Theme, type TickerLayer } from "./types";
+import { fontStack, gradientCss, sectionKindOf, type Layer, type TextBox, type SlideData, type TextLayer, type TextStyle, type Theme, type TickerLayer } from "./types";
 
 // Draws a theme with real content. Used by the theme editor, thumbnails, Preview,
 // Live and the output windows, so what is designed is exactly what projects.
@@ -47,7 +48,20 @@ function textCss(s: TextStyle, sizeCqh: number): CSSProperties {
     textShadow: s.shadow.on ? `${s.shadow.x}cqh ${s.shadow.y}cqh ${s.shadow.blur}cqh ${s.shadow.color}` : "none",
     WebkitTextStroke: s.outline.on ? `${s.outline.width}cqh ${s.outline.color}` : undefined,
     paintOrder: "stroke fill",
+    // gradient words: the gradient shows through the letters
+    ...(s.gradient ? { backgroundImage: gradientCss(s.gradient), WebkitBackgroundClip: "text", backgroundClip: "text", color: "transparent" } : null),
   };
+}
+
+/** Which moving background plays: the main one or one from the set, taking turns per
+ *  song/reading (by its title) or per service (by the date), always the same for both. */
+function pickVideo(bg: Theme["background"], key: string | null | undefined): { video: string | null | undefined; poster: string | null | undefined } {
+  const all = [{ video: bg.video, poster: bg.poster }, ...(bg.set ?? [])].filter((v) => v.video);
+  if (all.length < 2) return { video: bg.video, poster: bg.poster };
+  const seed = bg.rotate === "service" ? new Date().toDateString() : key ?? "";
+  let h = 0;
+  for (const ch of seed) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return all[h % all.length];
 }
 
 function animCss(l: Layer, phase: Phase): { className: string; style: CSSProperties } {
@@ -98,14 +112,86 @@ function FitText({ lines, style, valign }: { lines: string[]; style: TextStyle; 
     return () => (ro.disconnect(), fonts?.removeEventListener?.("loadingdone", fit));
   }, [key, style]);
 
+  const bx = style.box?.mode && style.box.mode !== "off" ? style.box : null;
+  // the box: padding comes out of the text area, so shrink-to-fit keeps it inside
+  const pad = bx ? { padding: `${bx.padY}cqh ${bx.padX}cqh` } : undefined;
+  const lineBg = bx?.mode === "lines" ? { background: bx.color, padding: `${bx.padY * 0.5}cqh ${bx.padX}cqh`, borderRadius: `${bx.radius}cqh`, boxDecorationBreak: "clone" as const, WebkitBoxDecorationBreak: "clone" as const, ...(bx.blur ? { backdropFilter: `blur(${bx.blur}cqh)` } : null) } : null;
   return (
-    <div ref={box} className={`tl-box tl-box--${valign}`}>
-      <div ref={inner} style={textCss(style, size)}>
+    <div ref={box} className={`tl-box tl-box--${valign}`} style={pad}>
+      <div ref={inner} className={bx?.mode === "block" ? "tl-hug" : undefined} style={{ ...textCss(style, size), ...(bx?.mode === "block" ? { alignSelf: style.align === "left" ? "flex-start" : style.align === "right" ? "flex-end" : "center" } : null) }}>
         {lines.map((l, i) => (
-          <p key={i}>{l}</p>
+          <p key={i}>{lineBg ? <span className="tl-line" style={lineBg}>{l}</span> : l}</p>
         ))}
       </div>
     </div>
+  );
+}
+
+/** ProPresenter's growing box. It belongs to the layer, not to one slide's words, so it
+ *  stays put between slides and glides from the old words' size to the new ones'. It
+ *  follows the newest words in the layer (the old ones may still be fading out). */
+function GrowBox({ box }: { box: TextBox }) {
+  const me = useRef<HTMLDivElement>(null);
+  const [r, setR] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  useLayoutEffect(() => {
+    const layer = me.current?.parentElement;
+    if (!layer) return;
+    let ro: ResizeObserver | null = null;
+    let watched: Element | null = null;
+    const measure = () => {
+      const hugs = layer.querySelectorAll<HTMLElement>(".tl-hug");
+      const t = hugs[hugs.length - 1];
+      if (!t) return setR(null);
+      if (t !== watched) {
+        ro?.disconnect();
+        ro = new ResizeObserver(() => requestAnimationFrame(measure));
+        ro.observe(t);
+        watched = t;
+      }
+      const frame = (layer.closest(".tv") as HTMLElement | null)?.clientHeight ?? 1080;
+      const lb = layer.getBoundingClientRect();
+      const tb = t.getBoundingClientRect();
+      // the words' real extent (lines may be narrower than the block)
+      let left = Infinity, right = -Infinity;
+      for (const p of Array.from(t.children) as HTMLElement[]) {
+        const range = document.createRange();
+        range.selectNodeContents(p);
+        for (const rr of Array.from(range.getClientRects())) {
+          left = Math.min(left, rr.left);
+          right = Math.max(right, rr.right);
+        }
+      }
+      if (!isFinite(left)) (left = tb.left), (right = tb.right);
+      // the frame may be shown scaled (Preview, thumbnails): work in the layer's own units
+      const scale = layer.offsetWidth ? lb.width / layer.offsetWidth : 1;
+      const px = (box.padX / 100) * frame;
+      const py = (box.padY / 100) * frame;
+      setR({ x: (left - lb.left) / scale - px, y: (tb.top - lb.top) / scale - py, w: (right - left) / scale + 2 * px, h: tb.height / scale + 2 * py });
+    };
+    measure();
+    // new words arrive as a new element in the layer
+    const mo = new MutationObserver(() => requestAnimationFrame(measure));
+    mo.observe(layer, { childList: true, subtree: true, characterData: true });
+    return () => (mo.disconnect(), ro?.disconnect());
+  }, [box.padX, box.padY]);
+  return (
+    <div
+      ref={me}
+      className="tl-growbox"
+      style={
+        r
+          ? {
+              left: r.x,
+              top: r.y,
+              width: r.w,
+              height: r.h,
+              background: box.color,
+              borderRadius: `${box.radius}cqh`,
+              transition: box.animate ? "left 260ms ease, top 260ms ease, width 260ms ease, height 260ms ease" : "none",
+            }
+          : { display: "none" }
+      }
+    />
   );
 }
 
@@ -137,7 +223,7 @@ export interface EditorHooks {
 }
 
 export function ThemeView({
-  theme,
+  theme: themeIn,
   data,
   phase = "static",
   showKey = 0,
@@ -159,24 +245,54 @@ export function ThemeView({
   editor?: EditorHooks;
   children?: ReactNode;
 }) {
+  // brand references ("brand:2", font "brand") become the church's colours and fonts
+  const brand = useBrand();
+  const theme = useMemo(() => resolveBrand(themeIn, brand), [themeIn, brand]);
   const url = useMediaUrl();
   const clock = useClock(theme.layers.some((l) => l.kind === "text" && l.field === "clock"));
   const bg = theme.background;
   const secondEmpty = data.second.length === 0;
-  const fade = theme.transition.kind === "fade" ? { animationDuration: `${theme.transition.ms}ms` } : undefined;
+  // how the words change between slides: fade, slide up, wipe, zoom or push (cut: none)
+  const fade = theme.transition.kind !== "cut" ? { animationDuration: `${theme.transition.ms}ms` } : undefined;
+  const enter = { fade: "anim-xfade", "slide-up": "anim-slideup", wipe: "anim-wipe", zoom: "anim-zoom", push: "anim-push", cut: "" }[theme.transition.kind] ?? "anim-xfade";
 
+  const vid = bg.kind === "video" ? pickVideo(bg, data.rotateKey) : null;
+  const tinted = bg.kind === "color" && /^#([0-9a-f]{8}|[0-9a-f]{4})$/i.test(bg.color.trim()) && !/f{2}$|^#[0-9a-f]{3}f$/i.test(bg.color.trim());
   return (
-    <div className={`tv ${bg.kind === "transparent" ? "tv--keyed" : ""} ${editor ? "tv--editor" : ""}`} style={{ background: bg.kind === "color" ? bg.color : bg.kind === "transparent" ? "transparent" : "#000" }}>
+    <div
+      className={`tv ${bg.kind === "transparent" ? "tv--keyed" : ""} ${tinted ? "tv--tinted" : ""} ${editor ? "tv--editor" : ""}`}
+      style={
+        tinted
+          ? ({ "--tv-tint": bg.color } as React.CSSProperties)
+          : { background: bg.kind === "color" ? bg.color : bg.kind === "transparent" ? "transparent" : bg.kind === "gradient" && bg.gradient ? gradientCss(bg.gradient) : "#000" }
+      }
+    >
       {bg.kind === "image" && bg.image && <img className="tv__bg" src={url(bg.image)} alt="" style={{ objectFit: bg.fit }} />}
-      {bg.kind === "video" && bg.video && (still || !bg.video ? (
-        bg.poster ? <img className="tv__bg" src={url(bg.poster)} alt="" style={{ objectFit: bg.fit }} /> : null
+      {bg.kind === "video" && vid?.video && (still ? (
+        vid.poster ? <img className="tv__bg" src={url(vid.poster)} alt="" style={{ objectFit: bg.fit }} /> : null
       ) : (
-        // muted, looping, never restarted by slide changes (the element stays mounted)
-        <video className="tv__bg" src={url(bg.video)} poster={bg.poster ? url(bg.poster) : undefined} style={{ objectFit: bg.fit }} autoPlay muted loop playsInline />
+        // muted, looping, never restarted by slide changes (the element stays mounted;
+        // a new item may pick another video from the set)
+        <video key={vid.video} className="tv__bg" src={url(vid.video)} poster={vid.poster ? url(vid.poster) : undefined} style={{ objectFit: bg.fit }} autoPlay muted loop playsInline />
       ))}
       {(bg.kind === "image" || bg.kind === "video") && bg.dim > 0 && <div className="tv__dim" style={{ opacity: bg.dim }} />}
-      {theme.layers.map((l) => {
-        if (l.hidden) return null;
+      {theme.layers.map((l0) => {
+        if (l0.hidden) return null;
+        // layers for an item's first or last slide only (the editor shows them all)
+        if (!editor && ((l0.onlyOn === "first" && data.first === false) || (l0.onlyOn === "last" && data.last === false))) return null;
+        // a chorus, bridge… may look different from the verses
+        const sec = theme.sections?.[sectionKindOf(data.section) ?? ("verse" as never)];
+        const l1 =
+          sec && l0.kind === "text" && (l0.field === "lyrics" || l0.field === "second")
+            ? { ...l0, style: { ...l0.style, italic: sec.italic ?? l0.style.italic, weight: sec.weight ?? l0.style.weight, color: l0.field === "lyrics" && sec.color ? sec.color : l0.style.color } }
+            : l0;
+        // the operator's quick change (Live pane): the slide's own words only
+        const sc = data.textScale ?? 1;
+        const sh = data.textShift ?? 0;
+        const l =
+          !editor && (sc !== 1 || sh !== 0) && l1.kind === "text" && ["lyrics", "second", "reference", "section"].includes(l1.field)
+            ? { ...l1, y: l1.y + sh, solo: l1.solo ? { ...l1.solo, y: l1.solo.y + sh } : l1.solo, style: { ...l1.style, size: l1.style.size * sc, minSize: l1.style.minSize * sc } }
+            : l1;
         let rect = { x: l.x, y: l.y, w: l.w, h: l.h };
         let inner: ReactNode = null;
         if (l.kind === "text") {
@@ -185,12 +301,15 @@ export function ThemeView({
           const isSlideText = l.field === "lyrics" || l.field === "second" || l.field === "reference";
           if (!editor && (lines.length === 0 || (hideText && isSlideText))) return null;
           inner = (
-            <div key={isSlideText ? textKey : "fixed"} className={`tl-text ${isSlideText && fade && phase !== "static" ? "anim-xfade" : ""}`} style={isSlideText ? fade : undefined}>
-              {lines.length ? <FitText lines={lines} style={l.style} valign={l.style.valign} /> : <div className="tl-placeholder">{l.name}</div>}
-            </div>
+            <>
+              {l.style.box?.mode === "block" && lines.length > 0 && <GrowBox box={l.style.box} />}
+              <div key={isSlideText ? textKey : "fixed"} className={`tl-text ${isSlideText && fade && phase !== "static" ? enter : ""}`} style={isSlideText ? fade : undefined}>
+                {lines.length ? <FitText lines={lines} style={l.style} valign={l.style.valign} /> : <div className="tl-placeholder">{l.name}</div>}
+              </div>
+            </>
           );
         } else if (l.kind === "shape") {
-          inner = <div className="tl-fill" style={{ background: l.fill, borderRadius: `${l.radius}cqh`, border: l.border.width ? `${l.border.width}cqh solid ${l.border.color}` : undefined }} />;
+          inner = <div className="tl-fill" style={{ background: l.gradient ? gradientCss(l.gradient) : l.fill, borderRadius: `${l.radius}cqh`, border: l.border.width ? `${l.border.width}cqh solid ${l.border.color}` : undefined }} />;
         } else if (l.kind === "image") {
           inner = l.src ? <img className="tl-fill" src={url(l.src)} alt="" style={{ objectFit: l.fit }} draggable={false} /> : editor ? <div className="tl-placeholder">Choose an image</div> : null;
         } else if (l.kind === "ticker") {

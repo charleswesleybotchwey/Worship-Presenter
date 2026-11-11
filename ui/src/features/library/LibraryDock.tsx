@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { pickThemeOpen, pickThemeSave, type ForeignDesign } from "../../api";
+import { ForeignThemeImport } from "../../theme/ForeignThemeImport";
+import { ThemeRules } from "../../theme/ThemeRules";
+import { Gallery } from "../../theme/Gallery";
+import { recolorToBrand } from "../../theme/brand";
 import { api, type ChapterView, type VerseHit, type MediaItem, type ProgramItem, type SongRow, type SongScope, type SongTree, type Version } from "../../api";
 import { Icon } from "../../Icon";
 import { MediaLibrary } from "../../MediaLibrary";
+import { DRAG_TYPE, dragItem, useGoLive } from "../../dnd";
+import { PopupMenu, type MenuEntry } from "../../PopupMenu";
 import { AnnouncementList, ContextMenu } from "../service/panes";
 import { ThemeView } from "../../theme/ThemeView";
 import { KIND_NAMES, type ThemeKind, type ThemeRow } from "../../theme/types";
@@ -13,12 +20,21 @@ import type { Deck } from "../../api";
 
 export type LibTab = "songs" | "scripture" | "media" | "presentations" | "themes";
 
-export const DRAG_TYPE = "application/x-wp-item";
+export { DRAG_TYPE } from "../../dnd";
 const ROW_H = 28;
 
-function dragItem(e: React.DragEvent, item: ProgramItem) {
-  e.dataTransfer.setData(DRAG_TYPE, JSON.stringify(item));
-  e.dataTransfer.effectAllowed = "copy";
+/** Puts text on the Windows clipboard (falls back to the older copy command). */
+async function copyText(text: string) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const t = document.createElement("textarea");
+    t.value = text;
+    document.body.appendChild(t);
+    t.select();
+    document.execCommand("copy");
+    t.remove();
+  }
 }
 
 /** Draws only the rows in view, so 5,000 songs scroll smoothly. */
@@ -57,6 +73,7 @@ function SongsTab({
   onEdit: (id: number) => void;
   onNew: () => void;
 }) {
+  const live = useGoLive();
   const [tree, setTree] = useState<SongTree | null>(null);
   const [scope, setScope] = useState<SongScope>({ kind: "all" });
   const [open, setOpen] = useState({ collections: true, mine: true });
@@ -211,27 +228,46 @@ function SongsTab({
         </footer>
       </div>
       {menu?.row && (
-        <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)}>
-          <button role="menuitem" onClick={() => (setMenu(null), onPreview(item(menu.row!)))}>
-            Preview
-          </button>
-          <button role="menuitem" onClick={() => (setMenu(null), onAdd(item(menu.row!)))}>
-            Add to schedule
-          </button>
-          <button role="menuitem" onClick={() => (setMenu(null), onEdit(menu.row!.id))}>
-            Edit song
-          </button>
-          {tree?.mine.map((f) => (
-            <button key={f.key} role="menuitem" onClick={() => (setMenu(null), void act(() => api.collectionAdd(Number(f.key.slice(5)), [menu.row!.id]), `Added to “${f.name}”.`))}>
-              Add to “{f.name}”
-            </button>
-          ))}
-          {scope.kind === "mine" && (
-            <button role="menuitem" onClick={() => (setMenu(null), void act(() => api.collectionRemove(scope.id, [menu.row!.id]), "Removed from this collection."))}>
-              Remove from this collection
-            </button>
-          )}
-        </ContextMenu>
+        // EasyWorship's song menu, then this app's extras
+        <PopupMenu
+          x={menu.x}
+          y={menu.y}
+          onClose={() => setMenu(null)}
+          entries={(() => {
+            const row = menu.row!;
+            const by = (col: Sort["col"], label: string): MenuEntry => ({ label, checked: sort?.col === col, run: () => setSort({ col, dir: 1 }) });
+            return [
+              { label: "&New Song...", run: onNew },
+              { label: "&Edit Song...", run: () => onEdit(row.id) },
+              "-",
+              {
+                label: "&Delete",
+                run: () => {
+                  if (confirm(`Delete “${row.title}” from the library? A backup is made first.`)) void act(() => api.backupNow().then(() => api.deleteSong(row.id)), `“${row.title}” deleted.`);
+                },
+              },
+              "-",
+              // the schedule always shows the library's current words, so nothing to update
+              { label: "&Update items in Schedule", disabled: true },
+              "-",
+              {
+                label: "Sor&t by",
+                sub: [by("number", "&Number"), by("title", "&Title"), by("first_line", "&First line"), by("author", "&Author"), by("copyright", "&Copyright"), by("langs", "&Languages"), "-", { label: "&Unsorted", checked: !sort, run: () => setSort(null) }],
+              },
+              { label: "&Refresh", run: () => setBump((x) => x + 1) },
+              "-",
+              { label: "&Preview", run: () => onPreview(item(row)) },
+              { label: "&Go live", run: () => live(item(row)) },
+              { label: "Add to &schedule", run: () => onAdd(item(row)) },
+              {
+                label: "Add to my &collection",
+                disabled: !tree?.mine.length,
+                sub: (tree?.mine ?? []).map((f) => ({ label: f.name, run: () => void act(() => api.collectionAdd(Number(f.key.slice(5)), [row.id]), `Added to “${f.name}”.`) })),
+              },
+              ...(scope.kind === "mine" ? [{ label: "Remove from this collection", run: () => void act(() => api.collectionRemove(scope.id, [row.id]), "Removed from this collection.") } as MenuEntry] : []),
+            ];
+          })()}
+        />
       )}
       {menu?.folder && (
         <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)}>
@@ -278,6 +314,12 @@ function ScripturesTab({ refInput, onPreview, onAdd }: { refInput: React.RefObje
   }, []);
   // a reference opens its chapter; anything else is searched as words
   const [hits, setHits] = useState<VerseHit[] | null>(null);
+  const [verseMenu, setVerseMenu] = useState<{ x: number; y: number; item: ProgramItem; text: string; version: string } | null>(null);
+  // EasyWorship's View and Sort by for the verse table (remembered)
+  const [cols, setColsRaw] = useState<{ ver: boolean; ref: boolean }>(() => JSON.parse(localStorage.getItem("wp-scripture-cols") || '{"ver":true,"ref":true}'));
+  const setCols = (c: { ver: boolean; ref: boolean }) => (setColsRaw(c), localStorage.setItem("wp-scripture-cols", JSON.stringify(c)));
+  const [hitSort, setHitSort] = useState<"reference" | "translation" | null>(null);
+  const [refreshN, setRefreshN] = useState(0);
   const [everyBible, setEveryBible] = useState(false);
   useEffect(() => {
     if (!primary || !typed.trim()) return setView(null), setHits(null);
@@ -304,7 +346,7 @@ function ScripturesTab({ refInput, onPreview, onAdd }: { refInput: React.RefObje
       250,
     );
     return () => clearTimeout(t);
-  }, [primary, typed, everyBible]);
+  }, [primary, typed, everyBible, refreshN]);
   const mark = (text: string) => {
     const words = typed.replace(/"/g, "").toLowerCase().split(/\s+/).filter((w) => w.length > 1);
     if (!words.length) return text;
@@ -312,6 +354,7 @@ function ScripturesTab({ refInput, onPreview, onAdd }: { refInput: React.RefObje
     return text.split(re).map((part, i) => (i % 2 ? <mark key={i}>{part}</mark> : part));
   };
 
+  const live = useGoLive();
   const vers = second && second !== primary ? [primary, second] : [primary];
   const refFor = (from: number, to: number) => (view ? `${view.book} ${view.chapter}:${from}${to > from ? "-" + to : ""}` : "");
   const show = (from: number, to: number) => {
@@ -321,7 +364,7 @@ function ScripturesTab({ refInput, onPreview, onAdd }: { refInput: React.RefObje
   const goChapter = (d: number) => view && setTyped(`${view.book} ${Math.max(1, Math.min(view.chapters, view.chapter + d))}`);
 
   return (
-    <div className="lt">
+    <div className={`lt ${cols.ver ? "" : "lt--hide-ver"} ${cols.ref ? "" : "lt--hide-ref"}`}>
       <aside className="lt-tree" aria-label="Bibles">
         <label className="wp-search lt-search">
           <Icon name="book" />
@@ -369,7 +412,7 @@ function ScripturesTab({ refInput, onPreview, onAdd }: { refInput: React.RefObje
           <span className="lt-th">Scripture</span>
         </div>
         <div className="lt-body" role="grid">
-          {hits?.map((h) => (
+          {(hitSort && hits ? [...hits].sort((x, y) => (hitSort === "translation" ? x.version.localeCompare(y.version) : 0) || 0) : hits)?.map((h) => (
             <div
               key={h.version + h.reference}
               role="row"
@@ -377,8 +420,8 @@ function ScripturesTab({ refInput, onPreview, onAdd }: { refInput: React.RefObje
               draggable
               onDragStart={(e) => dragItem(e, { kind: "scripture", reference: h.reference, versions: second && second !== h.version ? [h.version, second] : [h.version] })}
               onClick={() => onPreview({ kind: "scripture", reference: h.reference, versions: second && second !== h.version ? [h.version, second] : [h.version] })}
-              onContextMenu={(e) => (e.preventDefault(), onAdd({ kind: "scripture", reference: h.reference, versions: [h.version] }))}
-              title="Click to preview; right-click adds to the schedule"
+              onContextMenu={(e) => (e.preventDefault(), setVerseMenu({ x: e.clientX, y: e.clientY, text: h.text, version: h.version, item: { kind: "scripture", reference: h.reference, versions: second && second !== h.version ? [h.version, second] : [h.version] } }))}
+              title="Click to preview; drag to the schedule; right-click for more"
             >
               <span>{h.version}</span>
               <span className="wp-num">{h.reference}</span>
@@ -398,7 +441,14 @@ function ScripturesTab({ refInput, onPreview, onAdd }: { refInput: React.RefObje
                   if (e.shiftKey && anchor.current != null) show(Math.min(anchor.current, r.verse), Math.max(anchor.current, r.verse));
                   else (anchor.current = r.verse), show(r.verse, r.verse);
                 }}
-                onContextMenu={(e) => (e.preventDefault(), range && onAdd({ kind: "scripture", reference: refFor(range.from, range.to), versions: vers }))}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  // right-clicking inside the chosen verses uses them all; elsewhere, that verse
+                  const inside = range && r.verse >= range.from && r.verse <= range.to;
+                  const ref = inside ? refFor(range!.from, range!.to) : refFor(r.verse, r.verse);
+                  const chosen = view.rows.filter((v) => (inside ? v.verse >= range!.from && v.verse <= range!.to : v.verse === r.verse));
+                  setVerseMenu({ x: e.clientX, y: e.clientY, text: chosen.map((v) => (chosen.length > 1 ? `${v.verse} ${v.text}` : v.text)).join(" "), version: view.version, item: { kind: "scripture", reference: ref, versions: vers } });
+                }}
               >
                 <span>{view.version}</span>
                 <span className="wp-num">{r.reference}</span>
@@ -443,6 +493,38 @@ function ScripturesTab({ refInput, onPreview, onAdd }: { refInput: React.RefObje
           )}
         </footer>
       </div>
+      {verseMenu && (
+        // EasyWorship's scripture menu, then this app's extras
+        <PopupMenu
+          x={verseMenu.x}
+          y={verseMenu.y}
+          onClose={() => setVerseMenu(null)}
+          entries={[
+            {
+              label: "&View",
+              sub: [
+                { label: "&Translation column", checked: cols.ver, run: () => setCols({ ...cols, ver: !cols.ver }) },
+                { label: "&Reference column", checked: cols.ref, run: () => setCols({ ...cols, ref: !cols.ref }) },
+              ],
+            },
+            {
+              label: "&Sort by",
+              disabled: !hits,
+              sub: [
+                { label: "&Best match", checked: hitSort !== "translation", run: () => setHitSort(null) },
+                { label: "&Translation", checked: hitSort === "translation", run: () => setHitSort("translation") },
+              ],
+            },
+            { label: "&Refresh", run: () => setRefreshN((n) => n + 1) },
+            "-",
+            { label: "&Copy Scripture to Clipboard", run: () => void copyText(`${verseMenu.text}\n${(verseMenu.item as { reference: string }).reference} (${verseMenu.version})`) },
+            "-",
+            { label: "&Preview", run: () => onPreview(verseMenu.item) },
+            { label: "&Go live", run: () => live(verseMenu.item) },
+            { label: "Add to sc&hedule", run: () => onAdd(verseMenu.item) },
+          ]}
+        />
+      )}
     </div>
   );
 }
@@ -452,14 +534,108 @@ function ScripturesTab({ refInput, onPreview, onAdd }: { refInput: React.RefObje
 const THEME_KINDS: ThemeKind[] = ["song", "scripture", "lower_third", "announcement"];
 const SAMPLE = { primary: ["song text line one", "song text line two"], second: ["second language line"], reference: "John 3:16", title: "Title", section: "Verse 1" };
 
-function ThemesTab({ version, previewKind, onUseForItem, onEdit }: { version: number; previewKind: ProgramItem["kind"] | null; onUseForItem: (id: number) => void; onEdit: () => void }) {
+export type ThemeEditRequest = { id?: number; newKind?: ThemeKind };
+
+function ThemesTab({ version, previewKind, onUseForItem, onEdit }: { version: number; previewKind: ProgramItem["kind"] | null; onUseForItem: (id: number) => void; onEdit: (req?: ThemeEditRequest) => void }) {
   const [rows, setRows] = useState<ThemeRow[]>([]);
   const [kind, setKind] = useState<ThemeKind>("song");
   const [sel, setSel] = useState<number | null>(null);
   const [note, setNote] = useState<string | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; row: ThemeRow | null } | null>(null);
+  const [foreign, setForeign] = useState<{ path: string; designs: ForeignDesign[] } | null>(null);
+  const [rulesOpen, setRulesOpen] = useState(false);
+  const [galleryOpen, setGalleryOpen] = useState(false);
+  const [view, setViewRaw] = useState<"pictures" | "list">(() => (localStorage.getItem("wp-themes-view") as "pictures" | "list") || "pictures");
+  const setView = (v: "pictures" | "list") => (setViewRaw(v), localStorage.setItem("wp-themes-view", v));
+  const [order, setOrder] = useState<"title" | "newest">("title");
   const load = () => api.listThemes().then(setRows).catch(() => {});
   useEffect(() => void load(), [version]);
-  const list = rows.filter((r) => r.kind === kind);
+  const list = rows.filter((r) => r.kind === kind).sort((x, y) => (order === "newest" ? y.id - x.id : x.name.localeCompare(y.name, undefined, { numeric: true })));
+  // EasyWorship's wording: "New Song Theme...", "Set As Default Presentation Theme"
+  const kindName = ({ song: "Song", scripture: "Scripture", lower_third: "Lower Third", announcement: "Presentation" } as Record<string, string>)[kind] ?? KIND_NAMES[kind] ?? kind;
+  const menuEntries = (r: ThemeRow | null): MenuEntry[] => [
+    { label: `&New ${kindName} Theme...`, run: () => onEdit({ newKind: kind }) },
+    { label: `&Edit ${kindName} Theme...`, disabled: !r, run: () => r && onEdit({ id: r.id }) },
+    "-",
+    {
+      label: "&Import Theme File...",
+      run: async () => {
+        const path = await pickThemeOpen();
+        if (!path) return;
+        try {
+          // EasyWorship and ProPresenter themes go through the review of their designs
+          if (/\.(ewtx|protheme)$/i.test(path)) return setForeign({ path, designs: await api.foreignThemeReview(path) });
+          const t = await api.importTheme(path);
+          setNote(`Imported “${t.name}”.`);
+          load();
+        } catch (e) {
+          setNote(String(e instanceof Error ? e.message : e));
+        }
+      },
+    },
+    {
+      label: "E&xport Theme File...",
+      disabled: !r,
+      run: async () => {
+        if (!r) return;
+        const path = await pickThemeSave(r.name);
+        if (!path) return;
+        try {
+          await api.exportTheme(r.id, path);
+          setNote(`Exported “${r.name}”.`);
+        } catch (e) {
+          setNote(String(e instanceof Error ? e.message : e));
+        }
+      },
+    },
+    "-",
+    {
+      label: `Se&t As Default ${kindName} Theme`,
+      checked: !!r?.is_default,
+      disabled: !r,
+      run: () => r && void api.setDefaultTheme(r.kind, r.id).then(() => (setNote(`“${r.name}” is now used for every ${kindName.toLowerCase()}.`), load())),
+    },
+    "-",
+    {
+      label: "&Delete",
+      disabled: !r || r.is_default,
+      run: () => {
+        if (!r) return;
+        if (confirm(`Delete the theme “${r.name}”?`)) void api.deleteTheme(r.id).then(() => (setNote(`“${r.name}” deleted.`), load()), (e) => setNote(String(e instanceof Error ? e.message : e)));
+      },
+    },
+    "-",
+    // items use the library's themes directly, so nothing to update
+    { label: "&Update Themes in Schedule", disabled: true },
+    "-",
+    {
+      label: "&View",
+      sub: [
+        { label: "&Pictures", checked: view === "pictures", run: () => setView("pictures") },
+        { label: "&List", checked: view === "list", run: () => setView("list") },
+      ],
+    },
+    {
+      label: "&Sort by",
+      sub: [
+        { label: "&Title", checked: order === "title", run: () => setOrder("title") },
+        { label: "&Newest", checked: order === "newest", run: () => setOrder("newest") },
+      ],
+    },
+    { label: "&Refresh", run: load },
+    "-",
+    { label: "Add from &Gallery...", run: () => setGalleryOpen(true) },
+    { label: "Theme Ru&les...", run: () => setRulesOpen(true) },
+    {
+      label: "Re-colour to &Brand",
+      disabled: !r,
+      run: () => {
+        if (!r || !confirm(`Re-colour “${r.name}” with the brand kit? Its colours and fonts will follow Settings → Brand kit.`)) return;
+        void api.saveTheme(r.id, recolorToBrand(r.theme)).then(() => (setNote(`“${r.name}” now uses the brand kit.`), load()), (e) => setNote(String(e instanceof Error ? e.message : e)));
+      },
+    },
+    { label: "D&uplicate", disabled: !r, run: () => r && void api.duplicateTheme(r.id).then((id) => (setNote(`Copied “${r.name}”.`), load(), onEdit({ id }))) },
+  ];
   const chosen = rows.find((r) => r.id === sel);
   const fits = chosen && previewKind && (chosen.kind === previewKind || (chosen.kind === "song" && previewKind === "song"));
   return (
@@ -473,9 +649,23 @@ function ThemesTab({ version, previewKind, onUseForItem, onEdit }: { version: nu
         ))}
       </aside>
       <div className="lt-main">
-        <div className="lt-themes">
+        <div
+          className={`lt-themes ${view === "list" ? "lt-themes--list" : ""}`}
+          onContextMenu={(e) => {
+            if ((e.target as HTMLElement).closest(".lt-theme")) return;
+            e.preventDefault();
+            setMenu({ x: e.clientX, y: e.clientY, row: null });
+          }}
+        >
           {list.map((r) => (
-            <button key={r.id} className={`lt-theme ${sel === r.id ? "is-selected" : ""}`} onClick={() => setSel(r.id)} onDoubleClick={onEdit} title="Double-click to edit">
+            <button
+              key={r.id}
+              className={`lt-theme ${sel === r.id ? "is-selected" : ""}`}
+              onClick={() => setSel(r.id)}
+              onDoubleClick={() => onEdit({ id: r.id })}
+              onContextMenu={(e) => (e.preventDefault(), setSel(r.id), setMenu({ x: e.clientX, y: e.clientY, row: r }))}
+              title="Double-click to edit; right-click for more"
+            >
               <div className="lt-theme__pic">
                 <ThemeView theme={r.theme} data={SAMPLE} still />
               </div>
@@ -502,11 +692,31 @@ function ThemesTab({ version, previewKind, onUseForItem, onEdit }: { version: nu
           >
             Use for all
           </button>
-          <button className="wp-btn wp-btn--quiet" onClick={onEdit}>
-            Edit themes…
+          <button className="wp-btn wp-btn--quiet" disabled={!chosen} onClick={() => chosen && onEdit({ id: chosen.id })}>
+            Edit…
+          </button>
+          <button className="wp-btn wp-btn--quiet" onClick={() => onEdit({ newKind: kind })}>
+            New {kindName.toLowerCase()} theme
+          </button>
+          <button className="wp-btn wp-btn--quiet" title="Ready-made themes in your brand colours" onClick={() => setGalleryOpen(true)}>
+            Gallery…
+          </button>
+          <button className="wp-btn wp-btn--quiet" title="Choose themes automatically by hymnbook, language, service or Bible" onClick={() => setRulesOpen(true)}>
+            Rules…
           </button>
         </footer>
       </div>
+      {menu && <PopupMenu x={menu.x} y={menu.y} entries={menuEntries(menu.row)} onClose={() => setMenu(null)} />}
+      {galleryOpen && <Gallery onClose={() => setGalleryOpen(false)} onAdded={(n) => (setNote(`Added “${n}”.`), load())} />}
+      {rulesOpen && <ThemeRules onClose={(saved) => (setRulesOpen(false), saved && setNote("Theme rules saved."))} />}
+      {foreign && (
+        <ForeignThemeImport
+          path={foreign.path}
+          designs={foreign.designs}
+          onCancel={() => setForeign(null)}
+          onDone={(text) => (setForeign(null), setNote(text), load())}
+        />
+      )}
     </div>
   );
 }
@@ -528,7 +738,7 @@ export function LibraryDock(p: {
   onEditDeck: (id: number) => void;
   onNewDeck: (t: Deck | null) => void;
   onUseTheme: (id: number) => void;
-  onEditThemes: () => void;
+  onEditThemes: (req?: ThemeEditRequest) => void;
   extraTab?: { label: string; node: React.ReactNode };
 }) {
   const tabs: [LibTab, string][] = [

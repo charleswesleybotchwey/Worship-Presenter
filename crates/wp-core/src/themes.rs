@@ -65,6 +65,21 @@ pub fn validate(t: &Value) -> Result<(String, String)> {
 }
 
 /// Adds the built-in themes to an empty library and makes them the defaults.
+/// The starter gallery: ready-made themes for Ghanaian church use. They use the brand
+/// kit's colours and fonts, so they take on the church's look when added.
+const GALLERY: &[&str] = &[
+    include_str!("../themes/gallery/methodist-hymn-bilingual.json"),
+    include_str!("../themes/gallery/hymn-white-box.json"),
+    include_str!("../themes/gallery/scripture-reference-bar.json"),
+    include_str!("../themes/gallery/stream-lower-third-clean.json"),
+    include_str!("../themes/gallery/stream-lower-third-lines.json"),
+    include_str!("../themes/gallery/announcement-bold.json"),
+];
+
+pub fn gallery() -> Vec<Value> {
+    GALLERY.iter().filter_map(|s| serde_json::from_str(s).ok()).collect()
+}
+
 pub fn seed(conn: &Connection) -> Result<()> {
     let n: i64 = conn.query_row("SELECT count(*) FROM theme", [], |r| r.get(0))?;
     if n > 0 {
@@ -271,6 +286,21 @@ pub fn import(conn: &Connection, media_dir: &std::path::Path, bytes: &[u8]) -> R
     theme["name"] = Value::String(name.clone());
     let id = save(conn, None, &theme)?;
     Ok((id, name))
+}
+
+#[cfg(test)]
+mod gallery_tests {
+    #[test]
+    fn every_gallery_theme_is_valid_and_saves() {
+        let c = crate::db::open_memory().unwrap();
+        let g = super::gallery();
+        assert_eq!(g.len(), 6, "all six read");
+        for t in &g {
+            let (name, kind) = super::validate(t).unwrap();
+            let id = super::save(&c, None, t).unwrap();
+            assert!(id > 0, "{name} ({kind}) saved");
+        }
+    }
 }
 
 #[cfg(test)]

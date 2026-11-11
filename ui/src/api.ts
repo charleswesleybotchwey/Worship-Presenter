@@ -36,6 +36,8 @@ export interface LiveState {
   lining_out: boolean;
   subtitles?: "stream" | "screens" | "both" | null;
   transpose?: number;
+  text_scale?: number;
+  text_shift?: number;
   camera?: CameraLive | null;
 }
 
@@ -111,6 +113,10 @@ export interface MediaItem {
   tags: string | null;
   bytes: number;
   missing: boolean;
+  /** EasyWorship's Repeating: "loop" or "once" (default once). */
+  repeat?: "loop" | "once" | null;
+  /** EasyWorship's Aspect Ratio: "fit" (default), "fill" (crop) or "stretch". */
+  fit?: "fit" | "fill" | "stretch" | null;
 }
 
 export interface ImportReview {
@@ -133,6 +139,8 @@ export interface Broadcast {
   /** Outputs that came back after being lost; black until resumed. */
   held: string[];
   song_key?: string | null;
+  rule_theme_id?: number | null;
+  song_copyright?: string | null;
 }
 
 export interface SongHit {
@@ -224,6 +232,14 @@ export interface RemoteStatus {
   lan_ip: string | null;
   sessions: { id: string; role: "operator" | "stage" | "viewer"; device: string; ip: string; joined_secs_ago: number; idle_secs: number }[];
   log: { at: number; device: string; action: string; ok: boolean }[];
+}
+
+export interface ThemeRule {
+  id: number;
+  kind: "song" | "scripture";
+  match: "hymnal" | "language" | "bilingual" | "interval" | "version";
+  value: string;
+  theme_id: number;
 }
 
 export interface ForeignDesign {
@@ -444,6 +460,12 @@ export const api = {
   saveMediaThumb: (id: number, jpeg: number[]) => call<string>("save_media_thumb", { id, jpeg }),
   renameMedia: (id: number, title: string, tags: string | null) => call<void>("rename_media", { id, title, tags }),
   mediaUsedBy: (id: number) => call<string[]>("media_used_by", { id }),
+  themeRules: () => call<ThemeRule[]>("theme_rules"),
+  themeGallery: () => call<Theme[]>("theme_gallery"),
+  saveThemeRules: (rules: ThemeRule[]) => call<void>("save_theme_rules", { rules }),
+  resolveTheme: (item: ProgramItem) => call<number | null>("resolve_theme", { item }),
+  setMediaOptions: (id: number, repeat: "loop" | "once" | null, fit: "fit" | "fill" | "stretch" | null) => call<void>("set_media_options", { id, repeat, fit }),
+  revealMedia: (id: number) => call<void>("reveal_media", { id }),
   deleteMedia: (id: number) => call<void>("delete_media", { id }),
   mediaControl: (playing: boolean | null, restart: boolean) => call<LiveState>("media_control", { playing, restart }),
   getTheme: (id: number) => call<Theme>("get_theme", { id }),
@@ -473,6 +495,7 @@ export const api = {
   listFonts: () => call<FontFamily[]>("list_fonts"),
   foreignThemeReview: (path: string) => call<ForeignDesign[]>("foreign_theme_review", { path }),
   foreignThemeImport: (path: string, chosen: number[]) => call<{ id: number; name: string }[]>("foreign_theme_import", { path, chosen }),
+  setTextAdjust: (scale: number, shift: number) => call<LiveState>("set_text_adjust", { scale, shift }),
   setTranspose: (semitones: number) => call<LiveState>("set_transpose", { semitones }),
   setCamera: (camera: CameraLive | null) => call<LiveState>("set_camera", { camera }),
   setSubtitles: (target: "stream" | "screens" | "both" | null) => call<LiveState>("set_subtitles", { target }),
@@ -590,7 +613,15 @@ export async function pickThemeSave(name: string): Promise<string | null> {
 export async function pickThemeOpen(): Promise<string | null> {
   if (!inTauri) return "Sunrise.wptheme";
   const { open } = await import("@tauri-apps/plugin-dialog");
-  const r = await open({ title: "Import a theme", filters: [{ name: "Worship Presenter theme", extensions: ["wptheme"] }] });
+  const r = await open({
+    title: "Import a theme",
+    filters: [
+      { name: "Themes (Worship Presenter, EasyWorship, ProPresenter)", extensions: ["wptheme", "ewtx", "proTheme", "protheme"] },
+      { name: "Worship Presenter theme", extensions: ["wptheme"] },
+      { name: "EasyWorship theme", extensions: ["ewtx"] },
+      { name: "ProPresenter theme", extensions: ["proTheme", "protheme"] },
+    ],
+  });
   return typeof r === "string" ? r : null;
 }
 
@@ -840,6 +871,16 @@ let mMine: { id: number; name: string; songs: number[] }[] = [];
 const mPages = new Map<string, string[]>();
 let mPulpit: PulpitNote[] = [];
 let mForeign: ForeignDesign[] = [];
+// browser preview: theme rules matched on the sample songs' titles ("MHB 1" is in MHB)
+let mRules: ThemeRule[] = [];
+const mResolve = (item: ProgramItem | null | undefined): number | null => {
+  if (!item) return null;
+  for (const r of mRules) {
+    if (r.kind === "song" && item.kind === "song" && r.match === "hymnal" && item.title.toUpperCase().startsWith(r.value.toUpperCase() + " ")) return r.theme_id;
+    if (r.kind === "scripture" && item.kind === "scripture" && r.match === "version" && item.versions[0] === r.value) return r.theme_id;
+  }
+  return null;
+};
 /** Browser preview only: pretend the pastor's phone sent a note. */
 (globalThis as unknown as { __wpNote: (t: string) => void }).__wpNote = (text: string) => {
   const title = "Sermon notes (preview)";
@@ -965,7 +1006,7 @@ function countRepeat(idx: number) {
 
 function emit() {
   chan ??= new BroadcastChannel("wp-live");
-  const payload: Broadcast = { state: mState, item: mItem, slides: mSlides, caption: mCaption, theme_rev: mThemeRev, media: mediaOf(mItem), held: [...mHeld], song_key: mItem?.kind === "song" ? MOCK_KEYS[mItem.song_id] ?? null : null };
+  const payload: Broadcast = { state: mState, item: mItem, slides: mSlides, caption: mCaption, theme_rev: mThemeRev, media: mediaOf(mItem), held: [...mHeld], song_key: mItem?.kind === "song" ? MOCK_KEYS[mItem.song_id] ?? null : null, rule_theme_id: mResolve(mItem), song_copyright: mItem?.kind === "song" ? "Public Domain" : null };
   chan.postMessage({ type: "live", payload });
   window.dispatchEvent(new CustomEvent("wp-local-live", { detail: payload }));
 }
@@ -974,6 +1015,7 @@ if (!inTauri && typeof window !== "undefined") {
   chan = new BroadcastChannel("wp-live");
   // the tab that holds a live item answers resync requests from output tabs
   chan.addEventListener("message", (e) => e.data.type === "resync" && mItem && emit());
+  chan.addEventListener("message", (e) => e.data.type === "settings" && e.data.payload && Object.assign(mSettings, e.data.payload));
   // keep every tab's sample themes in step, like the shared core does in the app
   chan.addEventListener("message", (e) => {
     if (e.data.type === "themes-request" && mThemeRev > 1) chan?.postMessage({ type: "themes", payload: { rev: mThemeRev, themes: mThemes } });
@@ -1174,7 +1216,8 @@ async function mock(cmd: string, a: Record<string, unknown>): Promise<unknown> {
       return { ...mSettings };
     case "set_setting":
       mSettings[String(a.key)] = String(a.value);
-      chan?.postMessage({ type: "settings" });
+      // other windows of the browser preview keep their own copy: send it along
+      chan?.postMessage({ type: "settings", payload: { ...mSettings } });
       return;
     case "save_song": {
       const d = a.doc as SongDoc;
@@ -1245,6 +1288,8 @@ async function mock(cmd: string, a: Record<string, unknown>): Promise<unknown> {
       });
       return out;
     }
+    case "set_text_adjust":
+      return bump({ text_scale: Math.max(0.6, Math.min(1.6, a.scale as number)), text_shift: Math.max(-30, Math.min(30, a.shift as number)) });
     case "set_transpose":
       return bump({ transpose: Math.max(-11, Math.min(11, a.semitones as number)) });
     case "set_camera":
@@ -1449,6 +1494,24 @@ async function mock(cmd: string, a: Record<string, unknown>): Promise<unknown> {
     case "ndi_sources":
       return [{ name: "MEDIA-PC (OBS Program)", url: "192.168.1.20:5961" }, { name: "PTZ-CAM-1 (Stage)", url: "192.168.1.31:5961" }];
     case "ndi_audio":
+    case "theme_rules":
+      return mRules;
+    case "theme_gallery": {
+      const r = await fetch("/samples/gallery.json");
+      return (await r.json()) as Theme[];
+    }
+    case "save_theme_rules":
+      mRules = a.rules as ThemeRule[];
+      return;
+    case "resolve_theme":
+      return mResolve(a.item as ProgramItem);
+    case "set_media_options": {
+      const m = mMedia.find((x) => x.id === a.id);
+      if (m) (m.repeat = a.repeat as MediaItem["repeat"]), (m.fit = a.fit as MediaItem["fit"]);
+      return;
+    }
+    case "reveal_media":
+      return;
     case "set_window_look":
     case "show_main_window":
       return;

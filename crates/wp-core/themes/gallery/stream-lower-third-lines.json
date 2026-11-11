@@ -1,0 +1,141 @@
+{
+ "schema_version": 1,
+ "name": "Stream lower third – frosted lines",
+ "kind": "lower_third",
+ "background": {
+  "kind": "transparent",
+  "color": "#000000",
+  "image": null,
+  "fit": "cover",
+  "dim": 0,
+  "gradient": null
+ },
+ "transition": {
+  "kind": "slide-up",
+  "ms": 300
+ },
+ "layers": [
+  {
+   "id": "lyrics",
+   "name": "Words",
+   "kind": "text",
+   "field": "lyrics",
+   "text": "",
+   "x": 5,
+   "y": 70,
+   "w": 90,
+   "h": 18,
+   "solo": null,
+   "opacity": 1,
+   "hidden": false,
+   "locked": false,
+   "onlyOn": null,
+   "style": {
+    "font": "brand",
+    "size": 4.4,
+    "weight": 700,
+    "italic": false,
+    "color": "brand:3",
+    "align": "center",
+    "valign": "bottom",
+    "lineHeight": 1.2,
+    "letterSpacing": 0,
+    "uppercase": false,
+    "autoFit": true,
+    "minSize": 3.5,
+    "shadow": {
+     "on": false,
+     "color": "#000000",
+     "blur": 0,
+     "x": 0,
+     "y": 0
+    },
+    "outline": {
+     "on": false,
+     "color": "#000000",
+     "width": 0.15
+    },
+    "box": {
+     "mode": "lines",
+     "color": "brand:4/b3",
+     "padX": 1.2,
+     "padY": 0.6,
+     "radius": 0.4,
+     "animate": true,
+     "blur": 1.2
+    }
+   },
+   "animIn": {
+    "kind": "fade",
+    "ms": 300,
+    "delay": 0
+   },
+   "animOut": {
+    "kind": "fade",
+    "ms": 200,
+    "delay": 0
+   }
+  },
+  {
+   "id": "second",
+   "name": "Second language",
+   "kind": "text",
+   "field": "second",
+   "text": "",
+   "x": 5,
+   "y": 89,
+   "w": 90,
+   "h": 8,
+   "solo": null,
+   "opacity": 1,
+   "hidden": false,
+   "locked": false,
+   "onlyOn": null,
+   "style": {
+    "font": "brand",
+    "size": 3,
+    "weight": 600,
+    "italic": false,
+    "color": "brand:2",
+    "align": "center",
+    "valign": "top",
+    "lineHeight": 1.2,
+    "letterSpacing": 0,
+    "uppercase": false,
+    "autoFit": true,
+    "minSize": 3.5,
+    "shadow": {
+     "on": false,
+     "color": "#000000",
+     "blur": 0,
+     "x": 0,
+     "y": 0
+    },
+    "outline": {
+     "on": false,
+     "color": "#000000",
+     "width": 0.15
+    },
+    "box": {
+     "mode": "lines",
+     "color": "brand:4/b3",
+     "padX": 1.2,
+     "padY": 0.5,
+     "radius": 0.4,
+     "animate": true,
+     "blur": 1.2
+    }
+   },
+   "animIn": {
+    "kind": "fade",
+    "ms": 300,
+    "delay": 0
+   },
+   "animOut": {
+    "kind": "fade",
+    "ms": 200,
+    "delay": 0
+   }
+  }
+ ]
+}

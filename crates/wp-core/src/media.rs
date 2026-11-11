@@ -23,6 +23,10 @@ pub struct MediaItem {
     pub bytes: u64,
     /// The file is no longer in the media folder; use Relink.
     pub missing: bool,
+    /// "loop" or "once"; None = play once (the behaviour before this option existed).
+    pub repeat: Option<String>,
+    /// "fit", "fill" or "stretch"; None = fit.
+    pub fit: Option<String>,
 }
 
 pub fn kind_of(path: &Path) -> Option<&'static str> {
@@ -94,10 +98,23 @@ fn row(r: &rusqlite::Row, media_dir: &Path) -> rusqlite::Result<MediaItem> {
         height: r.get(6)?,
         thumb: r.get(7)?,
         tags: r.get(8)?,
+        repeat: r.get(9)?,
+        fit: r.get(10)?,
     })
 }
 
-const COLS: &str = "id, kind, path, title, duration_ms, width, height, thumb_path, tags";
+const COLS: &str = "id, kind, path, title, duration_ms, width, height, thumb_path, tags, repeat, fit";
+
+/// EasyWorship's Repeating and Aspect Ratio for one item.
+pub fn set_options(conn: &Connection, id: i64, repeat: Option<&str>, fit: Option<&str>) -> Result<()> {
+    let ok_r = matches!(repeat, None | Some("loop") | Some("once"));
+    let ok_f = matches!(fit, None | Some("fit") | Some("fill") | Some("stretch"));
+    if !ok_r || !ok_f {
+        return Err(crate::Error::Format("Media".into(), "options", "Unknown repeat or fit choice.".into()));
+    }
+    conn.execute("UPDATE media SET repeat = ?2, fit = ?3 WHERE id = ?1", params![id, repeat, fit])?;
+    Ok(())
+}
 
 pub fn get(conn: &Connection, media_dir: &Path, id: i64) -> Result<MediaItem> {
     Ok(conn.query_row(&format!("SELECT {COLS} FROM media WHERE id = ?1"), [id], |r| row(r, media_dir))?)
@@ -190,6 +207,20 @@ pub fn copy_dir(from: &Path, to: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod options_tests {
+    #[test]
+    fn repeating_and_aspect_ratio_are_kept() {
+        let c = crate::db::open_memory().unwrap();
+        c.execute("INSERT INTO media (kind, path, title) VALUES ('video', 'v/a.mp4', 'Loop')", []).unwrap();
+        let id = c.last_insert_rowid();
+        super::set_options(&c, id, Some("once"), Some("fill")).unwrap();
+        let m = super::get(&c, std::path::Path::new("/nowhere"), id).unwrap();
+        assert_eq!((m.repeat.as_deref(), m.fit.as_deref()), (Some("once"), Some("fill")));
+        assert!(super::set_options(&c, id, Some("forever"), None).is_err());
+    }
 }
 
 #[cfg(test)]

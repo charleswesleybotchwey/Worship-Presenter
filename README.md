@@ -557,6 +557,76 @@ Browser habits are switched off so it behaves like a Windows program:
 - The window opens on a dark background and appears once drawn (no white flash; shown
   after 4 s at the latest).
 
+## Drag to the schedule; no stalls (11 Nov 2026)
+
+- Drag songs, scripture verses (or a chosen range), media (list or pictures) and
+  presentations into the schedule. Tauri's own file-drop handling was taking all drags
+  inside the window on Windows (dragDropEnabled is now off; the app never used it).
+- Right-click any library item: Preview, Go live, Add to schedule (plus Edit for songs
+  and presentations, and the collection items for songs).
+- Responsiveness audit:
+  - 123 commands ran on the window's main thread; anything slow among them (backups,
+    profile switching, search rebuilds, big library queries) or any wait for the database
+    during an import froze the whole window ("Not responding"). All now run off it.
+  - Lock order checked across the app for deadlocks now that commands run side by side.
+  - The service window redrew completely every 0.4–0.7 s (output status, pulpit notes,
+    speech status) even when nothing changed: now 0 redraws while idle.
+  - The NDI lower-third renderer re-read every theme 20 times a second: now cached.
+
+## Right-click menus as in EasyWorship
+
+Every library tab has EasyWorship's right-click menu (with submenus, check marks and
+underlined access keys), followed by this app's extras (Preview, Go live, Add to schedule):
+- Songs: New Song, Edit Song, Delete (backup first), Update items in Schedule (always up
+  to date here, so greyed), Sort by (Number, Title, First line, Author, Copyright,
+  Languages), Refresh; plus Add to my collection.
+- Scriptures: View (translation / reference columns), Sort by (best match / translation,
+  for word searches), Refresh, Copy Scripture to Clipboard.
+- Media: Import New Video/Image/Audio File, Media Usage, Repeating (Off / On), Aspect
+  Ratio (Fit / Fill / Stretch), Edit Properties, Copy to Theme (song / scripture /
+  presentation), Use As Logo Background (the Logo screen shows it, looping), Delete,
+  Open File Location, View (List / Pictures), Sort by (Title, File name, Date added,
+  Size), Refresh. Repeating and Aspect Ratio are kept per item (migration 0006).
+- Themes: New / Edit <kind> Theme, Import Theme File (Worship Presenter, EasyWorship or
+  ProPresenter files; the last two open the design review), Export Theme File, Set As
+  Default, Delete, Update Themes in Schedule (greyed), View, Sort by, Refresh, Duplicate.
+  Right-click empty space for New / Import / View / Sort by / Refresh.
+- The theme editor shows only the theme being edited (as in EasyWorship): its layers,
+  the canvas and its properties. Choosing, importing, exporting, duplicating and deleting
+  themes happen in the library's Themes tab.
+
+## Box that grows with the words (as in ProPresenter)
+
+Theme editor → a text layer → Box behind text:
+- Whole text: one box around the words that grows and shrinks with them, gliding to the
+  new size between slides (Glide to the new size), e.g. a white box with black words.
+- Each line: a strip behind every line (news / lower-third look).
+Colour (with transparency), side and top/bottom padding, and corner roundness are set per
+layer. The padding comes out of the layer, so shrink-to-fit still keeps everything inside.
+Works on every screen, Preview/Live, the stage display and the NDI renderer.
+
+## Themes, round two (11 Nov 2026)
+
+- Theme rules (Themes → Rules…): "For songs when the hymnbook is MHB, use …", by hymnbook,
+  language, one or two languages, service interval, or Bible version for scripture. First
+  match wins; an item's own theme and an output's theme still come first.
+- Sections: song themes can make choruses, bridges and pre-choruses italic, bold or another
+  colour. Any layer can show on every slide, the first only (hymn number and title) or the
+  last only (copyright).
+- Live pane → Words A− A+ ↑ ↓ ⟲: the words larger/smaller, higher/lower for the current item
+  on every screen and NDI; reset on the next item.
+- Brand kit (Settings): four colours and two fonts. Theme colours can link to brand swatches,
+  fonts to the brand fonts; Themes → right-click → Re-colour to Brand converts a whole theme.
+- Readability in the editor: a warning when words are hard to read (contrast under 3:1)
+  with one-click fixes (darken the picture / box behind the words); Safe areas guides.
+- Visuals: gradients (backgrounds, shapes, words), frosted blur behind the growing box, and
+  text changes: fade, cut, slide up, wipe, zoom, push.
+- Motion background sets: more videos that take turns, per song/reading or per service.
+- Gallery (Themes → Gallery…): six ready-made themes in the brand colours: Methodist hymn
+  English & Fante, hymn in a white growing box, scripture with a reference bar, two stream
+  lower thirds, bold announcements.
+The NDI renderer draws all of the above except transitions and videos.
+
 ## Security
 
 See docs/security/audit-2026-11-11.md: findings, fixes and what remains. Before each release run `cargo audit` and `npm audit` (in ui/).

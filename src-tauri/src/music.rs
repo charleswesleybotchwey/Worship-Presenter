@@ -61,7 +61,7 @@ pub struct MusicStatus {
     playlist_ids: Vec<i64>,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn music_status(st: State<'_, AppState>) -> MusicStatus {
     let g = st.music.lock().unwrap();
     let status = g.as_ref().map(|m| m.status()).unwrap_or_default();
@@ -70,7 +70,7 @@ pub fn music_status(st: State<'_, AppState>) -> MusicStatus {
     MusicStatus { started, status, rules: rules(&st), playlist_ids: playlist(&st).iter().map(|t| t.id).collect() }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn music_set_playlist(st: State<'_, AppState>, media_ids: Vec<i64>) -> Res<()> {
     save_setting(&st, "music_playlist", &serde_json::to_string(&media_ids).map_err(err)?);
     let tracks = playlist(&st);
@@ -80,7 +80,7 @@ pub fn music_set_playlist(st: State<'_, AppState>, media_ids: Vec<i64>) -> Res<(
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn music_play(st: State<'_, AppState>, index: Option<usize>) -> Res<()> {
     if playlist(&st).is_empty() {
         return Err("Add some music to the playlist first.".into());
@@ -88,43 +88,43 @@ pub fn music_play(st: State<'_, AppState>, index: Option<usize>) -> Res<()> {
     with(&st, |m| m.send(Cmd::Play(index)))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn music_pause(st: State<'_, AppState>, paused: bool) -> Res<()> {
     with(&st, |m| m.send(Cmd::Pause(paused)))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn music_next(st: State<'_, AppState>) -> Res<()> {
     with(&st, |m| m.send(Cmd::Next))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn music_previous(st: State<'_, AppState>) -> Res<()> {
     with(&st, |m| m.send(Cmd::Previous))
 }
 
 /// Fades out over 2.5 s, then stops.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn music_stop(st: State<'_, AppState>) {
     if let Some(m) = st.music.lock().unwrap().as_ref() {
         m.send(Cmd::Stop);
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn music_volume(st: State<'_, AppState>, volume: f32) -> Res<()> {
     save_setting(&st, "music_volume", &volume.to_string());
     with(&st, |m| m.send(Cmd::Volume(volume)))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn music_unduck(st: State<'_, AppState>) {
     if let Some(m) = st.music.lock().unwrap().as_ref() {
         m.send(Cmd::Unduck);
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn music_set_rules(st: State<'_, AppState>, rules: Rules) -> Res<()> {
     save_setting(&st, "music_rules", &serde_json::to_string(&rules).map_err(err)?);
     if let Some(m) = st.music.lock().unwrap().as_ref() {

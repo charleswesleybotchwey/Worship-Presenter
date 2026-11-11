@@ -1,0 +1,249 @@
+{
+ "schema_version": 1,
+ "name": "Scripture with reference bar",
+ "kind": "scripture",
+ "background": {
+  "kind": "gradient",
+  "color": "#000000",
+  "image": null,
+  "fit": "cover",
+  "dim": 0,
+  "gradient": {
+   "from": "brand:4",
+   "to": "#05070d",
+   "angle": 180
+  }
+ },
+ "transition": {
+  "kind": "slide-up",
+  "ms": 350
+ },
+ "layers": [
+  {
+   "id": "lyrics",
+   "name": "Verse",
+   "kind": "text",
+   "field": "lyrics",
+   "text": "",
+   "x": 7,
+   "y": 8,
+   "w": 86,
+   "h": 66,
+   "solo": {
+    "x": 7,
+    "y": 8,
+    "w": 86,
+    "h": 72
+   },
+   "opacity": 1,
+   "hidden": false,
+   "locked": false,
+   "onlyOn": null,
+   "style": {
+    "font": "brand",
+    "size": 6.5,
+    "weight": 500,
+    "italic": false,
+    "color": "brand:3",
+    "align": "center",
+    "valign": "middle",
+    "lineHeight": 1.3,
+    "letterSpacing": 0,
+    "uppercase": false,
+    "autoFit": true,
+    "minSize": 3.5,
+    "shadow": {
+     "on": true,
+     "color": "#000000b3",
+     "blur": 0.6,
+     "x": 0,
+     "y": 0.25
+    },
+    "outline": {
+     "on": false,
+     "color": "#000000",
+     "width": 0.15
+    }
+   },
+   "animIn": {
+    "kind": "fade",
+    "ms": 300,
+    "delay": 0
+   },
+   "animOut": {
+    "kind": "fade",
+    "ms": 200,
+    "delay": 0
+   }
+  },
+  {
+   "id": "second",
+   "name": "Second Bible",
+   "kind": "text",
+   "field": "second",
+   "text": "",
+   "x": 7,
+   "y": 52,
+   "w": 86,
+   "h": 28,
+   "solo": null,
+   "opacity": 1,
+   "hidden": false,
+   "locked": false,
+   "onlyOn": null,
+   "style": {
+    "font": "brand",
+    "size": 5,
+    "weight": 400,
+    "italic": true,
+    "color": "brand:2",
+    "align": "center",
+    "valign": "middle",
+    "lineHeight": 1.2,
+    "letterSpacing": 0,
+    "uppercase": false,
+    "autoFit": true,
+    "minSize": 3.5,
+    "shadow": {
+     "on": true,
+     "color": "#000000b3",
+     "blur": 0.6,
+     "x": 0,
+     "y": 0.25
+    },
+    "outline": {
+     "on": false,
+     "color": "#000000",
+     "width": 0.15
+    }
+   },
+   "animIn": {
+    "kind": "fade",
+    "ms": 300,
+    "delay": 0
+   },
+   "animOut": {
+    "kind": "fade",
+    "ms": 200,
+    "delay": 0
+   }
+  },
+  {
+   "id": "bar",
+   "name": "Reference bar",
+   "kind": "shape",
+   "shape": "rect",
+   "x": 0,
+   "y": 84,
+   "w": 100,
+   "h": 16,
+   "opacity": 1,
+   "hidden": false,
+   "locked": false,
+   "onlyOn": null,
+   "fill": "brand:1",
+   "radius": 0,
+   "border": {
+    "color": "#ffffff00",
+    "width": 0
+   },
+   "animIn": {
+    "kind": "fade",
+    "ms": 300,
+    "delay": 0
+   },
+   "animOut": {
+    "kind": "fade",
+    "ms": 200,
+    "delay": 0
+   },
+   "gradient": {
+    "from": "brand:1",
+    "to": "brand:1/00",
+    "angle": 90
+   }
+  },
+  {
+   "id": "accent",
+   "name": "Accent line",
+   "kind": "shape",
+   "shape": "rect",
+   "x": 0,
+   "y": 84,
+   "w": 100,
+   "h": 0.6,
+   "opacity": 1,
+   "hidden": false,
+   "locked": false,
+   "onlyOn": null,
+   "fill": "brand:2",
+   "radius": 0,
+   "border": {
+    "color": "#ffffff00",
+    "width": 0
+   },
+   "animIn": {
+    "kind": "fade",
+    "ms": 300,
+    "delay": 0
+   },
+   "animOut": {
+    "kind": "fade",
+    "ms": 200,
+    "delay": 0
+   }
+  },
+  {
+   "id": "reference",
+   "name": "Reference",
+   "kind": "text",
+   "field": "reference",
+   "text": "",
+   "x": 5,
+   "y": 86,
+   "w": 90,
+   "h": 12,
+   "solo": null,
+   "opacity": 1,
+   "hidden": false,
+   "locked": false,
+   "onlyOn": null,
+   "style": {
+    "font": "brand-heading",
+    "size": 4.5,
+    "weight": 700,
+    "italic": false,
+    "color": "brand:3",
+    "align": "left",
+    "valign": "middle",
+    "lineHeight": 1.2,
+    "letterSpacing": 0,
+    "uppercase": false,
+    "autoFit": false,
+    "minSize": 3.5,
+    "shadow": {
+     "on": true,
+     "color": "#000000b3",
+     "blur": 0.6,
+     "x": 0,
+     "y": 0.25
+    },
+    "outline": {
+     "on": false,
+     "color": "#000000",
+     "width": 0.15
+    }
+   },
+   "animIn": {
+    "kind": "fade",
+    "ms": 300,
+    "delay": 0
+   },
+   "animOut": {
+    "kind": "fade",
+    "ms": 200,
+    "delay": 0
+   }
+  }
+ ]
+}

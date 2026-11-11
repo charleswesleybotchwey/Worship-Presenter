@@ -63,6 +63,10 @@ pub struct Broadcast {
     pub held: Vec<String>,
     /// The live song's key, for the musicians' stage view.
     pub song_key: Option<String>,
+    /// The theme the theme rules chose for the live item (after its own and the output's).
+    pub rule_theme_id: Option<i64>,
+    /// The live song's copyright line (for a theme's copyright layer).
+    pub song_copyright: Option<String>,
 }
 
 pub struct AppState {
@@ -91,6 +95,12 @@ pub struct AppState {
     /// The latest live subtitle words and when they came (for the NDI renderer).
     caption_now: Mutex<(String, Option<Instant>)>,
     ndi_inputs: ndi::Inputs,
+    /// Output windows being built now (one build at a time per output).
+    building: Mutex<std::collections::HashSet<String>>,
+    /// When each output window was (re)built: the watchdog waits 15 s for it to load.
+    born: Mutex<HashMap<String, Instant>>,
+    /// Outputs that have drawn at least once since they were built.
+    seen: Mutex<std::collections::HashSet<String>>,
 }
 
 /// A point sent from the pulpit phone: kept as a slide in today's "Sermon notes" deck,
@@ -126,12 +136,12 @@ pub(crate) fn add_pulpit_note(st: &AppState, device: &str, text: &str) -> Res<Pu
     Ok(n)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn pulpit_notes(st: State<'_, AppState>) -> Vec<PulpitNote> {
     st.pulpit.lock().unwrap().iter().cloned().collect()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn pulpit_dismiss(st: State<'_, AppState>, id: Option<u64>) {
     let mut q = st.pulpit.lock().unwrap();
     match id {
@@ -246,10 +256,17 @@ fn broadcast(app: &AppHandle, s: &AppState) {
         media: None,
         held: s.held.lock().unwrap().iter().cloned().collect(),
         song_key: None,
+        rule_theme_id: None,
+        song_copyright: None,
     };
     let mut payload = payload;
+    payload.rule_theme_id = payload.item.as_ref().and_then(|it| rule_theme(&s.db.lock().unwrap(), it));
     if let Some(ProgramItem::Song { song_id, .. }) = &payload.item {
-        payload.song_key = s.db.lock().unwrap().query_row("SELECT song_key FROM song WHERE id = ?1", [song_id], |r| r.get::<_, Option<String>>(0)).ok().flatten();
+        let row = s.db.lock().unwrap().query_row("SELECT song_key, copyright FROM song WHERE id = ?1", [song_id], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?))).ok();
+        if let Some((key, copyright)) = row {
+            payload.song_key = key;
+            payload.song_copyright = copyright.filter(|c| !c.trim().is_empty());
+        }
     }
     if let Some(ProgramItem::Media { media_id, .. }) = &payload.item {
         payload.media = wp_core::media::get(&s.db.lock().unwrap(), &s.profile_dir().join("media"), *media_id).ok();
@@ -263,30 +280,30 @@ fn broadcast(app: &AppHandle, s: &AppState) {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn search_songs(st: State<'_, AppState>, query: String) -> Res<Vec<library::SongHit>> {
     library::search_songs(&st.db.lock().unwrap(), &query, 60).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn preview_song(st: State<'_, AppState>, song_id: i64, title: String) -> Res<Vec<Slide>> {
     let live = st.live.lock().unwrap().clone();
     build_slides(&st.db.lock().unwrap(), &ProgramItem::Song { song_id, title, theme_id: None, lyrics: None }, &live).map(|r| r.0)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn bible_versions(st: State<'_, AppState>) -> Res<Vec<library::Version>> {
     library::versions(&st.db.lock().unwrap()).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn preview_scripture(st: State<'_, AppState>, reference: String, versions: Vec<String>) -> Res<(Vec<Slide>, Option<String>)> {
     let live = st.live.lock().unwrap().clone();
     build_slides(&st.db.lock().unwrap(), &ProgramItem::Scripture { reference, versions, theme_id: None }, &live)
 }
 
 /// Sends an item to air at a slide.
-#[tauri::command]
+#[tauri::command(async)]
 fn go_live(app: AppHandle, st: State<'_, AppState>, item: ProgramItem, slide_idx: usize) -> Res<LiveState> {
     let live0 = st.live.lock().unwrap().clone();
     if live0.latched() {
@@ -301,6 +318,9 @@ fn go_live(app: AppHandle, st: State<'_, AppState>, item: ProgramItem, slide_idx
     let same = st.item.lock().unwrap().as_ref().map_or(false, |cur| serde_json::to_value(cur).ok() == serde_json::to_value(&item).ok());
     if !same {
         next.transpose = 0;
+        // the operator's quick text change was for the previous item only
+        next.text_scale = 1.0;
+        next.text_shift = 0.0;
     }
     if let ProgramItem::Announcement { presentation_id, .. } = &item {
         if let Ok(d) = wp_core::announcements::get(&st.db.lock().unwrap(), *presentation_id) {
@@ -332,7 +352,7 @@ fn go_live(app: AppHandle, st: State<'_, AppState>, item: ProgramItem, slide_idx
 }
 
 /// Moves within the live item: absolute index, or +1 / -1 via `delta`.
-#[tauri::command]
+#[tauri::command(async)]
 fn show_slide(app: AppHandle, st: State<'_, AppState>, slide_idx: Option<usize>, delta: Option<i64>) -> Res<LiveState> {
     let n = st.slides.lock().unwrap().len();
     if n == 0 {
@@ -370,7 +390,7 @@ fn show_at(st: &AppState, cur: &LiveState, idx: usize) -> LiveState {
     next
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn set_mode(app: AppHandle, st: State<'_, AppState>, mode: Mode) -> Res<LiveState> {
     let next = st.live.lock().unwrap().apply(Command::SetMode { mode });
     *st.live.lock().unwrap() = next.clone();
@@ -380,7 +400,7 @@ fn set_mode(app: AppHandle, st: State<'_, AppState>, mode: Mode) -> Res<LiveStat
 
 /// Changes lines per slide or language mode and re-splits the live item,
 /// keeping the same words on screen.
-#[tauri::command]
+#[tauri::command(async)]
 fn set_layout(app: AppHandle, st: State<'_, AppState>, lines: Option<u8>, lang_mode: Option<LangMode>) -> Res<LiveState> {
     let mut next = st.live.lock().unwrap().clone();
     if let Some(l) = lines {
@@ -403,7 +423,7 @@ fn set_layout(app: AppHandle, st: State<'_, AppState>, lines: Option<u8>, lang_m
     Ok(next)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn undo_go_live(app: AppHandle, st: State<'_, AppState>) -> Res<LiveState> {
     let next = st.live.lock().unwrap().apply(Command::UndoGoLive);
     *st.live.lock().unwrap() = next.clone();
@@ -412,7 +432,7 @@ fn undo_go_live(app: AppHandle, st: State<'_, AppState>) -> Res<LiveState> {
 }
 
 /// Re-sends the current state; used by an output window when it (re)connects.
-#[tauri::command]
+#[tauri::command(async)]
 fn resync(app: AppHandle, st: State<'_, AppState>) {
     broadcast(&app, &st);
 }
@@ -467,12 +487,59 @@ async fn open_output(app: AppHandle, st: State<'_, AppState>, role: String, disp
 }
 
 fn build_output(app: &AppHandle, role: &str, display_index: Option<usize>) -> Res<()> {
-    let label = format!("output-{role}");
-    if let Some(w) = app.get_webview_window(&label) {
-        let _ = w.destroy();
+    let st = app.state::<AppState>();
+    // one build at a time per output: startup, Output setup, Identify and the watchdog
+    // could otherwise race and collide on the window's name
+    if !st.building.lock().unwrap().insert(role.to_string()) {
+        return Ok(());
     }
+    let r = build_output_now(app, role, display_index);
+    st.born.lock().unwrap().insert(role.to_string(), Instant::now());
+    st.seen.lock().unwrap().remove(role);
+    st.acks.lock().unwrap().insert(role.to_string(), (Instant::now(), 0));
+    st.building.lock().unwrap().remove(role);
+    r
+}
+
+fn build_output_now(app: &AppHandle, role: &str, display_index: Option<usize>) -> Res<()> {
+    let label = format!("output-{role}");
     // the output's saved options: custom position and size, alpha channel
     let cfg = app.try_state::<AppState>().and_then(|st| wp_core::options::output(&st.db.lock().unwrap(), role).ok());
+    let alpha_wanted = cfg.as_ref().map_or(false, |c| c.alpha);
+    if let Some(w) = app.get_webview_window(&label) {
+        // a window that is still there is moved and redrawn rather than replaced
+        // (transparency is fixed when a window is made, so changing it needs a new one)
+        let made_alpha = OUTPUT_ALPHA.lock().unwrap().get(role).copied().unwrap_or(false);
+        if made_alpha == alpha_wanted && w.is_visible().is_ok() {
+            if let Some(m) = display_index.and_then(|i| app.available_monitors().ok()?.into_iter().nth(i)) {
+                let _ = w.set_fullscreen(false);
+                let _ = w.set_position(*m.position());
+                let _ = w.set_size(*m.size());
+                match cfg.as_ref().and_then(|c| c.custom) {
+                    Some(r) => {
+                        let p = m.position();
+                        let _ = w.set_position(tauri::PhysicalPosition::new(p.x + r.x, p.y + r.y));
+                        let _ = w.set_size(tauri::PhysicalSize::new(r.w, r.h));
+                    }
+                    None => {
+                        let _ = w.set_fullscreen(true);
+                    }
+                }
+            }
+            let _ = w.eval("location.reload()");
+            return Ok(());
+        }
+        let _ = w.destroy();
+        // destroying finishes a moment later on Windows; wait until the name is free
+        let t = Instant::now();
+        while app.get_webview_window(&label).is_some() && t.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        if app.get_webview_window(&label).is_some() {
+            return Err("The previous output window did not close. Try again in a moment.".into());
+        }
+    }
+    OUTPUT_ALPHA.lock().unwrap().insert(role.to_string(), alpha_wanted);
     let alpha = cfg.as_ref().map_or(false, |c| c.alpha);
     let custom = cfg.as_ref().and_then(|c| c.custom);
     let monitors = app.available_monitors().map_err(err)?;
@@ -515,16 +582,20 @@ fn build_output(app: &AppHandle, role: &str, display_index: Option<usize>) -> Re
     Ok(())
 }
 
+/// Whether each output window was made transparent (fixed when the window is made).
+static OUTPUT_ALPHA: std::sync::LazyLock<Mutex<HashMap<String, bool>>> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
 /// The operator's Resume for one output that came back after being lost.
-#[tauri::command]
+#[tauri::command(async)]
 fn release_output(app: AppHandle, st: State<'_, AppState>, role: String) {
     st.held.lock().unwrap().remove(&role);
     broadcast(&app, &st);
 }
 
 /// Called by each output on every state and heartbeat it renders.
-#[tauri::command]
+#[tauri::command(async)]
 fn output_ack(st: State<'_, AppState>, role: String, revision: u64) {
+    st.seen.lock().unwrap().insert(role.clone());
     st.acks.lock().unwrap().insert(role, (Instant::now(), revision));
 }
 
@@ -537,7 +608,7 @@ struct OutputStatus {
     silent_secs: f32,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn output_status(st: State<'_, AppState>) -> Vec<OutputStatus> {
     let acks = st.acks.lock().unwrap();
     st.outputs
@@ -551,7 +622,7 @@ fn output_status(st: State<'_, AppState>) -> Vec<OutputStatus> {
         .collect()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn close_output(app: AppHandle, st: State<'_, AppState>, role: String) {
     st.outputs.lock().unwrap().remove(&role);
     st.held.lock().unwrap().remove(&role);
@@ -563,12 +634,12 @@ fn close_output(app: AppHandle, st: State<'_, AppState>, role: String) {
 
 // ---------- service orders ----------
 
-#[tauri::command]
+#[tauri::command(async)]
 fn list_schedules(st: State<'_, AppState>) -> Res<Vec<wp_core::schedule::Summary>> {
     wp_core::schedule::list(&st.db.lock().unwrap()).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn open_schedule(st: State<'_, AppState>, id: i64) -> Res<wp_core::schedule::Schedule> {
     let s = wp_core::schedule::load(&st.db.lock().unwrap(), id).map_err(err)?;
     *st.schedule_id.lock().unwrap() = Some(id);
@@ -577,7 +648,7 @@ fn open_schedule(st: State<'_, AppState>, id: i64) -> Res<wp_core::schedule::Sch
 }
 
 /// Creates a service order, optionally filled from a template, and opens it.
-#[tauri::command]
+#[tauri::command(async)]
 fn new_schedule(st: State<'_, AppState>, name: String, service_date: Option<String>, template: bool, from_template: Option<i64>) -> Res<wp_core::schedule::Schedule> {
     let id = {
         let c = st.db.lock().unwrap();
@@ -591,17 +662,17 @@ fn new_schedule(st: State<'_, AppState>, name: String, service_date: Option<Stri
 }
 
 /// Auto-save: the control window calls this on every change to the order.
-#[tauri::command]
+#[tauri::command(async)]
 fn save_schedule(st: State<'_, AppState>, id: i64, items: Vec<wp_core::schedule::Item>) -> Res<()> {
     wp_core::schedule::save_items(&st.db.lock().unwrap(), id, &items).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn rename_schedule(st: State<'_, AppState>, id: i64, name: String, service_date: Option<String>, template: bool) -> Res<()> {
     wp_core::schedule::rename(&st.db.lock().unwrap(), id, &name, service_date.as_deref(), template).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn delete_schedule(st: State<'_, AppState>, id: i64) -> Res<()> {
     let mut cur = st.schedule_id.lock().unwrap();
     if *cur == Some(id) {
@@ -611,7 +682,7 @@ fn delete_schedule(st: State<'_, AppState>, id: i64) -> Res<()> {
 }
 
 /// The schedule that was open when the app last closed (power-cut recovery).
-#[tauri::command]
+#[tauri::command(async)]
 fn last_schedule(st: State<'_, AppState>) -> Option<i64> {
     st.db
         .lock()
@@ -703,13 +774,13 @@ async fn import_file(app: AppHandle, kind: String, path: String, code: Option<St
 
 // ---------- song editor ----------
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_song(st: State<'_, AppState>, id: i64) -> Res<wp_core::songs::SongDoc> {
     wp_core::songs::load(&st.db.lock().unwrap(), id).map_err(err)
 }
 
 /// Slides for the editor's live preview, without saving.
-#[tauri::command]
+#[tauri::command(async)]
 fn preview_song_doc(st: State<'_, AppState>, doc: wp_core::songs::SongDoc) -> Res<Vec<Slide>> {
     let lines = st.live.lock().unwrap().lines_per_slide;
     wp_core::songs::preview(&doc, lines).map_err(err)
@@ -723,7 +794,7 @@ struct SongSaved {
     live: bool,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn save_song(st: State<'_, AppState>, doc: wp_core::songs::SongDoc) -> Res<SongSaved> {
     let id = wp_core::songs::save(&st.db.lock().unwrap(), &doc).map_err(err)?;
     let live = matches!(&*st.item.lock().unwrap(), Some(ProgramItem::Song { song_id, lyrics: None, .. }) if *song_id == id);
@@ -731,7 +802,7 @@ fn save_song(st: State<'_, AppState>, doc: wp_core::songs::SongDoc) -> Res<SongS
 }
 
 /// The operator's explicit "Update the screens" after editing the live song.
-#[tauri::command]
+#[tauri::command(async)]
 fn refresh_live_item(app: AppHandle, st: State<'_, AppState>, title: Option<String>) -> Res<()> {
     if let (Some(t), Some(ProgramItem::Song { title, .. })) = (title, st.item.lock().unwrap().as_mut()) {
         *title = t;
@@ -740,7 +811,7 @@ fn refresh_live_item(app: AppHandle, st: State<'_, AppState>, title: Option<Stri
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn delete_song(st: State<'_, AppState>, id: i64) -> Res<()> {
     let live_is_this = matches!(&*st.item.lock().unwrap(), Some(ProgramItem::Song { song_id, .. }) if *song_id == id);
     if live_is_this {
@@ -751,24 +822,24 @@ fn delete_song(st: State<'_, AppState>, id: i64) -> Res<()> {
 
 // ---------- backups ----------
 
-#[tauri::command]
+#[tauri::command(async)]
 fn list_backups(st: State<'_, AppState>) -> Res<Vec<wp_core::backup::BackupInfo>> {
     wp_core::backup::list(&st.backups()).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn backup_now(st: State<'_, AppState>) -> Res<wp_core::backup::BackupInfo> {
     wp_core::backup::create(&st.db.lock().unwrap(), &st.backups(), "manual").map_err(err)
 }
 
 /// What a backup file holds, shown before the operator confirms a restore.
-#[tauri::command]
+#[tauri::command(async)]
 fn inspect_backup(path: String) -> Res<wp_core::backup::Contents> {
     wp_core::backup::verify(std::path::Path::new(&path)).map_err(err)
 }
 
 /// Restores a backup. Returns the safety copy of the library it replaced.
-#[tauri::command]
+#[tauri::command(async)]
 fn restore_backup(app: AppHandle, st: State<'_, AppState>, path: String) -> Res<wp_core::backup::BackupInfo> {
     let safety = {
         let mut conn = st.db.lock().unwrap();
@@ -783,7 +854,7 @@ fn restore_backup(app: AppHandle, st: State<'_, AppState>, path: String) -> Res<
 }
 
 /// Opens the backups folder in Explorer so backups can be copied to a USB stick.
-#[tauri::command]
+#[tauri::command(async)]
 fn backups_folder(st: State<'_, AppState>) -> Res<String> {
     let dir = st.backups();
     std::fs::create_dir_all(&dir).map_err(err)?;
@@ -802,14 +873,17 @@ struct ActiveThemes {
 }
 
 /// The default theme of each kind, for outputs, Preview, Live and thumbnails.
-#[tauri::command]
+#[tauri::command(async)]
 fn active_themes(st: State<'_, AppState>) -> Res<ActiveThemes> {
     let c = st.db.lock().unwrap();
     let k = |kind: &str| wp_core::themes::for_kind(&c, kind).map_err(err);
-    Ok(ActiveThemes { rev: *st.theme_rev.lock().unwrap(), song: k("song")?, scripture: k("scripture")?, lower_third: k("lower_third")?, announcement: k("announcement")? })
+    // read the counter on its own: holding it while the database is used could
+    // deadlock against code that holds the database and then reads the counter
+    let rev = *st.theme_rev.lock().unwrap();
+    Ok(ActiveThemes { rev, song: k("song")?, scripture: k("scripture")?, lower_third: k("lower_third")?, announcement: k("announcement")? })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn list_themes(st: State<'_, AppState>) -> Res<Vec<wp_core::themes::ThemeRow>> {
     wp_core::themes::list(&st.db.lock().unwrap()).map_err(err)
 }
@@ -820,26 +894,32 @@ fn themes_changed(app: &AppHandle, st: &AppState) {
 }
 
 /// Saves a theme (new when id is None); outputs pick up the change at once.
-#[tauri::command]
+/// The starter gallery of ready-made themes.
+#[tauri::command(async)]
+fn theme_gallery() -> Vec<serde_json::Value> {
+    wp_core::themes::gallery()
+}
+
+#[tauri::command(async)]
 fn save_theme(app: AppHandle, st: State<'_, AppState>, id: Option<i64>, theme: serde_json::Value) -> Res<i64> {
     let id = wp_core::themes::save(&st.db.lock().unwrap(), id, &theme).map_err(err)?;
     themes_changed(&app, &st);
     Ok(id)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn duplicate_theme(st: State<'_, AppState>, id: i64) -> Res<i64> {
     wp_core::themes::duplicate(&st.db.lock().unwrap(), id).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn delete_theme(app: AppHandle, st: State<'_, AppState>, id: i64) -> Res<()> {
     wp_core::themes::delete(&st.db.lock().unwrap(), id).map_err(err)?;
     themes_changed(&app, &st);
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn set_default_theme(app: AppHandle, st: State<'_, AppState>, kind: String, id: i64) -> Res<()> {
     wp_core::themes::set_default(&st.db.lock().unwrap(), &kind, id).map_err(err)?;
     themes_changed(&app, &st);
@@ -848,12 +928,12 @@ fn set_default_theme(app: AppHandle, st: State<'_, AppState>, kind: String, id: 
 
 // ---------- media ----------
 
-#[tauri::command]
+#[tauri::command(async)]
 fn media_root(st: State<'_, AppState>) -> String {
     st.profile_dir().join("media").to_string_lossy().into_owned()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn list_media(st: State<'_, AppState>, kind: Option<String>, query: String) -> Res<Vec<wp_core::media::MediaItem>> {
     wp_core::media::list(&st.db.lock().unwrap(), &st.profile_dir().join("media"), kind.as_deref(), &query).map_err(err)
 }
@@ -886,7 +966,7 @@ async fn import_media(app: AppHandle, paths: Vec<String>) -> Res<Vec<MediaImport
     .map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn relink_media(st: State<'_, AppState>, id: i64, path: String) -> Res<wp_core::media::MediaItem> {
     wp_core::media::relink(&st.db.lock().unwrap(), &st.profile_dir().join("media"), id, std::path::Path::new(&path)).map_err(err)
 }
@@ -937,15 +1017,15 @@ async fn identify_monitors(app: AppHandle) -> Res<usize> {
 }
 
 /// Shows a test pattern on one output for a few seconds. The UI asks first when it is Main.
-#[tauri::command]
+#[tauri::command(async)]
 fn identify_output(app: AppHandle, role: String) {
     let _ = app.emit("identify", role);
 }
 
 /// Settings the core uses; only these keys can be written.
-const SETTINGS: &[&str] = &["project_on_restart", "low_spec_mode", "lines_per_slide", "advance_after_go_live", "font_fallback", "speech_engine", "speech_mic", "speech_refs_only"];
+const SETTINGS: &[&str] = &["project_on_restart", "low_spec_mode", "lines_per_slide", "advance_after_go_live", "font_fallback", "speech_engine", "speech_mic", "speech_refs_only", "logo_media_id", "brand_colors", "brand_font", "brand_heading_font"];
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_settings(st: State<'_, AppState>) -> Res<std::collections::HashMap<String, String>> {
     let c = st.db.lock().unwrap();
     let mut out = std::collections::HashMap::new();
@@ -957,7 +1037,7 @@ fn get_settings(st: State<'_, AppState>) -> Res<std::collections::HashMap<String
     Ok(out)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn set_setting(app: AppHandle, st: State<'_, AppState>, key: String, value: String) -> Res<()> {
     if !SETTINGS.contains(&key.as_str()) {
         return Err(format!("Unknown setting {key}"));
@@ -967,27 +1047,57 @@ fn set_setting(app: AppHandle, st: State<'_, AppState>, key: String, value: Stri
     Ok(())
 }
 
-#[tauri::command]
+/// EasyWorship's Repeating and Aspect Ratio for a picture or video.
+#[tauri::command(async)]
+fn set_media_options(app: AppHandle, st: State<'_, AppState>, id: i64, repeat: Option<String>, fit: Option<String>) -> Res<()> {
+    wp_core::media::set_options(&st.db.lock().unwrap(), id, repeat.as_deref(), fit.as_deref()).map_err(err)?;
+    // a live picture or video takes the new choice at once
+    if matches!(&*st.item.lock().unwrap(), Some(ProgramItem::Media { media_id, .. }) if *media_id == id) {
+        broadcast(&app, &st);
+    }
+    let _ = app.emit("settings-changed", ("media", id.to_string()));
+    Ok(())
+}
+
+/// EasyWorship's Open File Location: Explorer with the file selected.
+#[tauri::command(async)]
+fn reveal_media(st: State<'_, AppState>, id: i64) -> Res<()> {
+    let item = wp_core::media::get(&st.db.lock().unwrap(), &st.profile_dir().join("media"), id).map_err(err)?;
+    let path = st.profile_dir().join("media").join(&item.path);
+    if !path.exists() {
+        return Err(format!("“{}” is missing from the media folder.", item.title));
+    }
+    let r = if cfg!(windows) {
+        std::process::Command::new("explorer").arg(format!("/select,{}", path.display())).spawn()
+    } else if cfg!(target_os = "macos") {
+        std::process::Command::new("open").arg("-R").arg(&path).spawn()
+    } else {
+        std::process::Command::new("xdg-open").arg(path.parent().unwrap_or(&path)).spawn()
+    };
+    r.map(drop).map_err(|e| format!("The folder could not be opened ({e})."))
+}
+
+#[tauri::command(async)]
 fn set_media_meta(st: State<'_, AppState>, id: i64, duration_ms: Option<i64>, width: Option<i64>, height: Option<i64>) -> Res<()> {
     wp_core::media::set_meta(&st.db.lock().unwrap(), id, duration_ms, width, height).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn save_media_thumb(st: State<'_, AppState>, id: i64, jpeg: Vec<u8>) -> Res<String> {
     wp_core::media::save_thumb(&st.db.lock().unwrap(), &st.profile_dir().join("media"), id, &jpeg).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn rename_media(st: State<'_, AppState>, id: i64, title: String, tags: Option<String>) -> Res<()> {
     wp_core::media::rename(&st.db.lock().unwrap(), id, &title, tags.as_deref()).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn media_used_by(st: State<'_, AppState>, id: i64) -> Res<Vec<String>> {
     wp_core::media::used_by(&st.db.lock().unwrap(), &st.profile_dir().join("media"), id).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn delete_media(st: State<'_, AppState>, id: i64) -> Res<()> {
     let live_is_this = matches!(&*st.item.lock().unwrap(), Some(ProgramItem::Media { media_id, .. }) if *media_id == id);
     if live_is_this {
@@ -997,7 +1107,7 @@ fn delete_media(st: State<'_, AppState>, id: i64) -> Res<()> {
 }
 
 /// Play/pause or restart the live video.
-#[tauri::command]
+#[tauri::command(async)]
 fn media_control(app: AppHandle, st: State<'_, AppState>, playing: Option<bool>, restart: Option<bool>) -> Res<LiveState> {
     let mut next = st.live.lock().unwrap().clone();
     if restart == Some(true) {
@@ -1012,7 +1122,7 @@ fn media_control(app: AppHandle, st: State<'_, AppState>, playing: Option<bool>,
 }
 
 /// One theme by id (a per-item look), for windows that need more than the defaults.
-#[tauri::command]
+#[tauri::command(async)]
 fn get_theme(st: State<'_, AppState>, id: i64) -> Res<serde_json::Value> {
     wp_core::themes::get(&st.db.lock().unwrap(), id).map_err(err)
 }
@@ -1081,7 +1191,7 @@ async fn foreign_theme_import(app: AppHandle, path: String, chosen: Vec<usize>) 
 }
 
 /// A note for the stage display only. Empty clears it.
-#[tauri::command]
+#[tauri::command(async)]
 fn set_stage_message(app: AppHandle, st: State<'_, AppState>, message: Option<String>) -> Res<LiveState> {
     let next = st.live.lock().unwrap().apply(Command::SetStageMessage { message });
     *st.live.lock().unwrap() = next.clone();
@@ -1224,7 +1334,7 @@ async fn presentation_import(app: AppHandle, path: String) -> Res<PresentationPl
 }
 
 /// One drawn PDF page, sent as raw bytes. Headers: x-token, x-index, x-ext.
-#[tauri::command]
+#[tauri::command(async)]
 fn presentation_page(st: State<'_, AppState>, request: tauri::ipc::Request<'_>) -> Res<()> {
     let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err("Expected picture bytes.".into()) };
     let h = |k: &str| request.headers().get(k).and_then(|v| v.to_str().ok()).map(str::to_string);
@@ -1237,7 +1347,7 @@ fn presentation_page(st: State<'_, AppState>, request: tauri::ipc::Request<'_>) 
 }
 
 /// All pages are in: make the deck and tidy up.
-#[tauri::command]
+#[tauri::command(async)]
 fn presentation_finish(st: State<'_, AppState>, token: String, title: String) -> Res<i64> {
     if !token.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err("Bad import token.".into());
@@ -1257,12 +1367,12 @@ fn presentation_finish(st: State<'_, AppState>, token: String, title: String) ->
 
 // ---------- EasyWorship Options ----------
 
-#[tauri::command]
+#[tauri::command(async)]
 fn output_configs(st: State<'_, AppState>) -> Res<Vec<wp_core::options::OutputConfig>> {
     wp_core::options::outputs(&st.db.lock().unwrap()).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn output_config(st: State<'_, AppState>, role: String) -> Res<wp_core::options::OutputConfig> {
     wp_core::options::output(&st.db.lock().unwrap(), &role).map_err(err)
 }
@@ -1280,33 +1390,33 @@ async fn save_output_config(app: AppHandle, config: wp_core::options::OutputConf
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn service_intervals(st: State<'_, AppState>) -> Res<Vec<wp_core::options::Interval>> {
     wp_core::options::intervals(&st.db.lock().unwrap()).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn save_service_interval(st: State<'_, AppState>, interval: wp_core::options::Interval) -> Res<i64> {
     wp_core::options::save_interval(&st.db.lock().unwrap(), &interval).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn delete_service_interval(st: State<'_, AppState>, id: i64) -> Res<()> {
     wp_core::options::delete_interval(&st.db.lock().unwrap(), id).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn current_service_interval(st: State<'_, AppState>) -> Option<String> {
     wp_core::options::current_interval(&st.db.lock().unwrap()).ok().flatten()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn usage_report(st: State<'_, AppState>, from: String, to: String) -> Res<Vec<wp_core::options::UsageRow>> {
     wp_core::options::usage_report(&st.db.lock().unwrap(), &from, &to).map_err(err)
 }
 
 /// Writes the song usage report as CSV (for a spreadsheet or CCLI's website).
-#[tauri::command]
+#[tauri::command(async)]
 fn save_usage_report(st: State<'_, AppState>, from: String, to: String, path: String) -> Res<usize> {
     let rows = wp_core::options::usage_report(&st.db.lock().unwrap(), &from, &to).map_err(err)?;
     std::fs::write(&path, wp_core::options::usage_csv(&rows)).map_err(err)?;
@@ -1315,42 +1425,42 @@ fn save_usage_report(st: State<'_, AppState>, from: String, to: String, path: St
 
 // ---------- EasyWorship-style library ----------
 
-#[tauri::command]
+#[tauri::command(async)]
 fn song_tree(st: State<'_, AppState>) -> Res<wp_core::browse::SongTree> {
     wp_core::browse::song_tree(&st.db.lock().unwrap()).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn browse_songs(st: State<'_, AppState>, scope: wp_core::browse::Scope, query: String) -> Res<Vec<wp_core::browse::SongRow>> {
     wp_core::browse::browse_songs(&st.db.lock().unwrap(), &scope, &query).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn collection_create(st: State<'_, AppState>, name: String) -> Res<i64> {
     wp_core::browse::create_collection(&st.db.lock().unwrap(), &name).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn collection_rename(st: State<'_, AppState>, id: i64, name: String) -> Res<()> {
     wp_core::browse::rename_collection(&st.db.lock().unwrap(), id, &name).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn collection_delete(st: State<'_, AppState>, id: i64) -> Res<()> {
     wp_core::browse::delete_collection(&st.db.lock().unwrap(), id).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn collection_add(st: State<'_, AppState>, id: i64, song_ids: Vec<i64>) -> Res<usize> {
     wp_core::browse::add_to_collection(&st.db.lock().unwrap(), id, &song_ids).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn collection_remove(st: State<'_, AppState>, id: i64, song_ids: Vec<i64>) -> Res<()> {
     wp_core::browse::remove_from_collection(&st.db.lock().unwrap(), id, &song_ids).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn browse_chapter(st: State<'_, AppState>, version: String, typed: String) -> Res<wp_core::browse::ChapterView> {
     wp_core::browse::browse_chapter(&st.db.lock().unwrap(), &version, &typed).map_err(err)
 }
@@ -1367,12 +1477,12 @@ async fn search_bible(app: AppHandle, versions: Vec<String>, query: String) -> R
     .map_err(err)?
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn rebuild_search(st: State<'_, AppState>) -> Res<usize> {
     wp_core::browse::rebuild_search(&st.db.lock().unwrap()).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn reset_song_looks(st: State<'_, AppState>) -> Res<usize> {
     wp_core::browse::reset_song_looks(&st.db.lock().unwrap()).map_err(err)
 }
@@ -1402,7 +1512,7 @@ struct NdiStatus {
     sources: Vec<NdiSource>,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn ndi_status(st: State<'_, AppState>) -> NdiStatus {
     let (runtime, problem) = match st.ndi.runtime() {
         Ok(rt) => (Some(format!("{} ({})", rt.version, rt.path.display())), None),
@@ -1437,7 +1547,7 @@ fn ndi_status(st: State<'_, AppState>) -> NdiStatus {
 }
 
 /// Sends a moving test pattern (with a see-through half) for `seconds`.
-#[tauri::command]
+#[tauri::command(async)]
 fn ndi_test_pattern(st: State<'_, AppState>, name: String, seconds: Option<u64>) -> Res<()> {
     let (slot, _stats, stop) = st.ndi.start_pump("test", &name, None, 30)?;
     ndi::run_test_pattern(slot, stop, seconds.unwrap_or(30));
@@ -1505,28 +1615,55 @@ pub(crate) fn ndi_content(st: &AppState) -> (wp_render::Content, serde_json::Val
     let slides = st.slides.lock().unwrap().clone();
     let caption = st.caption.lock().unwrap().clone();
     let rev = *st.theme_rev.lock().unwrap();
-    let (theme, clock_now) = {
+    // the theme is read again only when themes change (this runs 20 times a second)
+    static CACHE: std::sync::LazyLock<Mutex<Option<(u64, serde_json::Value, bool)>>> = std::sync::LazyLock::new(|| Mutex::new(None));
+    let brand = {
         let conn = st.db.lock().unwrap();
-        let t = wp_core::themes::list(&conn).ok().and_then(|rows| rows.into_iter().filter(|r| r.kind == "lower_third").max_by_key(|r| r.is_default).map(|r| r.theme));
-        let now: String = conn.query_row("SELECT strftime('%H:%M', 'now', 'localtime')", [], |r| r.get(0)).unwrap_or_default();
-        (t, now)
+        let get = |k: &str| conn.query_row("SELECT value FROM setting WHERE key = ?1", [k], |r| r.get::<_, String>(0)).ok();
+        wp_render::Brand::from_settings(get("brand_colors").as_deref(), get("brand_font").as_deref(), get("brand_heading_font").as_deref())
     };
-    let theme = theme.unwrap_or_else(|| serde_json::json!({ "background": { "kind": "transparent" }, "layers": [] }));
+    // the cache key includes the brand, so a brand change re-reads the theme
+    let rev = rev.wrapping_mul(1_000_003).wrapping_add(brand.key());
+    let cached = CACHE.lock().unwrap().clone().filter(|(r, _, _)| *r == rev);
+    let (theme, has_clock) = match cached {
+        Some((_, t, c)) => (t, c),
+        None => {
+            let t = {
+                let conn = st.db.lock().unwrap();
+                wp_core::themes::list(&conn).ok().and_then(|rows| rows.into_iter().filter(|r| r.kind == "lower_third").max_by_key(|r| r.is_default).map(|r| r.theme))
+            }
+            .unwrap_or_else(|| serde_json::json!({ "background": { "kind": "transparent" }, "layers": [] }));
+            let t = brand.resolve(&t);
+            let c = t.to_string().contains("\"clock\"");
+            *CACHE.lock().unwrap() = Some((rev, t.clone(), c));
+            (t, c)
+        }
+    };
+    let clock_now = if has_clock {
+        st.db.lock().unwrap().query_row("SELECT strftime('%H:%M', 'now', 'localtime')", [], |r| r.get::<_, String>(0)).unwrap_or_default()
+    } else {
+        String::new()
+    };
     let mut c = wp_render::Content { clock: clock_now, ..Default::default() };
     let words = matches!(item, Some(ProgramItem::Song { .. }) | Some(ProgramItem::Scripture { .. }));
     let showing = matches!(live.mode, Mode::Live | Mode::Clear);
     if words && showing {
+        c.first = live.slide_idx == 0;
+        c.last = live.slide_idx + 1 >= slides.len();
         if let Some(s) = slides.get(live.slide_idx) {
             c.primary = s.primary.clone();
             c.second = s.second.clone();
-            if let Some(ProgramItem::Song { .. }) = item {
+            if let Some(ProgramItem::Song { song_id, .. }) = item {
                 c.section = Some(section_name(&s.label));
                 c.title = caption.clone();
+                c.copyright = st.db.lock().unwrap().query_row("SELECT copyright FROM song WHERE id = ?1", [song_id], |r| r.get::<_, Option<String>>(0)).ok().flatten();
             } else {
                 c.reference = caption.clone();
             }
         }
         c.hide_text = live.mode == Mode::Clear;
+        c.text_scale = live.text_scale;
+        c.text_shift = live.text_shift;
     }
     c.alert = live.alert.as_ref().filter(|a| a.on_stream).map(|a| a.text.clone());
     if matches!(live.subtitles.as_deref(), Some("stream") | Some("both")) {
@@ -1535,8 +1672,8 @@ pub(crate) fn ndi_content(st: &AppState) -> (wp_render::Content, serde_json::Val
             c.subtitle = Some(text);
         }
     }
-    let clock = theme.to_string().contains("\"clock\"");
-    let sig = format!("{}|{}|{:?}|{:?}|{:?}|{:?}|{}", live.revision, rev, c.primary, c.alert, c.subtitle, c.reference, c.hide_text);
+    let clock = has_clock;
+    let sig = format!("{}|{}|{:?}|{:?}|{:?}|{:?}|{}|{}|{}", live.revision, rev, c.primary, c.alert, c.subtitle, c.reference, c.hide_text, c.text_scale, c.text_shift);
     (c, theme, sig, clock)
 }
 
@@ -1590,8 +1727,37 @@ async fn ndi_sources(app: AppHandle, groups: Option<String>) -> Res<Vec<wp_core:
     .map_err(err)?
 }
 
+/// The theme the rules choose for an item (None: the default theme).
+fn rule_theme(conn: &rusqlite::Connection, item: &ProgramItem) -> Option<i64> {
+    match item {
+        ProgramItem::Song { song_id, .. } => wp_core::theme_rules::for_song(conn, *song_id).ok().flatten(),
+        ProgramItem::Scripture { versions, .. } => wp_core::theme_rules::for_scripture(conn, versions).ok().flatten(),
+        _ => None,
+    }
+}
+
+#[tauri::command(async)]
+fn theme_rules(st: State<'_, AppState>) -> Res<Vec<wp_core::theme_rules::Rule>> {
+    wp_core::theme_rules::list(&st.db.lock().unwrap()).map_err(err)
+}
+
+#[tauri::command(async)]
+fn save_theme_rules(app: AppHandle, st: State<'_, AppState>, rules: Vec<wp_core::theme_rules::Rule>) -> Res<()> {
+    wp_core::theme_rules::save_all(&st.db.lock().unwrap(), &rules).map_err(err)?;
+    // the live item may now use another theme
+    broadcast(&app, &st);
+    let _ = app.emit("settings-changed", ("theme_rules", ""));
+    Ok(())
+}
+
+/// For Preview: the theme the rules choose for this item.
+#[tauri::command(async)]
+fn resolve_theme(st: State<'_, AppState>, item: ProgramItem) -> Res<Option<i64>> {
+    Ok(rule_theme(&st.db.lock().unwrap(), &item))
+}
+
 /// Sends (or stops sending) the computer's sound with an NDI source.
-#[tauri::command]
+#[tauri::command(async)]
 fn ndi_audio(st: State<'_, AppState>, source: String, on: bool) -> Res<()> {
     let mut jobs = st.ndi.jobs.lock().unwrap();
     let job = jobs.get_mut(&source).ok_or("Start that NDI source first.")?;
@@ -1606,7 +1772,7 @@ fn ndi_audio(st: State<'_, AppState>, source: String, on: bool) -> Res<()> {
 
 /// The Windows title bar follows the app's Dark/Light choice; on Windows 11 the
 /// window gets the Mica backdrop in the same shade (Windows 10 ignores it).
-#[tauri::command]
+#[tauri::command(async)]
 fn set_window_look(app: AppHandle, dark: bool) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.set_theme(Some(if dark { tauri::Theme::Dark } else { tauri::Theme::Light }));
@@ -1617,7 +1783,7 @@ fn set_window_look(app: AppHandle, dark: bool) {
 }
 
 /// The control window starts hidden and appears once its first frame is drawn.
-#[tauri::command]
+#[tauri::command(async)]
 fn show_main_window(app: AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
@@ -1697,7 +1863,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
 }
 
 /// Opens NDI's official runtime download in the browser (this fixed address only).
-#[tauri::command]
+#[tauri::command(async)]
 fn open_ndi_runtime_page() -> Res<()> {
     let url = if cfg!(target_os = "macos") { "https://ndi.link/NDIRedistV6Apple" } else { "https://ndi.link/NDIRedistV6" };
     let r = if cfg!(windows) {
@@ -1710,7 +1876,7 @@ fn open_ndi_runtime_page() -> Res<()> {
     r.map(drop).map_err(|e| format!("Could not open the browser ({e}). The address is {url}"))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn ndi_stop(app: AppHandle, st: State<'_, AppState>, source: String) {
     st.ndi.stop(&source);
     if source == "lower_third" {
@@ -1722,28 +1888,28 @@ fn ndi_stop(app: AppHandle, st: State<'_, AppState>, source: String) {
 
 // ---------- announcements, repeat counter, lining out ----------
 
-#[tauri::command]
+#[tauri::command(async)]
 fn list_announcements(st: State<'_, AppState>) -> Res<Vec<wp_core::announcements::DeckSummary>> {
     wp_core::announcements::list(&st.db.lock().unwrap()).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_announcement(st: State<'_, AppState>, id: i64) -> Res<wp_core::announcements::Deck> {
     wp_core::announcements::get(&st.db.lock().unwrap(), id).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn announcement_templates() -> Vec<wp_core::announcements::Deck> {
     wp_core::announcements::templates()
 }
 
 /// Saves a deck. Like songs, never changes what is on the screens.
-#[tauri::command]
+#[tauri::command(async)]
 fn save_announcement(st: State<'_, AppState>, deck: wp_core::announcements::Deck) -> Res<i64> {
     wp_core::announcements::save(&st.db.lock().unwrap(), &deck).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn delete_announcement(st: State<'_, AppState>, id: i64) -> Res<()> {
     if matches!(&*st.item.lock().unwrap(), Some(ProgramItem::Announcement { presentation_id, .. }) if *presentation_id == id) {
         return Err("These announcements are on the screens. Send something else live first.".into());
@@ -1751,14 +1917,14 @@ fn delete_announcement(st: State<'_, AppState>, id: i64) -> Res<()> {
     wp_core::announcements::delete(&st.db.lock().unwrap(), id).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn preview_announcement(st: State<'_, AppState>, id: i64) -> Res<Vec<Slide>> {
     let d = wp_core::announcements::get(&st.db.lock().unwrap(), id).map_err(err)?;
     Ok(wp_core::announcements::to_slides(&d))
 }
 
 /// Pause or resume a deck that advances by itself.
-#[tauri::command]
+#[tauri::command(async)]
 fn set_auto_paused(app: AppHandle, st: State<'_, AppState>, paused: bool) -> Res<LiveState> {
     let cur = st.live.lock().unwrap().clone();
     let Some(mut a) = cur.auto.clone() else { return Err("Nothing is advancing by itself.".into()) };
@@ -1771,7 +1937,7 @@ fn set_auto_paused(app: AppHandle, st: State<'_, AppState>, paused: bool) -> Res
 }
 
 /// Count a section (usually the chorus) for the band: total times to sing it.
-#[tauri::command]
+#[tauri::command(async)]
 fn set_repeat(app: AppHandle, st: State<'_, AppState>, label: Option<String>, total: u32, done: Option<u32>) -> Res<LiveState> {
     let cur = st.live.lock().unwrap().clone();
     let repeat = label.map(|l| {
@@ -1786,26 +1952,32 @@ fn set_repeat(app: AppHandle, st: State<'_, AppState>, label: Option<String>, to
 /// appear on the projector (only the app's code runs there: see the CSP).
 pub(crate) const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --use-fake-ui-for-media-stream --disable-pinch";
 
+/// The Live pane's quick change: words larger/smaller and up/down for this item only.
+#[tauri::command(async)]
+fn set_text_adjust(app: AppHandle, st: State<'_, AppState>, scale: f32, shift: f32) -> Res<LiveState> {
+    Ok(apply(&app, &st, Command::SetTextAdjust { scale, shift }))
+}
+
 /// Moves the musicians' chords up or down (semitones) on the stage view.
-#[tauri::command]
+#[tauri::command(async)]
 fn set_transpose(app: AppHandle, st: State<'_, AppState>, semitones: i8) -> Res<LiveState> {
     Ok(apply(&app, &st, Command::SetTranspose { semitones }))
 }
 
 /// Shows a camera on the main screen (or takes it off with None).
-#[tauri::command]
+#[tauri::command(async)]
 fn set_camera(app: AppHandle, st: State<'_, AppState>, camera: Option<wp_core::live::Camera>) -> Res<LiveState> {
     Ok(apply(&app, &st, Command::SetCamera { camera }))
 }
 
 /// Live sermon subtitles on the stream, the screens, both, or off.
-#[tauri::command]
+#[tauri::command(async)]
 fn set_subtitles(app: AppHandle, st: State<'_, AppState>, target: Option<String>) -> Res<LiveState> {
     Ok(apply(&app, &st, Command::SetSubtitles { target }))
 }
 
 /// Lining out: one line per slide, remembering the previous setting to restore.
-#[tauri::command]
+#[tauri::command(async)]
 fn set_lining_out(app: AppHandle, st: State<'_, AppState>, on: bool) -> Res<LiveState> {
     let prev = st.live.lock().unwrap().lines_per_slide;
     let restore = { *st.lines_before_lining.lock().unwrap() };
@@ -1830,7 +2002,7 @@ fn apply(app: &AppHandle, st: &AppState, c: Command) -> LiveState {
 }
 
 /// Starts a timer: mode "countdown" with value "5:00", or "to_time" with "09:00".
-#[tauri::command]
+#[tauri::command(async)]
 fn timer_start(app: AppHandle, st: State<'_, AppState>, label: String, mode: String, value: String, on_screens: TimerShow, on_stage: bool) -> Res<LiveState> {
     let now = cues::now_ms();
     let ends = match mode.as_str() {
@@ -1843,7 +2015,7 @@ fn timer_start(app: AppHandle, st: State<'_, AppState>, label: String, mode: Str
 }
 
 /// pause, resume, stop, or add/subtract milliseconds; or change where it shows.
-#[tauri::command]
+#[tauri::command(async)]
 fn timer_control(app: AppHandle, st: State<'_, AppState>, action: String, ms: Option<i64>, on_screens: Option<TimerShow>, on_stage: Option<bool>) -> Res<LiveState> {
     let now = cues::now_ms();
     let Some(t) = st.live.lock().unwrap().timer.clone() else { return Err("No timer is running.".into()) };
@@ -1889,7 +2061,7 @@ fn alert_show(
     Ok(apply(&app, &st, Command::SetAlert { alert: Some(alert) }))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn alert_clear(app: AppHandle, st: State<'_, AppState>) -> LiveState {
     apply(&app, &st, Command::SetAlert { alert: None })
 }
@@ -1900,23 +2072,23 @@ struct CuePresets {
     alerts: Vec<cues::AlertPreset>,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn cue_presets(st: State<'_, AppState>) -> Res<CuePresets> {
     let c = st.db.lock().unwrap();
     Ok(CuePresets { timers: cues::timer_presets(&c).map_err(err)?, alerts: cues::alert_presets(&c).map_err(err)? })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn save_timer_preset(st: State<'_, AppState>, preset: cues::TimerPreset) -> Res<i64> {
     cues::save_timer_preset(&st.db.lock().unwrap(), &preset).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn save_alert_preset(st: State<'_, AppState>, preset: cues::AlertPreset) -> Res<i64> {
     cues::save_alert_preset(&st.db.lock().unwrap(), &preset).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn delete_cue_preset(st: State<'_, AppState>, kind: String, id: i64) -> Res<()> {
     cues::delete_preset(&st.db.lock().unwrap(), &kind, id).map_err(err)
 }
@@ -1929,12 +2101,12 @@ struct CurrentProfile {
     name: String,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn list_profiles(st: State<'_, AppState>) -> Res<Vec<wp_core::profiles::Profile>> {
     wp_core::profiles::list(&st.profiles_root).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn current_profile(st: State<'_, AppState>) -> Res<CurrentProfile> {
     let slug = st.profile.lock().unwrap().0.clone();
     let name = wp_core::profiles::list(&st.profiles_root).map_err(err)?.into_iter().find(|p| p.slug == slug).map(|p| p.name).unwrap_or_else(|| slug.clone());
@@ -1942,25 +2114,25 @@ fn current_profile(st: State<'_, AppState>) -> Res<CurrentProfile> {
 }
 
 /// New profile, empty or starting as a copy of the current library.
-#[tauri::command]
+#[tauri::command(async)]
 fn create_profile(st: State<'_, AppState>, name: String, copy_current: bool) -> Res<String> {
     let conn = st.db.lock().unwrap();
     wp_core::profiles::create(&st.profiles_root, &name, copy_current.then_some(&*conn)).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn rename_profile(st: State<'_, AppState>, slug: String, name: String) -> Res<()> {
     wp_core::profiles::rename(&st.profiles_root, &slug, &name).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn delete_profile(st: State<'_, AppState>, slug: String) -> Res<String> {
     wp_core::profiles::delete(&st.profiles_root, &slug).map(|p| p.to_string_lossy().into_owned()).map_err(err)
 }
 
 /// Swaps the whole library to another profile. What is live is taken off air
 /// (outputs go blank) because it belongs to the old library.
-#[tauri::command]
+#[tauri::command(async)]
 fn switch_profile(app: AppHandle, st: State<'_, AppState>, slug: String) -> Res<()> {
     if st.profile.lock().unwrap().0 == slug {
         return Ok(());
@@ -2048,6 +2220,9 @@ pub fn run() {
                 pulpit: Mutex::new(Default::default()),
                 caption_now: Mutex::new((String::new(), None)),
                 ndi_inputs: ndi::Inputs::default(),
+                building: Mutex::new(Default::default()),
+                born: Mutex::new(HashMap::new()),
+                seen: Mutex::new(Default::default()),
             });
             // weekly automatic backup, taken quietly at start-up
             if let Some(s) = app.try_state::<AppState>() {
@@ -2112,12 +2287,18 @@ pub fn run() {
                     }
                     let wanted: Vec<(String, Option<usize>)> = s.outputs.lock().unwrap().iter().map(|(r, d)| (r.clone(), *d)).collect();
                     for (role, display) in wanted {
+                        // a window being built, or still loading (15 s), is left alone
+                        if s.building.lock().unwrap().contains(&role) || s.born.lock().unwrap().get(&role).map_or(false, |t| t.elapsed() < Duration::from_secs(15)) {
+                            continue;
+                        }
                         let silent = s.acks.lock().unwrap().get(&role).map(|(t, _)| t.elapsed() > Duration::from_secs(4)).unwrap_or(true);
                         let missing = handle.get_webview_window(&format!("output-{role}")).is_none();
                         if silent || missing {
                             s.acks.lock().unwrap().insert(role.clone(), (Instant::now(), 0));
-                            // when it comes back it stays black until the operator resumes it
-                            if s.held.lock().unwrap().insert(role.clone()) {
+                            // an output that was working and was lost comes back black until
+                            // the operator resumes it; one that never started is not held
+                            let had_worked = s.seen.lock().unwrap().contains(&role);
+                            if had_worked && s.held.lock().unwrap().insert(role.clone()) {
                                 broadcast(&handle, &s);
                             }
                             let h = handle.clone();
@@ -2215,6 +2396,7 @@ pub fn run() {
             set_subtitles,
             set_camera,
             set_transpose,
+            set_text_adjust,
             foreign_theme_review,
             foreign_theme_import,
             pulpit_dismiss,
@@ -2271,6 +2453,12 @@ pub fn run() {
             set_window_look,
             show_main_window,
             ndi_sources,
+            set_media_options,
+            theme_rules,
+            theme_gallery,
+            save_theme_rules,
+            resolve_theme,
+            reveal_media,
             ndi_stop,
             list_announcements,
             get_announcement,

@@ -131,7 +131,7 @@ pub struct RemoteStatus {
     log: Vec<wp_remote::LogLine>,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn remote_status(st: tauri::State<'_, AppState>) -> RemoteStatus {
     let r = st.remote.lock().unwrap();
     let ip = lan_ip();
@@ -173,7 +173,7 @@ pub async fn remote_start(app: AppHandle, everywhere: bool, port: u16) -> Res<()
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn remote_stop(st: tauri::State<'_, AppState>) {
     if let Some(r) = st.remote.lock().unwrap().take() {
         r.remote.revoke_all();
@@ -181,12 +181,12 @@ pub fn remote_stop(st: tauri::State<'_, AppState>) {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn remote_new_pin(st: tauri::State<'_, AppState>) -> Res<String> {
     st.remote.lock().unwrap().as_ref().map(|r| r.remote.new_pin()).ok_or_else(|| err("The remote is off."))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn remote_revoke(st: tauri::State<'_, AppState>, id: String) {
     if let Some(r) = st.remote.lock().unwrap().as_ref() {
         r.remote.revoke(&id);
@@ -194,7 +194,7 @@ pub fn remote_revoke(st: tauri::State<'_, AppState>, id: String) {
 }
 
 /// End of service: every phone and tablet must join again.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn remote_end_all(st: tauri::State<'_, AppState>) {
     if let Some(r) = st.remote.lock().unwrap().as_ref() {
         r.remote.revoke_all();

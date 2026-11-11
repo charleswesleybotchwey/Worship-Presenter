@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, pickForeignTheme, pickThemeOpen, pickThemeSave, type ForeignDesign, type MediaItem } from "../api";
+import { api, type MediaItem } from "../api";
 import { MediaGrid } from "../MediaLibrary";
 import { FontPicker } from "./FontPicker";
-import { ForeignThemeImport } from "./ForeignThemeImport";
+import { BRAND_NAMES, brandColor, isBrand, resolveBrand, useBrand } from "./brand";
+import { checkReadability, outsideSafe, type ReadIssue } from "./readability";
 import { ThemeView, type Phase } from "./ThemeView";
+import { useMediaUrl } from "./media";
 import {
   FIELD_NAMES,
   KIND_NAMES,
@@ -20,6 +22,8 @@ import {
   type Theme,
   type ThemeKind,
   type ThemeRow,
+  BOX_DEFAULT,
+  type Gradient,
 } from "./types";
 
 // Theme editor: ProPresenter-style looks built from vMix-style layers.
@@ -129,17 +133,46 @@ function hexParts(c: string): [string, number] {
 }
 
 function Color({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
-  const [hex, alpha] = hexParts(value);
-  const join = (h: string, a: number) => (a >= 100 ? h : `${h}${Math.round((a / 100) * 255).toString(16).padStart(2, "0")}`);
+  // a colour can be linked to the brand kit (it then follows the brand)
+  const brand = useBrand();
+  const linked = isBrand(value);
+  const [hex, alpha] = hexParts(brandColor(value, brand));
+  const a2 = (a: number) => Math.round((a / 100) * 255).toString(16).padStart(2, "0");
+  const join = (h: string, a: number) => (a >= 100 ? h : `${h}${a2(a)}`);
+  const slot = linked ? Number(value.slice(6, 7)) : 0;
   return (
     <label className="prop">
       <span>{label}</span>
       <span className="prop__color">
-        <input type="color" value={hex} onChange={(e) => onChange(join(e.target.value, alpha))} />
-        <input type="range" min={0} max={100} value={alpha} onChange={(e) => onChange(join(hex, Number(e.target.value)))} aria-label={`${label} opacity`} />
+        <input type="color" value={hex} onChange={(e) => onChange(join(e.target.value, alpha))} title={linked ? `Linked to the brand's ${BRAND_NAMES[slot - 1]} colour; picking a colour unlinks it` : undefined} />
+        <input type="range" min={0} max={100} value={alpha} onChange={(e) => onChange(linked ? `brand:${slot}${Number(e.target.value) >= 100 ? "" : "/" + a2(Number(e.target.value))}` : join(hex, Number(e.target.value)))} aria-label={`${label} opacity`} />
         <em>{alpha}%</em>
+        <span className="prop__brand" role="group" aria-label="Brand colours">
+          {brand.colors.map((c, i) => (
+            <button
+              key={i}
+              type="button"
+              className={slot === i + 1 ? "is-on" : ""}
+              style={{ background: c }}
+              title={`Brand ${BRAND_NAMES[i]} colour (follows the brand kit)`}
+              aria-label={`Brand ${BRAND_NAMES[i]}`}
+              onClick={(e) => (e.preventDefault(), onChange(`brand:${i + 1}${alpha >= 100 ? "" : "/" + a2(alpha)}`))}
+            />
+          ))}
+        </span>
       </span>
     </label>
+  );
+}
+
+/** Two colours and an angle (0° = upwards, 90° = to the right). */
+function GradientProps({ g, onChange }: { g: Gradient; onChange: (g: Gradient) => void }) {
+  return (
+    <>
+      <Color label="From" value={g.from} onChange={(from) => onChange({ ...g, from })} />
+      <Color label="To" value={g.to} onChange={(to) => onChange({ ...g, to })} />
+      <Num label="Angle" value={g.angle} step={15} min={0} max={360} suffix="°" onChange={(angle) => onChange({ ...g, angle })} />
+    </>
   );
 }
 
@@ -262,7 +295,17 @@ function AnimProps({ title, value, onChange }: { title: string; value: Anim; onC
 function TextStyleProps({ s, set }: { s: TextStyle; set: (p: Partial<TextStyle>) => void }) {
   return (
     <Group title="Text">
-      <FontPicker value={s.font} onChange={(font) => set({ font })} />
+      <Select
+        label="Font from"
+        value={s.font === "brand" || s.font === "brand-heading" ? s.font : "own"}
+        options={[
+          { value: "own", label: "This theme" },
+          { value: "brand", label: "Brand text font" },
+          { value: "brand-heading", label: "Brand heading font" },
+        ]}
+        onChange={(v) => set({ font: v === "own" ? "Noto Sans" : v })}
+      />
+      {s.font !== "brand" && s.font !== "brand-heading" && <FontPicker value={s.font} onChange={(font) => set({ font })} />}
       <div className="prop-row">
         <Num label="Size" value={s.size} step={0.25} min={0.5} suffix="%" onChange={(size) => set({ size })} />
         <Select
@@ -287,6 +330,8 @@ function TextStyleProps({ s, set }: { s: TextStyle; set: (p: Partial<TextStyle>)
       </div>
       <Check label="Shrink to fit the box" value={s.autoFit} onChange={(autoFit) => set({ autoFit })} />
       {s.autoFit && <Num label="Smallest size" value={s.minSize} step={0.25} min={0.5} suffix="%" onChange={(minSize) => set({ minSize })} />}
+      <Check label="Gradient words" value={!!s.gradient} onChange={(on) => set({ gradient: on ? { from: s.color.slice(0, 7), to: "#f2b705", angle: 180 } : null })} />
+      {s.gradient && <GradientProps g={s.gradient} onChange={(gradient) => set({ gradient })} />}
       <Check label="Shadow" value={s.shadow.on} onChange={(on) => set({ shadow: { ...s.shadow, on } })} />
       {s.shadow.on && (
         <>
@@ -304,16 +349,53 @@ function TextStyleProps({ s, set }: { s: TextStyle; set: (p: Partial<TextStyle>)
           <Num label="Width" value={s.outline.width} step={0.05} min={0} onChange={(width) => set({ outline: { ...s.outline, width } })} />
         </div>
       )}
+      {(() => {
+        // ProPresenter-style box that grows with the words
+        const b = { ...BOX_DEFAULT, ...(s.box ?? {}) };
+        const setB = (p: Partial<typeof b>) => set({ box: { ...b, ...p } });
+        return (
+          <>
+            <Select
+              label="Box behind text"
+              value={b.mode}
+              options={[
+                { value: "off", label: "Off" },
+                { value: "block", label: "Whole text (grows with the words)" },
+                { value: "lines", label: "Each line" },
+              ]}
+              onChange={(mode) => setB({ mode })}
+            />
+            {b.mode !== "off" && (
+              <>
+                <Color label="Box colour" value={b.color} onChange={(color) => setB({ color })} />
+                <div className="prop-row">
+                  <Num label="Side padding" value={b.padX} step={0.25} min={0} suffix="%" onChange={(padX) => setB({ padX })} />
+                  <Num label="Top and bottom" value={b.padY} step={0.25} min={0} suffix="%" onChange={(padY) => setB({ padY })} />
+                </div>
+                <Num label="Corners" value={b.radius} step={0.1} min={0} suffix="%" onChange={(radius) => setB({ radius })} />
+                <Num label="Frosted blur" value={b.blur ?? 0} step={0.25} min={0} max={6} suffix="%" onChange={(blur) => setB({ blur })} />
+                {b.mode === "block" && <Check label="Glide to the new size" value={b.animate} onChange={(animate) => setB({ animate })} />}
+              </>
+            )}
+          </>
+        );
+      })()}
     </Group>
   );
 }
+
+const brightText = (c: string) => {
+  const h = c.replace("#", "");
+  const v = [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2) || "ff", 16));
+  return 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2] > 128;
+};
 
 // ---------- editor ----------
 
 type Drag = { id: string; handle: string | null; px: number; py: number; start: { x: number; y: number; w: number; h: number }; box: DOMRect };
 
-export function ThemeEditor({ onClose }: { onClose: () => void }) {
-  const [rows, setRows] = useState<ThemeRow[]>([]);
+export function ThemeEditor({ onClose, request }: { onClose: () => void; /** From the library's right-click menu: open this theme, or start a new one of this kind. */ request?: { id?: number; newKind?: ThemeKind; n: number } }) {
+  const [, setRows] = useState<ThemeRow[]>([]);
   const [currentId, setCurrentId] = useState<number | null>(null);
   const [theme, setTheme] = useState<Theme | null>(null);
   const [saved, setSaved] = useState<string>("");
@@ -323,7 +405,18 @@ export function ThemeEditor({ onClose }: { onClose: () => void }) {
   const [showKey, setShowKey] = useState(0);
   const [guides, setGuides] = useState<{ x: number[]; y: number[] }>({ x: [], y: [] });
   const [message, setMessage] = useState<{ text: string; bad?: boolean } | null>(null);
-  const [foreign, setForeign] = useState<{ path: string; designs: ForeignDesign[] } | null>(null);
+  const [safe, setSafe] = useState(() => localStorage.getItem("wp-te-safe") === "1");
+  useEffect(() => localStorage.setItem("wp-te-safe", safe ? "1" : "0"), [safe]);
+  const [issues, setIssues] = useState<ReadIssue[]>([]);
+  const mediaUrl = useMediaUrl();
+  const brandNow = useBrand();
+  useEffect(() => {
+    if (!theme) return;
+    let alive = true;
+    const t = setTimeout(() => void checkReadability(resolveBrand(theme, brandNow), mediaUrl).then((x) => alive && setIssues(x)), 250);
+    return () => ((alive = false), clearTimeout(t));
+  }, [theme, brandNow, mediaUrl]);
+  const unsafe = theme ? outsideSafe(theme) : [];
   const history = useRef<Theme[]>([]);
   const drag = useRef<Drag | null>(null);
   const canvas = useRef<HTMLDivElement>(null);
@@ -339,6 +432,19 @@ export function ThemeEditor({ onClose }: { onClose: () => void }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    if (!request) return;
+    (async () => {
+      if (request.newKind) {
+        const id = await api.saveTheme(null, blankTheme(request.newKind));
+        await refresh(id);
+      } else if (request.id != null) {
+        await refresh(request.id);
+      }
+    })().catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [request?.n]);
+
   const open = (row: ThemeRow) => {
     setCurrentId(row.id);
     setTheme(structuredClone(row.theme));
@@ -351,11 +457,13 @@ export function ThemeEditor({ onClose }: { onClose: () => void }) {
   };
 
   useEffect(() => {
+    if (request) return; // the requested theme opens instead (see below)
     api.listThemes().then((r) => {
       setRows(r);
       const first = r.find((x) => x.kind === "song" && x.is_default) ?? r[0];
       if (first) open(first);
     });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const change = useCallback((next: Theme) => {
@@ -380,17 +488,6 @@ export function ThemeEditor({ onClose }: { onClose: () => void }) {
       setRows(await api.listThemes());
     } catch (e) {
       setMessage({ text: String(e instanceof Error ? e.message : e), bad: true });
-    }
-  };
-
-  const act = async (f: () => Promise<unknown>, ok?: string) => {
-    try {
-      await f();
-      if (ok) setMessage({ text: ok });
-      return true;
-    } catch (e) {
-      setMessage({ text: String(e instanceof Error ? e.message : e), bad: true });
-      return false;
     }
   };
 
@@ -514,7 +611,7 @@ export function ThemeEditor({ onClose }: { onClose: () => void }) {
   return (
     <div className="te" role="dialog" aria-label="Theme editor">
       <header className="te__head">
-        <span className="pane__title">Themes</span>
+        <span className="pane__title">Edit {({ song: "Song", scripture: "Scripture", lower_third: "Lower Third", announcement: "Presentation" } as Record<string, string>)[theme.kind] ?? ""} Theme</span>
         <span className="te__name">{theme.name}</span>
         {dirty && <span className="te__dirty">Unsaved changes</span>}
         {theme.kind === "lower_third" && greenWarning(theme) && <span className="te__warn" title="NDI keys pure green to transparency">{greenWarning(theme)}</span>}
@@ -531,126 +628,6 @@ export function ThemeEditor({ onClose }: { onClose: () => void }) {
       <div className="te__body">
         {/* ---------- left: themes and layers ---------- */}
         <aside className="te__side">
-          {kinds.map((k) => (
-            <section key={k} className="te__group">
-              <h3>{KIND_NAMES[k]}</h3>
-              <ul>
-                {rows
-                  .filter((r) => r.kind === k)
-                  .map((r) => (
-                    <li key={r.id}>
-                      <button className={`te__theme ${r.id === currentId ? "is-current" : ""}`} onClick={() => r.id !== currentId && confirmLeave() && open(r)}>
-                        <span>{r.name}</span>
-                        {r.is_default && <span className="te__badge">In use</span>}
-                      </button>
-                    </li>
-                  ))}
-              </ul>
-              <button
-                className="btn-quiet te__add"
-                onClick={async () => {
-                  if (!confirmLeave()) return;
-                  const t = blankTheme(k);
-                  const id = await api.saveTheme(null, t);
-                  await refresh(id);
-                }}
-              >
-                + New {KIND_NAMES[k].toLowerCase()} theme
-              </button>
-            </section>
-          ))}
-          {currentId != null && (
-            <div className="te__actions">
-              <button
-                className="btn-quiet"
-                disabled={dirty || rows.find((r) => r.id === currentId)?.is_default}
-                title={dirty ? "Save first" : undefined}
-                onClick={() => act(() => api.setDefaultTheme(theme.kind, currentId), `“${theme.name}” is now used for ${KIND_NAMES[theme.kind].toLowerCase()}.`).then(() => api.listThemes().then(setRows))}
-              >
-                Use this theme
-              </button>
-              <button className="btn-quiet" onClick={async () => confirmLeave() && refresh(await api.duplicateTheme(currentId))}>
-                Duplicate
-              </button>
-              <button
-                className="btn-quiet"
-                disabled={dirty}
-                title={dirty ? "Save first" : "Save as a .wptheme file, with its pictures and videos, to use on another computer"}
-                onClick={async () => {
-                  const path = await pickThemeSave(theme.name);
-                  if (!path) return;
-                  await act(async () => {
-                    const bytes = await api.exportTheme(currentId, path);
-                    setMessage({ text: `Exported (${bytes > 1e6 ? (bytes / 1e6).toFixed(1) + " MB" : Math.max(1, Math.round(bytes / 1e3)) + " KB"}). Copy the file to the other computer and use Import there.` });
-                  });
-                }}
-              >
-                Export…
-              </button>
-              <button
-                className="btn-quiet btn-danger"
-                onClick={async () => {
-                  if (!confirm(`Delete the theme “${theme.name}”?`)) return;
-                  if (await act(() => api.deleteTheme(currentId))) {
-                    const r = await api.listThemes();
-                    setRows(r);
-                    const next = r.find((x) => x.kind === theme.kind) ?? r[0];
-                    if (next) open(next);
-                  }
-                }}
-              >
-                Delete
-              </button>
-            </div>
-          )}
-
-          <div className="te__actions">
-            <button
-              className="btn-quiet"
-              onClick={async () => {
-                if (!confirmLeave()) return;
-                const path = await pickThemeOpen();
-                if (!path) return;
-                try {
-                  const r = await api.importTheme(path);
-                  await refresh(r.id);
-                  setMessage({ text: `Imported “${r.name}”. Its pictures and videos are in the media library. Choose “Use this theme” to put it in use.` });
-                } catch (e) {
-                  setMessage({ text: String(e instanceof Error ? e.message : e), bad: true });
-                }
-              }}
-            >
-              Import a theme…
-            </button>
-            <button
-              className="btn-quiet"
-              onClick={async () => {
-                if (!confirmLeave()) return;
-                const path = await pickForeignTheme();
-                if (!path) return;
-                try {
-                  setForeign({ path, designs: await api.foreignThemeReview(path) });
-                } catch (e) {
-                  setMessage({ text: String(e instanceof Error ? e.message : e), bad: true });
-                }
-              }}
-            >
-              From EasyWorship or ProPresenter…
-            </button>
-          </div>
-          {foreign && (
-            <ForeignThemeImport
-              path={foreign.path}
-              designs={foreign.designs}
-              onCancel={() => setForeign(null)}
-              onDone={async (text, first) => {
-                setForeign(null);
-                await refresh(first);
-                setMessage({ text });
-              }}
-            />
-          )}
-
           <section className="te__group te__layers">
             <h3>Layers, front first</h3>
             <ul>
@@ -694,6 +671,9 @@ export function ThemeEditor({ onClose }: { onClose: () => void }) {
         <main className="te__stage">
           <div className="te__stagebar">
             <Select label="Sample" value={sample} options={Object.entries(SAMPLES).map(([value, s]) => ({ value, label: s.name }))} onChange={setSample} />
+            <label className="wp-check wp-check--inline" title="TV-safe guides: older projectors and LED walls can cut off the outer 5 %">
+              <input type="checkbox" checked={safe} onChange={(e) => setSafe(e.target.checked)} /> Safe areas
+            </label>
             <span className="topbar__spacer" />
             <button className="btn-quiet" onClick={() => play("in")}>
               ▶ Play in
@@ -706,8 +686,46 @@ export function ThemeEditor({ onClose }: { onClose: () => void }) {
             </button>
           </div>
           <div className={`te__canvas ${theme.background.kind === "transparent" ? "te__canvas--checker" : ""}`} ref={canvas} onPointerDown={(e) => e.target === e.currentTarget && setSelected(null)}>
-            <ThemeView theme={theme} data={data} phase={phase} showKey={showKey} editor={phase === "static" ? { selected, onPointerDown, guides } : undefined} />
+            <ThemeView theme={theme} data={data} phase={phase} showKey={showKey} editor={phase === "static" ? { selected, onPointerDown, guides } : undefined}>
+              {safe && (
+                <div className="te__safe" aria-hidden="true">
+                  <div className="te__safe-action" />
+                  <div className="te__safe-title" />
+                </div>
+              )}
+            </ThemeView>
           </div>
+          {(issues.length > 0 || (safe && unsafe.length > 0)) && (
+            <div className="te__issues" role="status">
+              {issues.map((i) => (
+                <div key={i.layerId} className="te__issue">
+                  <strong>{i.name}</strong> is hard to read here (contrast {i.ratio.toFixed(1)}:1; aim for 3:1 or more).
+                  {i.fix === "dim" ? (
+                    <button className="btn-quiet" onClick={() => change({ ...theme, background: { ...theme.background, dim: Math.min(0.85, Math.round((theme.background.dim + 0.15) * 100) / 100) } })}>
+                      Darken the picture
+                    </button>
+                  ) : (
+                    <button
+                      className="btn-quiet"
+                      onClick={() =>
+                        change({
+                          ...theme,
+                          layers: theme.layers.map((l) =>
+                            l.id === i.layerId && l.kind === "text"
+                              ? { ...l, style: { ...l.style, box: { ...BOX_DEFAULT, mode: "block", color: brightText(l.style.color) ? "#000000b3" : "#ffffffd9" } } }
+                              : l,
+                          ),
+                        })
+                      }
+                    >
+                      Put a box behind the words
+                    </button>
+                  )}
+                </div>
+              ))}
+              {safe && unsafe.length > 0 && <div className="te__issue">Outside the safe area (may be cut off on some screens): {unsafe.join(", ")}.</div>}
+            </div>
+          )}
           <p className="hint">Drag to move, pull the handles to resize. Edges snap to the centre, the sides and other layers; hold Alt to place freely. Arrow keys nudge (Shift for bigger steps).</p>
         </main>
 
@@ -736,10 +754,14 @@ export function ThemeEditor({ onClose }: { onClose: () => void }) {
                     { value: "color", label: "Colour" },
                     { value: "image", label: "Picture" },
                     { value: "video", label: "Moving background (video)" },
+                    { value: "gradient", label: "Gradient" },
                     { value: "transparent", label: "See-through (for keying)" },
                   ]}
-                  onChange={(kind) => change({ ...theme, background: { ...theme.background, kind } })}
+                  onChange={(kind) => change({ ...theme, background: { ...theme.background, kind, gradient: kind === "gradient" ? theme.background.gradient ?? { from: "#1f4e9c", to: "#0d1424", angle: 160 } : theme.background.gradient } })}
                 />
+                {theme.background.kind === "gradient" && theme.background.gradient && (
+                  <GradientProps g={theme.background.gradient} onChange={(gradient) => change({ ...theme, background: { ...theme.background, gradient } })} />
+                )}
                 {theme.background.kind === "color" && <Color label="Colour" value={theme.background.color} onChange={(color) => change({ ...theme, background: { ...theme.background, color } })} />}
                 {theme.background.kind === "video" && (
                   <>
@@ -751,6 +773,29 @@ export function ThemeEditor({ onClose }: { onClose: () => void }) {
                       />
                     </div>
                     <p className="hint hint--tight">Plays silently on a loop behind the words and keeps playing through slide changes.</p>
+                    <div className="te__set">
+                      <span className="te__set-title">More videos that take turns</span>
+                      {(theme.background.set ?? []).map((v, i) => (
+                        <div key={i} className="te__set-row">
+                          <span>{v.video.replace(/^media:/, "").split("/").pop()}</span>
+                          <button className="btn-quiet" onClick={() => change({ ...theme, background: { ...theme.background, set: (theme.background.set ?? []).filter((_, j) => j !== i) } })}>
+                            Remove
+                          </button>
+                        </div>
+                      ))}
+                      <LibraryPick label="Add a video…" kind="video" onPick={(m) => change({ ...theme, background: { ...theme.background, set: [...(theme.background.set ?? []), { video: libRef(m), poster: thumbRef(m) }] } })} />
+                      {(theme.background.set ?? []).length > 0 && (
+                        <Select
+                          label="Change video"
+                          value={theme.background.rotate ?? "item"}
+                          options={[
+                            { value: "item", label: "For each song or reading" },
+                            { value: "service", label: "Once per service (day)" },
+                          ]}
+                          onChange={(rotate) => change({ ...theme, background: { ...theme.background, rotate } })}
+                        />
+                      )}
+                    </div>
                   </>
                 )}
                 {(theme.background.kind === "image" || theme.background.kind === "video") && (
@@ -770,9 +815,42 @@ export function ThemeEditor({ onClose }: { onClose: () => void }) {
                 )}
               </Group>
               <Group title="Between slides">
-                <Select label="Text change" value={theme.transition.kind} options={[{ value: "fade", label: "Fade" }, { value: "cut", label: "Cut" }]} onChange={(kind) => change({ ...theme, transition: { ...theme.transition, kind } })} />
-                {theme.transition.kind === "fade" && <Num label="Length" value={theme.transition.ms} step={50} min={50} suffix="ms" onChange={(ms) => change({ ...theme, transition: { ...theme.transition, ms } })} />}
+                <Select
+                  label="Text change"
+                  value={theme.transition.kind}
+                  options={[
+                    { value: "fade", label: "Fade" },
+                    { value: "cut", label: "Cut" },
+                    { value: "slide-up", label: "Slide up" },
+                    { value: "wipe", label: "Wipe" },
+                    { value: "zoom", label: "Zoom" },
+                    { value: "push", label: "Push" },
+                  ]}
+                  onChange={(kind) => change({ ...theme, transition: { ...theme.transition, kind } })}
+                />
+                {theme.transition.kind !== "cut" && <Num label="Length" value={theme.transition.ms} step={50} min={50} suffix="ms" onChange={(ms) => change({ ...theme, transition: { ...theme.transition, ms } })} />}
               </Group>
+              {theme.kind === "song" && (
+                <Group title="Sections">
+                  <p className="hint">Make choruses, bridges and pre-choruses look different from the verses.</p>
+                  {(["chorus", "bridge", "pre-chorus"] as const).map((k) => {
+                    const sec = theme.sections?.[k] ?? {};
+                    const setSec = (p: Partial<typeof sec>) => change({ ...theme, sections: { ...(theme.sections ?? {}), [k]: { ...sec, ...p } } });
+                    const name = k === "pre-chorus" ? "Pre-chorus" : k[0].toUpperCase() + k.slice(1);
+                    return (
+                      <div key={k} className="te__section">
+                        <strong>{name}</strong>
+                        <div className="prop-row">
+                          <Check label="Italic" value={!!sec.italic} onChange={(italic) => setSec({ italic })} />
+                          <Check label="Bold" value={(sec.weight ?? 0) >= 700} onChange={(b) => setSec({ weight: b ? 700 : null })} />
+                          <Check label="Own colour" value={!!sec.color} onChange={(on) => setSec({ color: on ? "#ffd166" : null })} />
+                        </div>
+                        {sec.color && <Color label={`${name} colour`} value={sec.color} onChange={(color) => setSec({ color })} />}
+                      </div>
+                    );
+                  })}
+                </Group>
+              )}
               <p className="hint">Select a layer on the canvas or in the list to change it.</p>
             </>
           ) : (
@@ -794,6 +872,16 @@ export function ThemeEditor({ onClose }: { onClose: () => void }) {
                   <span>Opacity</span>
                   <input type="range" min={0} max={100} value={Math.round(layer.opacity * 100)} onChange={(e) => setLayer({ opacity: Number(e.target.value) / 100 })} />
                 </label>
+                <Select
+                  label="Show on"
+                  value={layer.onlyOn ?? "all"}
+                  options={[
+                    { value: "all", label: "Every slide" },
+                    { value: "first", label: "First slide only (e.g. hymn number and title)" },
+                    { value: "last", label: "Last slide only (e.g. copyright)" },
+                  ]}
+                  onChange={(v) => setLayer({ onlyOn: v === "all" ? null : (v as "first" | "last") })}
+                />
                 <div className="prop-row">
                   <Check label="Lock position" value={layer.locked} onChange={(locked) => setLayer({ locked })} />
                   <button
@@ -848,7 +936,20 @@ export function ThemeEditor({ onClose }: { onClose: () => void }) {
 
               {layer.kind === "shape" && (
                 <Group title="Shape">
-                  <Color label="Fill" value={layer.fill} onChange={(fill) => setLayer({ fill } as Partial<Layer>)} />
+                  <Select
+                    label="Fill style"
+                    value={layer.gradient ? "gradient" : "solid"}
+                    options={[
+                      { value: "solid", label: "One colour" },
+                      { value: "gradient", label: "Gradient" },
+                    ]}
+                    onChange={(v) => setLayer({ gradient: v === "gradient" ? { from: layer.fill.slice(0, 7), to: "#00000000", angle: 90 } : null } as Partial<Layer>)}
+                  />
+                  {layer.gradient ? (
+                    <GradientProps g={layer.gradient} onChange={(gradient) => setLayer({ gradient } as Partial<Layer>)} />
+                  ) : (
+                    <Color label="Fill" value={layer.fill} onChange={(fill) => setLayer({ fill } as Partial<Layer>)} />
+                  )}
                   <Num label="Rounded corners" value={layer.radius} step={0.25} min={0} onChange={(radius) => setLayer({ radius } as Partial<Layer>)} />
                   <Color label="Border" value={layer.border.color} onChange={(color) => setLayer({ border: { ...layer.border, color } } as Partial<Layer>)} />
                   <Num label="Border width" value={layer.border.width} step={0.05} min={0} onChange={(width) => setLayer({ border: { ...layer.border, width } } as Partial<Layer>)} />

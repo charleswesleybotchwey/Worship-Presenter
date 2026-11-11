@@ -1,0 +1,294 @@
+{
+ "schema_version": 1,
+ "name": "Methodist hymn – English & Fante",
+ "kind": "song",
+ "background": {
+  "kind": "gradient",
+  "color": "#000000",
+  "image": null,
+  "fit": "cover",
+  "dim": 0,
+  "gradient": {
+   "from": "brand:4",
+   "to": "#000000",
+   "angle": 180
+  }
+ },
+ "transition": {
+  "kind": "fade",
+  "ms": 350
+ },
+ "sections": {
+  "chorus": {
+   "italic": true,
+   "color": "brand:2"
+  }
+ },
+ "layers": [
+  {
+   "id": "number",
+   "name": "Hymn number and title",
+   "kind": "text",
+   "field": "title",
+   "text": "",
+   "x": 5,
+   "y": 4,
+   "w": 90,
+   "h": 8,
+   "solo": null,
+   "opacity": 1,
+   "hidden": false,
+   "locked": false,
+   "onlyOn": "first",
+   "style": {
+    "font": "brand-heading",
+    "size": 3.6,
+    "weight": 700,
+    "italic": false,
+    "color": "brand:2",
+    "align": "left",
+    "valign": "top",
+    "lineHeight": 1.2,
+    "letterSpacing": 0,
+    "uppercase": false,
+    "autoFit": false,
+    "minSize": 3.5,
+    "shadow": {
+     "on": true,
+     "color": "#000000b3",
+     "blur": 0.6,
+     "x": 0,
+     "y": 0.25
+    },
+    "outline": {
+     "on": false,
+     "color": "#000000",
+     "width": 0.15
+    }
+   },
+   "animIn": {
+    "kind": "fade",
+    "ms": 300,
+    "delay": 0
+   },
+   "animOut": {
+    "kind": "fade",
+    "ms": 200,
+    "delay": 0
+   }
+  },
+  {
+   "id": "section",
+   "name": "Section label",
+   "kind": "text",
+   "field": "section",
+   "text": "",
+   "x": 5,
+   "y": 12,
+   "w": 90,
+   "h": 6,
+   "solo": null,
+   "opacity": 1,
+   "hidden": false,
+   "locked": false,
+   "onlyOn": null,
+   "style": {
+    "font": "brand-heading",
+    "size": 3,
+    "weight": 600,
+    "italic": false,
+    "color": "brand:2",
+    "align": "center",
+    "valign": "middle",
+    "lineHeight": 1.2,
+    "letterSpacing": 0,
+    "uppercase": false,
+    "autoFit": false,
+    "minSize": 3.5,
+    "shadow": {
+     "on": false,
+     "color": "#000000",
+     "blur": 0,
+     "x": 0,
+     "y": 0
+    },
+    "outline": {
+     "on": false,
+     "color": "#000000",
+     "width": 0.15
+    }
+   },
+   "animIn": {
+    "kind": "fade",
+    "ms": 300,
+    "delay": 0
+   },
+   "animOut": {
+    "kind": "fade",
+    "ms": 200,
+    "delay": 0
+   }
+  },
+  {
+   "id": "lyrics",
+   "name": "English",
+   "kind": "text",
+   "field": "lyrics",
+   "text": "",
+   "x": 5,
+   "y": 18,
+   "w": 90,
+   "h": 44,
+   "solo": {
+    "x": 5,
+    "y": 18,
+    "w": 90,
+    "h": 72
+   },
+   "opacity": 1,
+   "hidden": false,
+   "locked": false,
+   "onlyOn": null,
+   "style": {
+    "font": "brand",
+    "size": 8,
+    "weight": 600,
+    "italic": false,
+    "color": "brand:3",
+    "align": "center",
+    "valign": "middle",
+    "lineHeight": 1.2,
+    "letterSpacing": 0,
+    "uppercase": false,
+    "autoFit": true,
+    "minSize": 3.5,
+    "shadow": {
+     "on": true,
+     "color": "#000000b3",
+     "blur": 0.6,
+     "x": 0,
+     "y": 0.25
+    },
+    "outline": {
+     "on": false,
+     "color": "#000000",
+     "width": 0.15
+    }
+   },
+   "animIn": {
+    "kind": "fade",
+    "ms": 300,
+    "delay": 0
+   },
+   "animOut": {
+    "kind": "fade",
+    "ms": 200,
+    "delay": 0
+   }
+  },
+  {
+   "id": "second",
+   "name": "Fante",
+   "kind": "text",
+   "field": "second",
+   "text": "",
+   "x": 5,
+   "y": 64,
+   "w": 90,
+   "h": 26,
+   "solo": null,
+   "opacity": 1,
+   "hidden": false,
+   "locked": false,
+   "onlyOn": null,
+   "style": {
+    "font": "brand",
+    "size": 6,
+    "weight": 500,
+    "italic": true,
+    "color": "brand:2",
+    "align": "center",
+    "valign": "middle",
+    "lineHeight": 1.2,
+    "letterSpacing": 0,
+    "uppercase": false,
+    "autoFit": true,
+    "minSize": 3.5,
+    "shadow": {
+     "on": true,
+     "color": "#000000b3",
+     "blur": 0.6,
+     "x": 0,
+     "y": 0.25
+    },
+    "outline": {
+     "on": false,
+     "color": "#000000",
+     "width": 0.15
+    }
+   },
+   "animIn": {
+    "kind": "fade",
+    "ms": 300,
+    "delay": 0
+   },
+   "animOut": {
+    "kind": "fade",
+    "ms": 200,
+    "delay": 0
+   }
+  },
+  {
+   "id": "copyright",
+   "name": "Copyright",
+   "kind": "text",
+   "field": "copyright",
+   "text": "",
+   "x": 5,
+   "y": 93,
+   "w": 90,
+   "h": 5,
+   "solo": null,
+   "opacity": 1,
+   "hidden": false,
+   "locked": false,
+   "onlyOn": "last",
+   "style": {
+    "font": "brand",
+    "size": 2,
+    "weight": 400,
+    "italic": false,
+    "color": "#ffffffb3",
+    "align": "center",
+    "valign": "middle",
+    "lineHeight": 1.2,
+    "letterSpacing": 0,
+    "uppercase": false,
+    "autoFit": false,
+    "minSize": 3.5,
+    "shadow": {
+     "on": false,
+     "color": "#000000",
+     "blur": 0,
+     "x": 0,
+     "y": 0
+    },
+    "outline": {
+     "on": false,
+     "color": "#000000",
+     "width": 0.15
+    }
+   },
+   "animIn": {
+    "kind": "fade",
+    "ms": 300,
+    "delay": 0
+   },
+   "animOut": {
+    "kind": "fade",
+    "ms": 200,
+    "delay": 0
+   }
+  }
+ ]
+}
