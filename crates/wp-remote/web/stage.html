@@ -3,6 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<link rel="icon" type="image/png" href="/icon-64.png">
+<link rel="apple-touch-icon" href="/icon-180.png">
+<meta name="apple-mobile-web-app-title" content="Worship Presenter">
 <title>Worship Presenter stage display</title>
 <style>
   * { box-sizing: border-box; }
@@ -20,6 +23,10 @@
   .now { flex:1; min-height:0; padding:3cqh 4cqw; font-size:9cqh; font-weight:600; line-height:1.18; overflow:hidden; }
   .now p { margin:0; }
   .second { margin-top:2cqh; font-size:6cqh; font-weight:400; color:#ffe066; }
+  .cl { display:flex; flex-wrap:wrap; align-items:flex-end; margin:0 0 .2em; }
+  .cp { display:inline-flex; flex-direction:column; white-space:pre; }
+  .cp b { color:#ffb84d; font-size:.7em; line-height:1.05; }
+  .key { color:#ffb84d; font-weight:700; }
   .next { padding:2cqh 4cqw 3cqh; border-top:1px solid #222; color:rgba(255,255,255,.5); font-size:5cqh; line-height:1.2; min-height:14cqh; }
   .next.big { color:rgba(255,255,255,.85); font-size:8cqh; }
   .next b { display:block; font-size:3cqh; text-transform:uppercase; letter-spacing:.08em; font-weight:500; margin-bottom:.6cqh; }
@@ -63,6 +70,20 @@
     };
   }
 
+  // chords over the words, moved by the operator's transpose setting
+  const SH = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"], FL = ["C","Db","D","Eb","E","F","Gb","G","Ab","A","Bb","B"];
+  const isChord = (c) => /^[A-G][#b]?(maj|min|sus|dim|aug|add|m|M|\+)?[0-9#b()+\-susaddmajdimaug]*(\/[A-G][#b]?)?$/.test(c);
+  const note = (n, k, fl) => { const m = n.match(/^([A-G])([#b]?)/); if (!m) return n; const i = (((SH.indexOf(m[1]) + (m[2] === "#" ? 1 : m[2] === "b" ? -1 : 0) + k) % 12) + 12) % 12; return (fl ? FL : SH)[i] + n.slice(m[0].length); };
+  const tr = (c, k, fl) => !k ? c : c.split("/").map((x) => note(x, k, fl)).join("/");
+  const flats = (key, k) => { if (!key) return k < 0; const t = tr(key.replace(/m$/, ""), k, false); return ["F","A#","D#","G#","C#"].includes(t) || /b/.test(tr(key, k, true)) && !/#/.test(key); };
+  function chordLine(line, plain, k, fl) {
+    const parts = []; const re = /\[([^\]]+)\]/g; let last = 0, pend = "", m;
+    while ((m = re.exec(line))) { if (!isChord(m[1].trim())) continue; const t = line.slice(last, m.index); if (t || pend) parts.push([pend, t]); pend = m[1].trim(); last = m.index + m[0].length; }
+    parts.push([pend, line.slice(last)]);
+    if (!parts.some((p) => p[0])) return `<p>${esc(plain)}</p>`;
+    return `<p class="cl">${parts.filter((p) => p[0] || p[1]).map(([c, t]) => `<span class="cp"><b>${c ? esc(tr(c, k, fl)) : "&nbsp;"}</b><span>${esc(t) || "&nbsp;"}</span></span>`).join("")}</p>`;
+  }
+
   function render() {
     const s = snap; if (!s) return;
     const now = Date.now() + (s.clock_offset_ms || 0);
@@ -71,13 +92,13 @@
     const left = t ? (t.paused_left_ms ?? t.ends_at_ms - now) : 0;
     const state = !s.connected ? "No signal from the control computer" : s.mode === "blank" ? "Screens blank" : s.mode === "logo" ? "Logo on screens" : s.mode === "clear" ? "Words hidden" : "";
     root.innerHTML = `
-      <div class="top"><span class="title">${esc(s.item ? s.item.title : "Nothing live")}</span>${cur && s.slides.length > 1 ? `<span>${esc(cur.label)} ${s.slide_idx + 1}/${s.slides.length}</span>` : ""}<span class="clock">${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span></div>
+      <div class="top"><span class="title">${esc(s.item ? s.item.title : "Nothing live")}</span>${cur && s.slides.length > 1 ? `<span>${esc(cur.label)} ${s.slide_idx + 1}/${s.slides.length}</span>` : ""}${s.song_key ? `<span class="key">Key ${esc(tr(s.song_key, s.transpose || 0, flats(s.song_key, s.transpose || 0)))}${s.transpose ? ` (${s.transpose > 0 ? "+" : ""}${s.transpose})` : ""}</span>` : ""}<span class="clock">${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span></div>
       ${t ? `<div class="timer ${left < 0 ? "over" : ""}">${fmt(left)}<small>${esc(t.label || "")}${t.paused_left_ms != null ? " paused" : ""}</small></div>` : ""}
       ${s.repeat ? `<div class="rep">${esc(s.repeat.label)} ${s.repeat.done} of ${s.repeat.total}${s.repeat.done >= s.repeat.total ? " · last time" : ""}</div>` : ""}
       ${s.stage_message ? `<div class="msg">${esc(s.stage_message)}</div>` : ""}
       ${s.alert && s.alert.on_stage ? `<div class="state" style="color:#f2c94c">Alert on screens: ${esc(s.alert.text)}</div>` : ""}
       ${state ? `<div class="state">${state}</div>` : ""}
-      <div class="now">${cur ? cur.primary.map((l) => `<p>${esc(l)}</p>`).join("") + (cur.second.length ? `<div class="second">${cur.second.map((l) => `<p>${esc(l)}</p>`).join("")}</div>` : "") : ""}</div>
+      <div class="now">${cur ? (cur.chords && cur.chords.length ? cur.chords.map((l, i) => chordLine(l || cur.primary[i] || "", cur.primary[i] || "", s.transpose || 0, flats(s.song_key, s.transpose || 0))).join("") : cur.primary.map((l) => `<p>${esc(l)}</p>`).join("")) + (cur.second.length ? `<div class="second">${cur.second.map((l) => `<p>${esc(l)}</p>`).join("")}</div>` : "") : ""}</div>
       <div class="next ${s.lining_out ? "big" : ""}">${next ? `<b>Next${next.label !== (cur && cur.label) ? " · " + esc(next.label) : ""}</b>${next.primary.map((l) => `<p>${esc(l)}</p>`).join("")}` : cur ? `<b>Last slide of this item</b>` : ""}</div>`;
   }
 

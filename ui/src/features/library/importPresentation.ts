@@ -23,7 +23,8 @@ async function drawPdf(url: string, token: string, onProgress: (text: string) =>
   const pdfjs = await import("pdfjs-dist");
   const worker = (await import("pdfjs-dist/build/pdf.worker.min.mjs?url")).default;
   pdfjs.GlobalWorkerOptions.workerSrc = worker;
-  const task = pdfjs.getDocument({ url });
+  // no eval: the app's security policy forbids it
+  const task = pdfjs.getDocument({ url, isEvalSupported: false });
   const doc = await task.promise;
   for (let n = 1; n <= doc.numPages; n++) {
     onProgress(`Drawing page ${n} of ${doc.numPages}`);

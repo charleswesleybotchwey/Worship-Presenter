@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, onHeartbeat, onIdentify, onLive, onOutputConfigChanged, onSettingsChanged, type Broadcast, type OutputConfig } from "./api";
+import { api, onCaption, onHeartbeat, onIdentify, onLive, onOutputConfigChanged, onSettingsChanged, type Broadcast, type OutputConfig } from "./api";
 import { SlideView } from "./SlideView";
 import { useThemes } from "./theme/store";
 import { StageView } from "./StageView";
@@ -118,6 +118,9 @@ export function Output({ role }: { role: string }) {
   const kindNow = shown?.item?.kind;
   const outputTheme = kindNow === "song" ? cfg?.song_theme_id : kindNow === "scripture" ? cfg?.scripture_theme_id : null;
   const m = cfg?.margins;
+  const cam = role === "main" && !lost && !isHeld && (mode === "live" || mode === "clear") ? b?.state.camera ?? null : null;
+  // full-screen camera hides the slide's words
+  const camFull = cam?.mode === "full";
   const s = shown?.state;
   const slide = phase === "off" ? undefined : shown?.slides[s?.slide_idx ?? 0];
 
@@ -126,6 +129,7 @@ export function Output({ role }: { role: string }) {
   return (
     <div className={`output ${rule.keyed || seeThrough ? "output--keyed" : ""}`} style={m ? { padding: `${m.top}px ${m.right}px ${m.bottom}px ${m.left}px` } : undefined}>
       <div className={`output__frame ${seeThrough ? "output__frame--alpha" : ""}`}>
+        {cam && cam.mode !== "corner" && <CameraFeed cam={cam} />}
         <SlideView
           slide={slide}
           kind={shown?.item?.kind ?? "song"}
@@ -137,8 +141,8 @@ export function Output({ role }: { role: string }) {
           muted={role !== "main"}
           look={{ lowerThird: rule.lowerThird }}
           blank={phase === "off"}
-          hideText={b?.state.mode === "clear"}
-          alpha={seeThrough}
+          hideText={b?.state.mode === "clear" || camFull}
+          alpha={seeThrough || (!!cam && cam.mode !== "corner")}
           phase={lowSpec ? "static" : phase === "out" ? "out" : "in"}
           showKey={showKey}
           textKey={`${s?.slide_idx}-${s?.lines_per_slide}-${s?.lang_mode}-${shown?.slides.length}`}
@@ -161,9 +165,81 @@ export function Output({ role }: { role: string }) {
       {!lost && !isHeld && (
         <div className={`cue-layer ${b?.state.alert?.position === "bottom" && (role === "main" ? b.state.alert.on_screens : b.state.alert.on_stream) ? "has-bottom-alert" : ""}`}>
           {role === "main" && b?.state.timer && b.state.timer.on_screens !== "off" && <TimerOverlay t={b.state.timer} full={b.state.timer.on_screens === "full"} />}
+          {cam?.mode === "corner" && <CameraFeed cam={cam} corner />}
+          {b?.state.subtitles && ((role === "main" && b.state.subtitles !== "stream") || ((role === "alternate" || role === "ndi") && b.state.subtitles !== "screens")) && <Subtitles />}
           {b?.state.alert && (role === "main" ? b.state.alert.on_screens : (role === "alternate" || role === "ndi") && b.state.alert.on_stream) && <AlertOverlay a={b.state.alert} />}
         </div>
       )}
+    </div>
+  );
+}
+
+/** Live sermon subtitles: the last finished sentence and what is being said now, two
+ *  lines at most; they fade when the preacher pauses. */
+function Subtitles() {
+  const [done, setDone] = useState("");
+  const [now, setNow] = useState("");
+  const [at, setAt] = useState(0);
+  const [, tick] = useState(0);
+  useEffect(() => {
+    let stop = () => {};
+    onCaption((c) => {
+      setAt(Date.now());
+      if (c.final) (setDone(c.text), setNow(""));
+      else setNow(c.text);
+    }).then((u) => (stop = u));
+    const t = setInterval(() => tick((x) => x + 1), 1000);
+    return () => (stop(), clearInterval(t));
+  }, []);
+  const quiet = Date.now() - at > 6000;
+  const text = (now || done).split(" ").slice(-22).join(" ");
+  if (!text) return null;
+  return (
+    <div className={`subtitles ${quiet ? "subtitles--quiet" : ""}`} aria-live="off">
+      <span>{text}</span>
+    </div>
+  );
+}
+
+/** A live camera (USB, or a capture card that Windows shows as a camera). */
+function CameraFeed({ cam, corner }: { cam: { device_id: string; label: string; mode: string }; corner?: boolean }) {
+  const ref = useRef<HTMLVideoElement>(null);
+  const [problem, setProblem] = useState<string | null>(null);
+  useEffect(() => {
+    let stream: MediaStream | null = null;
+    let stop = false;
+    // camera ids can differ between windows: try the id, then the same name, then the default camera
+    const open = (deviceId?: string) => navigator.mediaDevices.getUserMedia({ video: { deviceId: deviceId ? { exact: deviceId } : undefined, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false });
+    const byName = async () => {
+      const list = await navigator.mediaDevices.enumerateDevices();
+      const same = list.find((d) => d.kind === "videoinput" && d.label === cam.label);
+      return open(same?.deviceId);
+    };
+    (async () => {
+      try {
+        let s: MediaStream;
+        try {
+          s = await open(cam.device_id || undefined);
+        } catch {
+          s = await byName();
+        }
+        if (stop) return s.getTracks().forEach((t) => t.stop());
+        stream = s;
+        if (ref.current) ref.current.srcObject = s;
+        setProblem(null);
+      } catch {
+        setProblem(`${cam.label}: not available`);
+      }
+    })();
+    return () => {
+      stop = true;
+      stream?.getTracks().forEach((t) => t.stop());
+    };
+  }, [cam.device_id, cam.label]);
+  return (
+    <div className={corner ? "camfeed camfeed--corner" : "camfeed"}>
+      <video ref={ref} autoPlay muted playsInline />
+      {problem && <span className="camfeed__problem">{problem}</span>}
     </div>
   );
 }

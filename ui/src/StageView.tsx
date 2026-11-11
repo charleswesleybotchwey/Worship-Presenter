@@ -1,3 +1,4 @@
+import { pieces, prefersFlats, transpose } from "./chords";
 import { useEffect, useState } from "react";
 import type { Broadcast } from "./api";
 import { fmtLeft, timerLeft, useNow } from "./Cues";
@@ -18,6 +19,8 @@ function useClock() {
 export function StageView({ b, lost }: { b: Broadcast | null; lost: boolean }) {
   const clock = useClock();
   const s = b?.state;
+  const shift = s?.transpose ?? 0;
+  const flats = prefersFlats(b?.song_key, shift);
   const slides = b?.slides ?? [];
   const cur = s ? slides[s.slide_idx] : undefined;
   const next = s ? slides[s.slide_idx + 1] : undefined;
@@ -38,6 +41,11 @@ export function StageView({ b, lost }: { b: Broadcast | null; lost: boolean }) {
         {slides.length > 1 && s && (
           <span className="stage-view__count">
             {s.slide_idx + 1}/{slides.length}
+          </span>
+        )}
+        {b?.song_key && (
+          <span className="stage-view__key" title="Key for the musicians">
+            Key {shift ? `${transpose(b.song_key, shift, flats)} (from ${b.song_key}, ${shift > 0 ? "+" : ""}${shift})` : b.song_key}
           </span>
         )}
         <span className="stage-view__clock">{clock}</span>
@@ -67,9 +75,9 @@ export function StageView({ b, lost }: { b: Broadcast | null; lost: boolean }) {
           cur && (
             <>
               {isDeck && <p className="stage-view__decktitle">{cur.image ? "Picture" : cur.label}</p>}
-              {cur.primary.map((l, i) => (
-                <p key={i}>{l}</p>
-              ))}
+              {cur.chords?.length
+                ? cur.chords.map((line, i) => <ChordLine key={i} line={line || cur.primary[i] || ""} n={shift} flats={flats} />)
+                : cur.primary.map((l, i) => <p key={i}>{l}</p>)}
               {cur.second.length > 0 && (
                 <div className="stage-view__second">
                   {cur.second.map((l, i) => (
@@ -94,5 +102,21 @@ export function StageView({ b, lost }: { b: Broadcast | null; lost: boolean }) {
         )}
       </footer>
     </div>
+  );
+}
+
+/** A lyric line with its chords above the words, moved by the transpose setting. */
+function ChordLine({ line, n, flats }: { line: string; n: number; flats: boolean }) {
+  const ps = pieces(line);
+  if (!ps.some((p) => p.chord)) return <p>{line}</p>;
+  return (
+    <p className="chordline">
+      {ps.map((p, i) => (
+        <span key={i} className="chordline__piece">
+          <span className="chordline__chord">{p.chord ? transpose(p.chord, n, flats) : "\u00a0"}</span>
+          <span className="chordline__text">{p.text || "\u00a0"}</span>
+        </span>
+      ))}
+    </p>
   );
 }

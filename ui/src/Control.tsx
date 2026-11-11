@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { api, isDesktop, onLibraryRestored, onProfileChanged, onSettingsChanged, type LangMode, type LiveState, type MediaItem, type Mode, type ProgramItem, type Schedule, type Slide, type Timer } from "./api";
+import { api, isDesktop, type PulpitNote, type SpeechStatus, onLibraryRestored, onProfileChanged, onSettingsChanged, type LangMode, type LiveState, type MediaItem, type Mode, type ProgramItem, type Schedule, type Slide, type Timer } from "./api";
 import { SlideView } from "./SlideView";
 import { Icon } from "./Icon";
 import { ServiceMenu, niceDate } from "./ServiceMenu";
@@ -10,6 +10,7 @@ import { ProfilesDialog } from "./ProfilesDialog";
 import { ThemeEditor } from "./theme/ThemeEditor";
 import { AlertPanel, TimerPanel } from "./CuePanels";
 import { MusicPanel, useMusic } from "./MusicPanel";
+import { CameraPanel } from "./CameraPanel";
 import { fmtLeft, timerLeft, useNow } from "./Cues";
 import type { ThemeRow } from "./theme/types";
 import { Palette, type PaletteCommand } from "./features/commands/Palette";
@@ -123,13 +124,39 @@ export function Control() {
   const [, setSourceTab] = useState<"schedule" | "library">("schedule");
   const [, setCompactTask] = useState<"schedule" | "library" | "preview">("preview");
   const [notice, setNotice] = useState<{ text: string; bad?: boolean; action?: { label: string; run: () => void } } | null>(null);
-  const [layer, setLayer] = useState<null | "palette" | "outputs" | "import" | "backups" | "profiles" | "service" | "timer" | "alert" | "music">(null);
+  const [layer, setLayer] = useState<null | "palette" | "outputs" | "import" | "backups" | "profiles" | "service" | "timer" | "alert" | "music" | "camera">(null);
   const music = useMusic();
   const [profile, setProfile] = useState({ slug: "default", name: "" });
   const [libraryVersion, setLibraryVersion] = useState(0);
   const [themeRows, setThemeRows] = useState<ThemeRow[]>([]);
   const [stageNote, setStageNote] = useState("");
   const [advanceAfterLive, setAdvanceAfterLive] = useState(false);
+  // ---------- scripture recognition (experimental; never goes live on its own) ----------
+  const [speech, setSpeech] = useState<SpeechStatus | null>(null);
+  const [speechCfg, setSpeechCfg] = useState({ engine: "vosk", mic: "", refsOnly: true });
+  const pendingLive = useRef<{ item: ProgramItem; idx: number } | null>(null);
+  const [notes, setNotes] = useState<PulpitNote[]>([]);
+  useEffect(() => {
+    const load = () =>
+      api
+        .getSettings()
+        .then((x) => setSpeechCfg({ engine: x.speech_engine || "vosk", mic: x.speech_mic || "", refsOnly: x.speech_refs_only !== "false" }))
+        .catch(() => {});
+    load();
+    let stop = () => {};
+    onSettingsChanged(load).then((u) => (stop = u));
+    return () => stop();
+  }, []);
+  useEffect(() => {
+    let alive = true;
+    const tick = () => {
+      api.speechStatus().then((s) => alive && setSpeech(s)).catch(() => {});
+      api.pulpitNotes().then((n) => alive && setNotes(n)).catch(() => {});
+    };
+    tick();
+    const t = setInterval(tick, 700);
+    return () => ((alive = false), clearInterval(t));
+  }, []);
   useEffect(() => {
     const load = () => api.getSettings().then((x) => setAdvanceAfterLive(x.advance_after_go_live === "true")).catch(() => {});
     load();
@@ -407,18 +434,23 @@ export function Control() {
   }, [goLive, liveSlides, layer, activeTab, run, stepSchedule, prefs, rehearsal, reh]);
 
   // Closing the window during a service asks first; cancelling leaves output unchanged.
+  // Registered once (a fresh handler per state change leaked duplicates); reads the
+  // latest state through a ref. The app then closes every window and exits.
+  const closeInfo = useRef({ onAir: false });
+  closeInfo.current.onAir = !!live?.item && state?.mode === "live";
   useEffect(() => {
     if (!isDesktop) return;
     let un = () => {};
+    let gone = false;
     import("@tauri-apps/api/window").then(({ getCurrentWindow }) =>
       getCurrentWindow()
         .onCloseRequested((ev) => {
-          if (live?.item && state?.mode === "live" && !confirm("Something is on the screens. Close Worship Presenter and end output?")) ev.preventDefault();
+          if (closeInfo.current.onAir && !confirm("Something is on the screens. Close Worship Presenter and end output?")) ev.preventDefault();
         })
-        .then((u) => (un = u)),
+        .then((u) => (gone ? u() : (un = u))),
     );
-    return () => un();
-  }, [live?.item, state?.mode]);
+    return () => ((gone = true), un());
+  }, []);
 
   // ---------- tabs ----------
 
@@ -460,6 +492,75 @@ export function Control() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [panes.reset],
   );
+
+  const heardItem = async (ref: string): Promise<ProgramItem | null> => {
+    // the versions of the reading in Preview, else the first Bible
+    const v = preview?.item.kind === "scripture" ? preview.item.versions : [(await run(api.versions()))?.[0]?.code].filter(Boolean) as string[];
+    if (!v.length) return say("No Bibles yet. Import one with Ctrl+K, Import.", true), null;
+    return { kind: "scripture", reference: ref, versions: v };
+  };
+  const heardPreview = async (ref: string) => {
+    const it = await heardItem(ref);
+    if (it) await load(it);
+  };
+  const heardLive = async (ref: string) => {
+    const it = await heardItem(ref);
+    if (!it) return;
+    pendingLive.current = { item: it, idx: 0 };
+    await load(it);
+  };
+  // "Go live" on a suggestion: once it is in Preview, the usual Go live (and its checks) runs
+  useEffect(() => {
+    const p = pendingLive.current;
+    if (p && preview && sameItem(preview.item, p.item)) {
+      pendingLive.current = null;
+      setPreviewIdx(p.idx);
+      void goLive(p.idx);
+    }
+  }, [preview, goLive]);
+  // ---------- notes from the pulpit phone ----------
+  const noteItem = (n: PulpitNote): ProgramItem => ({ kind: "announcement", presentation_id: n.deck_id, title: n.deck_title });
+  const notePreview = async (n: PulpitNote) => {
+    await load(noteItem(n));
+    setPreviewIdx(n.slide_idx);
+  };
+  const noteLive = async (n: PulpitNote) => {
+    pendingLive.current = { item: noteItem(n), idx: n.slide_idx };
+    await load(noteItem(n));
+  };
+  const latestNote = notes[0];
+  const noteChip = latestNote && (
+    <div className="heard heard--note" role="status" aria-live="polite" onKeyDown={(e) => e.key === "Escape" && (e.preventDefault(), void api.pulpitDismiss(latestNote.id))}>
+      <Icon name="note" />
+      <span className="heard__ref">
+        Note from {latestNote.device}
+        <strong className="heard__note">{latestNote.text}</strong>
+      </span>
+      <button className="wp-btn wp-btn--quiet" onClick={() => notePreview(latestNote)}>
+        Preview
+      </button>
+      <button className="wp-btn wp-btn--primary" onClick={() => noteLive(latestNote)}>
+        Go live
+      </button>
+      {notes.length > 1 && <span className="heard__more">+{notes.length - 1} more</span>}
+      <button className="wp-icon-btn" aria-label="Dismiss this note" onClick={() => api.pulpitDismiss(latestNote.id)}>
+        <Icon name="close" />
+      </button>
+    </div>
+  );
+
+  const heardDismiss = (ref: string) => {
+    void api.speechDismiss(ref);
+  };
+  const toggleListening = async () => {
+    if (speech?.listening) return void api.speechStop();
+    try {
+      await api.speechStart(speechCfg.engine, speechCfg.mic || null, speechCfg.refsOnly);
+      say(`Listening for Bible references (${speechCfg.engine === "vosk" ? "Vosk" : "Windows Speech"}). Suggestions appear above Live; nothing goes live by itself.`);
+    } catch (e) {
+      say(String(e instanceof Error ? e.message : e), true);
+    }
+  };
 
   // ---------- quick scripture (stages only) ----------
 
@@ -542,6 +643,7 @@ export function Control() {
         )}
         <ViewToggle value={slideView} onChange={setSlideView} />
       </header>
+      {noteChip}
       <div className="ew-list">
         {!preview ? (
           <div className="wp-empty">
@@ -608,6 +710,44 @@ export function Control() {
   const liveLabel = rehearsal ? `Rehearsal${reh && reh.mode !== "live" ? ` · ${reh.mode === "clear" ? "text cleared" : reh.mode}` : ""} · not on the screens` : mainLabel;
   const gridSlides = rehearsal ? reh?.slides ?? [] : liveSlides;
   const gridItem = rehearsal ? reh?.item : live?.item;
+  const latestHeard = speech?.recent[0];
+  const heardChip = latestHeard && (
+    <div
+      className="heard"
+      role="status"
+      aria-live="polite"
+      tabIndex={-1}
+      onKeyDown={(e) => {
+        if (e.key === "Escape") e.preventDefault(), heardDismiss(latestHeard.reference);
+      }}
+    >
+      <Icon name="mic" />
+      <span className="heard__ref">
+        Heard <strong>{latestHeard.reference}</strong>
+        <small>“{latestHeard.heard}”</small>
+      </span>
+      <button className="wp-btn wp-btn--quiet" onClick={() => heardPreview(latestHeard.reference)}>
+        Preview
+      </button>
+      <button className="wp-btn wp-btn--primary" onClick={() => heardLive(latestHeard.reference)} title="Enter on this button sends it live; Esc dismisses">
+        Go live
+      </button>
+      {speech!.recent.length > 1 && (
+        <select className="heard__recent" value="" onChange={(e) => e.target.value && heardPreview(e.target.value)} aria-label="Earlier suggestions">
+          <option value="">Earlier ({speech!.recent.length - 1})</option>
+          {speech!.recent.slice(1).map((r) => (
+            <option key={r.reference + r.at} value={r.reference}>
+              {r.reference}
+            </option>
+          ))}
+        </select>
+      )}
+      <button className="wp-icon-btn" aria-label={`Dismiss ${latestHeard.reference}`} onClick={() => heardDismiss(latestHeard.reference)}>
+        <Icon name="close" />
+      </button>
+    </div>
+  );
+
   const livePane = (
     <section className="wp-pane wp-pane--work ew-pane" aria-label="Live" data-region="live">
       <header className="wp-pane__head">
@@ -620,6 +760,8 @@ export function Control() {
         </span>
         <ViewToggle value={slideView} onChange={setSlideView} />
       </header>
+      {heardChip}
+      {speech?.listening && <div className="heard__caption" title="What the speech engine is hearing">{speech.caption ? `Hearing: ${speech.caption}` : `Listening (${speech.listening})…`}</div>}
       {main.condition === "none" && !rehearsal && (
         <div className="wp-empty wp-empty--inline">
           <p>No main display</p>
@@ -715,6 +857,18 @@ export function Control() {
           </button>
         )}
         <span className="wp-spacer" />
+        {!rehearsal && live?.item?.kind === "song" && liveSlides.some((x) => x.chords?.length) && (
+          <span className="wp-transpose" title="Moves the chords on the stage display for the musicians; the congregation sees no change">
+            Chords
+            <button className="wp-icon-btn" aria-label="Chords down a semitone" onClick={() => run(api.setTranspose((state?.transpose ?? 0) - 1))}>
+              −
+            </button>
+            <span className="wp-num">{state?.transpose ? (state.transpose > 0 ? `+${state.transpose}` : state.transpose) : "0"}</span>
+            <button className="wp-icon-btn" aria-label="Chords up a semitone" onClick={() => run(api.setTranspose((state?.transpose ?? 0) + 1))}>
+              +
+            </button>
+          </span>
+        )}
         {!rehearsal && live?.item?.kind === "song" && (
           <label className="wp-check wp-check--inline" title="One line at a time for call-and-response singing; the stage display shows the next line large">
             <input type="checkbox" checked={!!state?.lining_out} onChange={(e) => void run(api.setLiningOut(e.target.checked))} /> Lining out
@@ -730,7 +884,7 @@ export function Control() {
             </select>
           </label>
         )}
-        {live?.item?.kind === "song" && liveSlides.some((s) => s.second.length > 0 || state?.lang_mode === "second") && (
+        {live?.item?.kind === "song" && (
           <label className="wp-inline-select">
             <span>Language</span>
             <select value={state?.lang_mode ?? "both"} onChange={(e) => void run(api.setLayout(undefined, e.target.value as LangMode))}>
@@ -789,8 +943,19 @@ export function Control() {
           </div>
         ))}
         <span className="wp-spacer" />
-        <span className="wp-wstabs__app">Worship Presenter</span>
+        <span className="wp-wstabs__app">
+          <img src="/brand/icon-64.png" alt="" width={16} height={16} />
+          Worship Presenter
+        </span>
         <span className="wp-spacer" />
+        <button
+          className="wp-theme-toggle"
+          onClick={() => setUiTheme(document.documentElement.dataset.theme === "light" ? "dark" : "light")}
+          title={document.documentElement.dataset.theme === "light" ? "Switch to the dark theme" : "Switch to the light theme"}
+          aria-label="Switch between light and dark"
+        >
+          <Icon name={uiTheme === "light" || (uiTheme === "system" && document.documentElement.dataset.theme === "light") ? "moon" : "sun"} />
+        </button>
         <button className="wp-btn wp-btn--quiet" onClick={() => setLayer("palette")}>
           Commands <kbd>Ctrl+K</kbd>
         </button>
@@ -827,6 +992,36 @@ export function Control() {
           <label className={`wp-switch ${rehearsal ? "is-on" : ""}`} title="Practise the service without sending anything to the screens">
             <input type="checkbox" checked={rehearsal} onChange={(e) => (setRehearsal(e.target.checked), setReh(null))} /> Rehearsal
           </label>
+          <button className={`wp-btn wp-btn--quiet wp-listen ${speech?.listening ? "is-on" : ""}`} onClick={toggleListening} title={speech?.listening ? "Stop listening for Bible references" : "Listen to the preacher's microphone for Bible references (experimental)"} aria-pressed={!!speech?.listening}>
+            <Icon name="mic" /> {speech?.listening ? "Listening" : "Listen"}
+          </button>
+          <button className={`wp-btn wp-btn--quiet wp-cam ${state?.camera ? "is-on" : ""}`} onClick={() => setLayer(layer === "camera" ? null : "camera")} title="A camera on the main screen">
+            <Icon name="video" /> {state?.camera ? "Camera on" : "Camera"}
+          </button>
+          <select
+            className={`wp-subs ${state?.subtitles ? "is-on" : ""}`}
+            value={state?.subtitles ?? ""}
+            title="Live sermon subtitles (experimental): what the preacher says, as captions"
+            aria-label="Subtitles"
+            onChange={async (e) => {
+              const t = (e.target.value || null) as "stream" | "screens" | "both" | null;
+              await run(api.setSubtitles(t));
+              // captions need the whole sermon, not only Bible references
+              if (t && (!speech?.listening || speechCfg.refsOnly)) {
+                try {
+                  await api.speechStart(speechCfg.engine, speechCfg.mic || null, false);
+                  say("Subtitles on. Listening to everything the preacher says.");
+                } catch (err) {
+                  say(String(err instanceof Error ? err.message : err), true);
+                }
+              }
+            }}
+          >
+            <option value="">Subtitles off</option>
+            <option value="stream">Subtitles: stream</option>
+            <option value="screens">Subtitles: screens</option>
+            <option value="both">Subtitles: both</option>
+          </select>
           <button className={`wp-btn wp-btn--quiet wp-music-chip ${music?.status.playing ? "is-on" : ""}`} onClick={() => setLayer(layer === "music" ? null : "music")} title={music?.status.title ?? "Background music"}>
             <Icon name="music" /> {music?.status.playing ? (music.status.paused ? "Paused" : music.status.ducked ? "Music (quiet)" : music.status.title ?? "Music") : "Music"}
           </button>
@@ -1038,6 +1233,7 @@ export function Control() {
       {layer === "profiles" && <ProfilesDialog somethingLive={state?.mode === "live" && !!live?.item} onClose={() => (setLayer(null), api.currentProfile().then(setProfile).catch(() => {}))} />}
       {layer === "service" && <ServiceMenu current={service?.id ?? null} onOpen={openService} onClose={() => setLayer(null)} />}
       {layer === "timer" && <TimerPanel state={state} onClose={() => setLayer(null)} />}
+      {layer === "camera" && <CameraPanel live={state?.camera ?? null} onClose={() => setLayer(null)} say={say} />}
       {layer === "music" && <MusicPanel m={music} onClose={() => setLayer(null)} />}
       {layer === "alert" && <AlertPanel alert={state?.alert} onClose={() => setLayer(null)} />}
     </div>

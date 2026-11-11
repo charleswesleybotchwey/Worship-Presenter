@@ -74,7 +74,11 @@ pub fn candidates() -> Vec<PathBuf> {
         v.push(PathBuf::from("/usr/local/lib/libndi.so.6"));
         v.push(PathBuf::from("/usr/lib/x86_64-linux-gnu/libndi.so.5"));
     }
-    v.push(PathBuf::from(name)); // system search path last
+    // elsewhere the system library path is trusted; on Windows a bare name would also
+    // search the current folder, where a planted DLL could be picked up
+    if !cfg!(windows) {
+        v.push(PathBuf::from(name));
+    }
     v
 }
 

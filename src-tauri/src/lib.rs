@@ -16,6 +16,8 @@ use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder
 mod ndi;
 mod remote;
 mod music;
+mod fonts;
+mod speech;
 use wp_core::cues::{self, TimerShow};
 use wp_core::library;
 use wp_core::live::{Command, LiveState, Mode};
@@ -59,6 +61,8 @@ pub struct Broadcast {
     /// Outputs that came back after being lost: they stay black until the operator
     /// chooses Resume for them (design brief §6).
     pub held: Vec<String>,
+    /// The live song's key, for the musicians' stage view.
+    pub song_key: Option<String>,
 }
 
 pub struct AppState {
@@ -82,6 +86,55 @@ pub struct AppState {
     ndi: ndi::Ndi,
     remote: Mutex<Option<remote::Running>>,
     music: Mutex<Option<wp_audio::Music>>,
+    speech: speech::Speech,
+    pulpit: Mutex<std::collections::VecDeque<PulpitNote>>,
+}
+
+/// A point sent from the pulpit phone: kept as a slide in today's "Sermon notes" deck,
+/// waiting for the operator to preview or show it.
+#[derive(Serialize, Clone)]
+pub struct PulpitNote {
+    id: u64,
+    device: String,
+    text: String,
+    deck_id: i64,
+    deck_title: String,
+    slide_idx: usize,
+}
+
+pub(crate) fn add_pulpit_note(st: &AppState, device: &str, text: &str) -> Res<PulpitNote> {
+    let conn = st.db.lock().unwrap();
+    let day: String = conn.query_row("SELECT strftime('%d %m %Y', 'now', 'localtime')", [], |r| r.get(0)).map_err(err)?;
+    let title = format!("Sermon notes {day}");
+    let existing = wp_core::announcements::list(&conn).map_err(err)?.into_iter().find(|d| d.title == title);
+    let mut deck = match existing {
+        Some(d) => wp_core::announcements::get(&conn, d.id).map_err(err)?,
+        None => wp_core::announcements::Deck { id: None, title: title.clone(), looping: false, seconds: 0, slides: vec![] },
+    };
+    deck.slides.push(wp_core::announcements::DeckSlide { kind: "text".into(), title: String::new(), body: text.to_string(), image: None, seconds: None });
+    let slide_idx = deck.slides.len() - 1;
+    let deck_id = wp_core::announcements::save(&conn, &deck).map_err(err)?;
+    drop(conn);
+    let id = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+    let n = PulpitNote { id, device: device.to_string(), text: text.to_string(), deck_id, deck_title: title, slide_idx };
+    let mut q = st.pulpit.lock().unwrap();
+    q.push_front(n.clone());
+    q.truncate(30);
+    Ok(n)
+}
+
+#[tauri::command]
+fn pulpit_notes(st: State<'_, AppState>) -> Vec<PulpitNote> {
+    st.pulpit.lock().unwrap().iter().cloned().collect()
+}
+
+#[tauri::command]
+fn pulpit_dismiss(st: State<'_, AppState>, id: Option<u64>) {
+    let mut q = st.pulpit.lock().unwrap();
+    match id {
+        Some(i) => q.retain(|n| n.id != i),
+        None => q.clear(),
+    }
 }
 
 impl AppState {
@@ -148,7 +201,7 @@ fn build_slides(conn: &Connection, item: &ProgramItem, live: &LiveState) -> Res<
             Ok((wp_core::announcements::to_slides(&d), Some(title.clone())))
         }
         ProgramItem::Media { title, .. } => Ok((
-            vec![Slide { label: "Media".into(), occurrence: 0, first_key: 0, last_key: 0, primary: vec![], second: vec![], image: None }],
+            vec![Slide { label: "Media".into(), occurrence: 0, first_key: 0, last_key: 0, primary: vec![], second: vec![], image: None, chords: vec![] }],
             Some(title.clone()),
         )),
         ProgramItem::Scripture { reference, versions, .. } => {
@@ -172,6 +225,7 @@ fn build_slides(conn: &Connection, item: &ProgramItem, live: &LiveState) -> Res<
                     primary: vec![v.text.clone()],
                     second,
                     image: None,
+                    chords: vec![],
                 });
             }
             Ok((slides, Some(p.display)))
@@ -188,8 +242,12 @@ fn broadcast(app: &AppHandle, s: &AppState) {
         theme_rev: *s.theme_rev.lock().unwrap(),
         media: None,
         held: s.held.lock().unwrap().iter().cloned().collect(),
+        song_key: None,
     };
     let mut payload = payload;
+    if let Some(ProgramItem::Song { song_id, .. }) = &payload.item {
+        payload.song_key = s.db.lock().unwrap().query_row("SELECT song_key FROM song WHERE id = ?1", [song_id], |r| r.get::<_, Option<String>>(0)).ok().flatten();
+    }
     if let Some(ProgramItem::Media { media_id, .. }) = &payload.item {
         payload.media = wp_core::media::get(&s.db.lock().unwrap(), &s.profile_dir().join("media"), *media_id).ok();
     }
@@ -236,6 +294,11 @@ fn go_live(app: AppHandle, st: State<'_, AppState>, item: ProgramItem, slide_idx
     let pos = slides.get(idx).map(splitter::position_of);
     let mut next = live0.apply(Command::GoLive { item_idx: 0, slide_idx: idx, position: pos });
     next.slide_since_ms = cues::now_ms();
+    // a different song starts in its written key on the stage view
+    let same = st.item.lock().unwrap().as_ref().map_or(false, |cur| serde_json::to_value(cur).ok() == serde_json::to_value(&item).ok());
+    if !same {
+        next.transpose = 0;
+    }
     if let ProgramItem::Announcement { presentation_id, .. } = &item {
         if let Ok(d) = wp_core::announcements::get(&st.db.lock().unwrap(), *presentation_id) {
             let durations_ms = wp_core::announcements::durations_ms(&d);
@@ -362,8 +425,9 @@ struct Display {
     primary: bool,
 }
 
+/// Async on purpose: asking Windows for the monitors from the main thread can freeze the app.
 #[tauri::command]
-fn list_displays(app: AppHandle) -> Res<Vec<Display>> {
+async fn list_displays(app: AppHandle) -> Res<Vec<Display>> {
     let primary = app.primary_monitor().map_err(err)?.and_then(|m| m.name().cloned());
     Ok(app
         .available_monitors()
@@ -410,6 +474,7 @@ fn build_output(app: &AppHandle, role: &str, display_index: Option<usize>) -> Re
     let custom = cfg.as_ref().and_then(|c| c.custom);
     let monitors = app.available_monitors().map_err(err)?;
     let mut b = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(format!("index.html#/output/{role}").into()))
+            .additional_browser_args(BROWSER_ARGS)
         .title(format!("Worship Presenter – {role} output"))
         .decorations(false)
         .resizable(true)
@@ -559,7 +624,7 @@ async fn import_review(app: AppHandle, kind: String, path: String, code: Option<
     tauri::async_runtime::spawn_blocking(move || {
         let st = app.state::<AppState>();
         let conn = st.db.lock().unwrap();
-        wp_core::import::review::review(&conn, &kind, std::path::Path::new(&path), code.as_deref()).map_err(err)
+        guard(|| wp_core::import::review::review(&conn, &kind, std::path::Path::new(&path), code.as_deref()))?.map_err(err)
     })
     .await
     .map_err(err)?
@@ -571,8 +636,8 @@ async fn song_files_review(app: AppHandle, paths: Vec<String>) -> Res<wp_core::i
     tauri::async_runtime::spawn_blocking(move || {
         let st = app.state::<AppState>();
         let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
-        let r = wp_core::import::songfiles::review(&st.db.lock().unwrap(), &paths).map_err(err);
-        r
+        let conn = st.db.lock().unwrap();
+        guard(|| wp_core::import::songfiles::review(&conn, &paths))?.map_err(err)
     })
     .await
     .map_err(err)?
@@ -586,13 +651,19 @@ async fn song_files_import(app: AppHandle, paths: Vec<String>, skip: Option<Vec<
         wp_core::backup::create(&conn, &st.backups(), "before-import").map_err(err)?;
         let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
         let skip: Option<std::collections::HashSet<String>> = skip.map(|v| v.iter().map(|t| t.trim().to_lowercase()).collect());
-        wp_core::import::songfiles::import(&conn, &paths, skip.as_ref()).map_err(err)
+        guard(|| wp_core::import::songfiles::import(&conn, &paths, skip.as_ref()))?.map_err(err)
     })
     .await
     .map_err(err)?
 }
 
 /// Imports a library file chosen in the Import screen and returns the counts.
+/// Runs a file parser so that a damaged or hostile file that makes it panic is
+/// reported, not a crash. Locks must be taken outside `f` (so they are not poisoned).
+fn guard<T>(f: impl FnOnce() -> T) -> Res<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|_| "The file could not be read: it is damaged or not what it seems to be. Nothing was changed.".to_string())
+}
+
 /// Runs off the main thread so outputs keep drawing during a long import.
 #[tauri::command]
 async fn import_file(app: AppHandle, kind: String, path: String, code: Option<String>, skip: Option<Vec<String>>) -> Res<wp_core::import::Report> {
@@ -601,7 +672,10 @@ async fn import_file(app: AppHandle, kind: String, path: String, code: Option<St
         let conn = st.db.lock().unwrap();
         wp_core::backup::create(&conn, &st.backups(), "before-import").map_err(err)?;
         let p = PathBuf::from(&path);
-        let r = match kind.as_str() {
+        if !["ewb", "bibleshow", "ew-songs"].contains(&kind.as_str()) {
+            return Err(format!("Unknown import type {kind}"));
+        }
+        let r = guard(|| match kind.as_str() {
             "ewb" => wp_core::import::ewb::import(&conn, &p, code.as_deref()),
             "bibleshow" => wp_core::import::bibleshow::import_file(&conn, &p, code.as_deref()),
             "ew-songs" => {
@@ -610,8 +684,8 @@ async fn import_file(app: AppHandle, kind: String, path: String, code: Option<St
                 let skip: Option<std::collections::HashSet<String>> = skip.map(|v| v.iter().map(|t| t.trim().to_lowercase()).collect());
                 wp_core::import::ew_songs::import_filtered(&conn, &p.join("Songs.db"), &p.join("SongWords.db"), &name, skip.as_ref())
             }
-            other => return Err(format!("Unknown import type {other}")),
-        };
+            _ => unreachable!(),
+        })?;
         r.map_err(|e| match e {
             // two Bibles with the same short code: tell the operator what to do
             wp_core::Error::Db(ref d) if d.to_string().contains("UNIQUE") => {
@@ -814,6 +888,51 @@ fn relink_media(st: State<'_, AppState>, id: i64, path: String) -> Res<wp_core::
     wp_core::media::relink(&st.db.lock().unwrap(), &st.profile_dir().join("media"), id, std::path::Path::new(&path)).map_err(err)
 }
 
+/// EasyWorship's "Identify": a large number and the monitor's name on every connected
+/// monitor for 4 seconds, so the operator knows which is Monitor 1, 2, 3. Built off the
+/// main thread; the windows close themselves.
+#[tauri::command]
+async fn identify_monitors(app: AppHandle) -> Res<usize> {
+    let monitors = app.available_monitors().map_err(err)?;
+    let mut labels = vec![];
+    for (i, m) in monitors.iter().enumerate() {
+        let label = format!("identify-{i}");
+        if let Some(w) = app.get_webview_window(&label) {
+            let _ = w.destroy();
+        }
+        let name: String = m.name().cloned().unwrap_or_default().chars().filter(|c| c.is_alphanumeric() || *c == ' ').collect();
+        let url = format!("index.html#/identify/{}/{}x{}/{}", i + 1, m.size().width, m.size().height, name.replace(' ', "%20"));
+        let scale = m.scale_factor();
+        let pos = m.position().to_logical::<f64>(scale);
+        let size = m.size().to_logical::<f64>(scale);
+        let w = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
+            .additional_browser_args(BROWSER_ARGS)
+            .title("Identify")
+            .decorations(false)
+            .skip_taskbar(true)
+            .focused(false)
+            .always_on_top(true)
+            .position(pos.x, pos.y)
+            .inner_size(size.width, size.height)
+            .build()
+            .map_err(err)?;
+        let _ = w.set_position(tauri::PhysicalPosition::new(m.position().x, m.position().y));
+        let _ = w.set_size(tauri::PhysicalSize::new(m.size().width, m.size().height));
+        labels.push(label);
+    }
+    let h = app.clone();
+    let n = labels.len();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        for l in labels {
+            if let Some(w) = h.get_webview_window(&l) {
+                let _ = w.destroy();
+            }
+        }
+    });
+    Ok(n)
+}
+
 /// Shows a test pattern on one output for a few seconds. The UI asks first when it is Main.
 #[tauri::command]
 fn identify_output(app: AppHandle, role: String) {
@@ -821,7 +940,7 @@ fn identify_output(app: AppHandle, role: String) {
 }
 
 /// Settings the core uses; only these keys can be written.
-const SETTINGS: &[&str] = &["project_on_restart", "low_spec_mode", "lines_per_slide", "advance_after_go_live", "font_fallback"];
+const SETTINGS: &[&str] = &["project_on_restart", "low_spec_mode", "lines_per_slide", "advance_after_go_live", "font_fallback", "speech_engine", "speech_mic", "speech_refs_only"];
 
 #[tauri::command]
 fn get_settings(st: State<'_, AppState>) -> Res<std::collections::HashMap<String, String>> {
@@ -922,8 +1041,37 @@ async fn import_theme(app: AppHandle, path: String) -> Res<ImportedTheme> {
         if bytes.len() > 400_000_000 {
             return Err("This theme file is over 400 MB.".to_string());
         }
-        let (id, name) = wp_core::themes::import(&st.db.lock().unwrap(), &st.profile_dir().join("media"), &bytes).map_err(err)?;
+        let conn = st.db.lock().unwrap();
+        let (id, name) = guard(|| wp_core::themes::import(&conn, &st.profile_dir().join("media"), &bytes))?.map_err(err)?;
+        drop(conn);
         Ok(ImportedTheme { id, name })
+    })
+    .await
+    .map_err(err)?
+}
+
+/// EasyWorship (.ewtx) or ProPresenter (.proTheme) themes: every design, with a preview.
+#[tauri::command]
+async fn foreign_theme_review(path: String) -> Res<Vec<wp_core::import::foreign_themes::Design>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > 400_000_000 {
+            return Err("This theme file is over 400 MB.".to_string());
+        }
+        guard(|| wp_core::import::foreign_themes::review(std::path::Path::new(&path)))?.map_err(err)
+    })
+    .await
+    .map_err(err)?
+}
+
+/// Imports the chosen designs as themes.
+#[tauri::command]
+async fn foreign_theme_import(app: AppHandle, path: String, chosen: Vec<usize>) -> Res<Vec<ImportedTheme>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let st = app.state::<AppState>();
+        let conn = st.db.lock().unwrap();
+        let out = guard(|| wp_core::import::foreign_themes::import(&conn, &st.profile_dir().join("media"), std::path::Path::new(&path), &chosen))?.map_err(err)?;
+        drop(conn);
+        Ok(out.into_iter().map(|(id, name)| ImportedTheme { id, name }).collect())
     })
     .await
     .map_err(err)?
@@ -936,6 +1084,19 @@ fn set_stage_message(app: AppHandle, st: State<'_, AppState>, message: Option<St
     *st.live.lock().unwrap() = next.clone();
     broadcast(&app, &st);
     Ok(next)
+}
+
+// ---------- fonts ----------
+
+/// Fonts installed on this computer (read once, then remembered).
+#[tauri::command]
+async fn list_fonts() -> Vec<fonts::FontFamily> {
+    static CACHE: std::sync::OnceLock<Vec<fonts::FontFamily>> = std::sync::OnceLock::new();
+    if let Some(c) = CACHE.get() {
+        return c.clone();
+    }
+    let list = tauri::async_runtime::spawn_blocking(fonts::installed).await.unwrap_or_default();
+    CACHE.get_or_init(|| list).clone()
 }
 
 // ---------- PowerPoint and PDF ----------
@@ -952,6 +1113,15 @@ struct PresentationPlan {
     pdf: Option<String>,
     token: Option<String>,
     warnings: Vec<String>,
+}
+
+/// Windows PowerShell by its full path, so a program named "powershell" earlier in
+/// PATH cannot stand in for it.
+pub(crate) fn powershell_exe() -> PathBuf {
+    std::env::var_os("SystemRoot")
+        .map(|r| PathBuf::from(r).join("System32").join("WindowsPowerShell").join("v1.0").join("powershell.exe"))
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| PathBuf::from("powershell"))
 }
 
 /// Runs a program and gives up after `secs` (PowerPoint or LibreOffice can hang on a bad file).
@@ -1006,7 +1176,7 @@ async fn presentation_import(app: AppHandle, path: String) -> Res<PresentationPl
         let mut warnings = Vec::new();
         // 1. PowerPoint itself (Windows): exact pictures of every slide
         if cfg!(windows) {
-            let mut cmd = std::process::Command::new("powershell");
+            let mut cmd = std::process::Command::new(powershell_exe());
             cmd.args(["-NoProfile", "-NonInteractive", "-Command", &wp_core::presentations::powerpoint_script(&src, &work)]);
             match run_with_timeout(cmd, 180) {
                 Ok(true) => {
@@ -1039,7 +1209,7 @@ async fn presentation_import(app: AppHandle, path: String) -> Res<PresentationPl
         if ext != "pptx" && ext != "ppsx" {
             return Err("This older PowerPoint file needs PowerPoint or LibreOffice on this computer. Save it as .pptx or PDF, or install LibreOffice (free).".into());
         }
-        let slides = wp_core::presentations::read_pptx(&src).map_err(err)?;
+        let slides = guard(|| wp_core::presentations::read_pptx(&src))?.map_err(err)?;
         let id = wp_core::presentations::deck_from_text(&st.db.lock().unwrap(), &title, &slides).map_err(err)?;
         let _ = std::fs::remove_dir_all(&work);
         warnings.push("Neither PowerPoint nor LibreOffice is on this computer, so only the words of each slide were kept. Install LibreOffice (free) for full slides.".into());
@@ -1182,6 +1352,18 @@ fn browse_chapter(st: State<'_, AppState>, version: String, typed: String) -> Re
     wp_core::browse::browse_chapter(&st.db.lock().unwrap(), &version, &typed).map_err(err)
 }
 
+/// Verses containing the words typed (Bible word search).
+#[tauri::command]
+async fn search_bible(app: AppHandle, versions: Vec<String>, query: String) -> Res<Vec<wp_core::browse::VerseHit>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let st = app.state::<AppState>();
+        let conn = st.db.lock().unwrap();
+        wp_core::browse::search_bible(&conn, &versions, &query, 200).map_err(err)
+    })
+    .await
+    .map_err(err)?
+}
+
 #[tauri::command]
 fn rebuild_search(st: State<'_, AppState>) -> Res<usize> {
     wp_core::browse::rebuild_search(&st.db.lock().unwrap()).map_err(err)
@@ -1270,6 +1452,7 @@ async fn ndi_start(app: AppHandle, source: String, name: String, fps: Option<u32
         "lower_third" => {
             // 1920×1080 window drawn on the key colour, kept off the visible desktop
             let w = WebviewWindowBuilder::new(&app, "output-ndi", WebviewUrl::App("index.html#/output/ndi".into()))
+            .additional_browser_args(BROWSER_ARGS)
                 .title("Worship Presenter – NDI lower third")
                 .decorations(false)
                 .skip_taskbar(true)
@@ -1371,6 +1554,29 @@ fn set_repeat(app: AppHandle, st: State<'_, AppState>, label: Option<String>, to
         wp_core::live::Repeat { label: l, total: total.max(1), done: done.unwrap_or(if on_it { 1 } else { 0 }) }
     });
     Ok(apply(&app, &st, Command::SetRepeat { repeat }))
+}
+
+/// Browser arguments for every window (they must match across windows). Tauri's
+/// defaults, plus camera access for the app's own pages without a prompt that would
+/// appear on the projector (only the app's code runs there: see the CSP).
+pub(crate) const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --use-fake-ui-for-media-stream";
+
+/// Moves the musicians' chords up or down (semitones) on the stage view.
+#[tauri::command]
+fn set_transpose(app: AppHandle, st: State<'_, AppState>, semitones: i8) -> Res<LiveState> {
+    Ok(apply(&app, &st, Command::SetTranspose { semitones }))
+}
+
+/// Shows a camera on the main screen (or takes it off with None).
+#[tauri::command]
+fn set_camera(app: AppHandle, st: State<'_, AppState>, camera: Option<wp_core::live::Camera>) -> Res<LiveState> {
+    Ok(apply(&app, &st, Command::SetCamera { camera }))
+}
+
+/// Live sermon subtitles on the stream, the screens, both, or off.
+#[tauri::command]
+fn set_subtitles(app: AppHandle, st: State<'_, AppState>, target: Option<String>) -> Res<LiveState> {
+    Ok(apply(&app, &st, Command::SetSubtitles { target }))
 }
 
 /// Lining out: one line per slide, remembering the previous setting to restore.
@@ -1595,6 +1801,8 @@ pub fn run() {
                 ndi: ndi::Ndi::default(),
                 remote: Mutex::new(None),
                 music: Mutex::new(None),
+                speech: speech::Speech::default(),
+                pulpit: Mutex::new(Default::default()),
             });
             // weekly automatic backup, taken quietly at start-up
             if let Some(s) = app.try_state::<AppState>() {
@@ -1615,7 +1823,8 @@ pub fn run() {
                         st.outputs.lock().unwrap().insert(c.role.clone(), Some(i));
                         st.acks.lock().unwrap().insert(c.role.clone(), (Instant::now(), 0));
                         let (h3, role) = (h2.clone(), c.role.clone());
-                        let _ = h2.run_on_main_thread(move || {
+                        // never build windows on the main thread (WebView2 freezes)
+                        tauri::async_runtime::spawn(async move {
                             let _ = build_output(&h3, &role, Some(i));
                         });
                     }
@@ -1651,8 +1860,8 @@ pub fn run() {
                                 broadcast(&handle, &s);
                             }
                             let h = handle.clone();
-                            // window work must happen on the main thread
-                            let _ = handle.run_on_main_thread(move || {
+                            // off the main thread: building a window there freezes WebView2
+                            tauri::async_runtime::spawn(async move {
                                 let _ = build_output(&h, &role, display);
                             });
                         }
@@ -1661,6 +1870,23 @@ pub fn run() {
                 std::thread::sleep(Duration::from_millis(1000));
             });
             Ok(())
+        })
+        // closing the control window ends Worship Presenter: outputs, music, the phone
+        // remote and the watchdog go with it (they used to keep running with no window)
+        .on_window_event(|window, event| {
+            if window.label() == "main" {
+                if let tauri::WindowEvent::Destroyed = event {
+                    let app = window.app_handle().clone();
+                    if let Some(st) = app.try_state::<AppState>() {
+                        st.outputs.lock().unwrap().clear();
+                        if let Some(r) = st.remote.lock().unwrap().take() {
+                            r.remote.revoke_all();
+                        }
+                        st.music.lock().unwrap().take();
+                    }
+                    app.exit(0);
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             search_songs,
@@ -1696,6 +1922,7 @@ pub fn run() {
             song_files_import,
             relink_media,
             identify_output,
+            identify_monitors,
             get_settings,
             set_setting,
             delete_song,
@@ -1705,6 +1932,20 @@ pub fn run() {
             restore_backup,
             backups_folder,
             list_profiles,
+            list_fonts,
+            pulpit_notes,
+            set_subtitles,
+            set_camera,
+            set_transpose,
+            foreign_theme_review,
+            foreign_theme_import,
+            pulpit_dismiss,
+            speech::speech_status,
+            speech::speech_start,
+            speech::speech_stop,
+            speech::speech_dismiss,
+            speech::speech_mics,
+            speech::speech_install_vosk,
             presentation_import,
             presentation_page,
             presentation_finish,
@@ -1726,6 +1967,7 @@ pub fn run() {
             collection_remove,
             browse_chapter,
             rebuild_search,
+            search_bible,
             reset_song_looks,
             music::music_status,
             music::music_set_playlist,

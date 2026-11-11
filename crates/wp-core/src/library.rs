@@ -68,11 +68,11 @@ fn hits(conn: &Connection, ids: Vec<i64>) -> Result<Vec<SongHit>> {
 pub fn song_sections(conn: &Connection, song_id: i64) -> Result<Vec<Section>> {
     let mut st = conn.prepare("SELECT id, label FROM song_section WHERE song_id = ?1 ORDER BY idx")?;
     let secs: Vec<(i64, String)> = st.query_map([song_id], |r| Ok((r.get(0)?, r.get(1)?)))?.filter_map(|r| r.ok()).collect();
-    let mut seg = conn.prepare("SELECT lang, text, align_key FROM song_segment WHERE section_id = ?1 ORDER BY align_key, lang, idx")?;
+    let mut seg = conn.prepare("SELECT lang, text, align_key, chords FROM song_segment WHERE section_id = ?1 ORDER BY align_key, lang, idx")?;
     let mut out = Vec::new();
     for (id, label) in secs {
         let segments = seg
-            .query_map([id], |r| Ok(Segment { lang: r.get(0)?, text: r.get(1)?, align_key: r.get(2)? }))?
+            .query_map([id], |r| Ok(Segment { lang: r.get(0)?, text: r.get(1)?, align_key: r.get(2)?, chords: r.get(3)? }))?
             .filter_map(|r| r.ok())
             .collect();
         out.push(Section { id, label, segments });

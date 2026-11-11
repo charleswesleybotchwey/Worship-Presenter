@@ -110,6 +110,26 @@ export function OutputOptions({ views, mainLive }: { views: (role: string) => Ou
                 ))}
               </select>
               {draft.display_name && !displays.some((d) => d.name === draft.display_name) && <p className="oo-warn">“{draft.display_name}” is not connected now. This output stays closed until it is.</p>}
+              <div className="oo-actions">
+                <button
+                  className="wp-btn wp-btn--quiet"
+                  onClick={async () => {
+                    if (mainLive && !confirm("Something is on the screens. Identify shows a big number on every monitor, the projector too, for 4 seconds. Continue?")) return;
+                    try {
+                      const n = await api.identifyMonitors();
+                      setMsg({ text: `Showing a number on ${n} monitor${n === 1 ? "" : "s"} for 4 seconds. Choose the matching “Monitor” above.` });
+                      api.displays().then(setDisplays).catch(() => {});
+                    } catch (e) {
+                      setMsg({ text: String(e instanceof Error ? e.message : e), bad: true });
+                    }
+                  }}
+                >
+                  Identify screens
+                </button>
+                <button className="wp-btn wp-btn--quiet" onClick={() => api.displays().then(setDisplays).catch(() => {})} title="Look again for monitors, after plugging one in">
+                  Refresh list
+                </button>
+              </div>
             </fieldset>
             <fieldset className="oo-set">
               <legend>Output position</legend>
@@ -208,12 +228,14 @@ export function OutputOptions({ views, mainLive }: { views: (role: string) => Ou
           </button>
           <button
             className="wp-btn wp-btn--quiet"
+            disabled={views(role).condition === "none" || views(role).condition === "disconnected"}
+            title={views(role).condition === "none" ? "Open this output first; or use Identify screens to number every monitor" : "Test pattern on this output for 4 seconds"}
             onClick={() => {
               if (role === "main" && mainLive && !confirm("Main is showing the service. Identify puts a test pattern on the screen the congregation can see for 4 seconds. Continue?")) return;
               void api.identifyOutput(role);
             }}
           >
-            Identify
+            Test pattern
           </button>
           <button className="wp-btn wp-btn--quiet" onClick={() => api.closeOutput(role)}>
             Close

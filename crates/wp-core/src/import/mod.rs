@@ -6,6 +6,7 @@ pub mod bibleshow;
 pub mod ew_songs;
 pub mod ewb;
 pub mod review;
+pub mod foreign_themes;
 pub mod songfiles;
 
 use crate::Result;
@@ -96,7 +97,8 @@ pub(crate) fn insert_verse(
     heading: Option<&str>,
 ) -> Result<()> {
     stmt_v.execute(params![version_id, book, ch, vs, text, marked, heading])?;
-    stmt_f.execute(params![text, version_id, book, ch, vs])?;
+    // the word index holds folded text (ɛ→e, ɔ→o …) so a plain keyboard finds Twi words
+    stmt_f.execute(params![crate::text::fold(text), version_id, book, ch, vs])?;
     Ok(())
 }
 

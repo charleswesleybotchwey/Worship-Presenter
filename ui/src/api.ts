@@ -14,6 +14,8 @@ export interface Slide {
   primary: string[];
   second: string[];
   image?: string | null;
+  /** Primary lines with inline chords (stage view only). */
+  chords?: string[];
 }
 
 export interface LiveState {
@@ -32,6 +34,9 @@ export interface LiveState {
   slide_since_ms: number;
   repeat: { label: string; total: number; done: number } | null;
   lining_out: boolean;
+  subtitles?: "stream" | "screens" | "both" | null;
+  transpose?: number;
+  camera?: CameraLive | null;
 }
 
 export type TimerShow = "off" | "corner" | "full";
@@ -127,6 +132,7 @@ export interface Broadcast {
   media: MediaItem | null;
   /** Outputs that came back after being lost; black until resumed. */
   held: string[];
+  song_key?: string | null;
 }
 
 export interface SongHit {
@@ -181,6 +187,8 @@ export interface SongDoc {
   lyrics: { lang: string; body: string }[];
   sequence: string;
   lines_per_slide: number | null;
+  /** Musical key, for the musicians' stage view. */
+  key?: string | null;
 }
 
 export interface BackupInfo {
@@ -218,6 +226,54 @@ export interface RemoteStatus {
   log: { at: number; device: string; action: string; ok: boolean }[];
 }
 
+export interface ForeignDesign {
+  name: string;
+  kind: "song" | "scripture" | "lower_third" | "announcement";
+  preview: Record<string, unknown>;
+  notes: string[];
+  suggested: boolean;
+}
+
+export interface CameraLive {
+  device_id: string;
+  label: string;
+  mode: "full" | "behind" | "corner";
+}
+
+export interface PulpitNote {
+  id: number;
+  device: string;
+  text: string;
+  deck_id: number;
+  deck_title: string;
+  slide_idx: number;
+}
+
+export interface HeardRef {
+  reference: string;
+  book_no: number;
+  chapter: number;
+  verse_from: number | null;
+  verse_to: number | null;
+  heard: string;
+  at: number;
+}
+export interface SpeechStatus {
+  listening: string | null;
+  caption: string;
+  recent: HeardRef[];
+  problem: string | null;
+  vosk_ready: boolean;
+  installing: string | null;
+  windows_speech: boolean;
+}
+
+export interface FontFamily {
+  name: string;
+  ghanaian: boolean;
+  styles: number;
+}
+
 export interface OutputConfig {
   role: string;
   name: string;
@@ -251,6 +307,15 @@ export interface UsageRow {
   last: string;
 }
 
+export interface VerseHit {
+  version: string;
+  reference: string;
+  book_no: number;
+  chapter: number;
+  verse: number;
+  text: string;
+}
+
 export interface SongRow {
   id: number;
   number: string | null;
@@ -258,6 +323,7 @@ export interface SongRow {
   first_line: string | null;
   author: string | null;
   copyright: string | null;
+  langs: string[];
   sort_key: string;
 }
 export interface SongTree {
@@ -357,6 +423,7 @@ export const api = {
   songFilesImport: (paths: string[], skip: string[] | null) => call<ImportReport>("song_files_import", { paths, skip }),
   relinkMedia: (id: number, path: string) => call<MediaItem>("relink_media", { id, path }),
   identifyOutput: (role: string) => call<void>("identify_output", { role }),
+  identifyMonitors: () => call<number>("identify_monitors"),
   getSettings: () => call<Record<string, string>>("get_settings"),
   setSetting: (key: string, value: string) => call<void>("set_setting", { key, value }),
   deleteSong: (id: number) => call<void>("delete_song", { id }),
@@ -403,6 +470,20 @@ export const api = {
   setAutoPaused: (paused: boolean) => call<LiveState>("set_auto_paused", { paused }),
   setRepeat: (label: string | null, total: number, done: number | null = null) => call<LiveState>("set_repeat", { label, total, done }),
   setLiningOut: (on: boolean) => call<LiveState>("set_lining_out", { on }),
+  listFonts: () => call<FontFamily[]>("list_fonts"),
+  foreignThemeReview: (path: string) => call<ForeignDesign[]>("foreign_theme_review", { path }),
+  foreignThemeImport: (path: string, chosen: number[]) => call<{ id: number; name: string }[]>("foreign_theme_import", { path, chosen }),
+  setTranspose: (semitones: number) => call<LiveState>("set_transpose", { semitones }),
+  setCamera: (camera: CameraLive | null) => call<LiveState>("set_camera", { camera }),
+  setSubtitles: (target: "stream" | "screens" | "both" | null) => call<LiveState>("set_subtitles", { target }),
+  pulpitNotes: () => call<PulpitNote[]>("pulpit_notes"),
+  pulpitDismiss: (id: number | null) => call<void>("pulpit_dismiss", { id }),
+  speechStatus: () => call<SpeechStatus>("speech_status"),
+  speechStart: (engine: string, mic: string | null, referencesOnly: boolean) => call<void>("speech_start", { engine, mic, referencesOnly }),
+  speechStop: () => call<void>("speech_stop"),
+  speechDismiss: (reference: string | null) => call<void>("speech_dismiss", { reference }),
+  speechMics: () => call<string[]>("speech_mics"),
+  speechInstallVosk: () => call<void>("speech_install_vosk"),
   presentationImport: (path: string) =>
     call<{ stage: "done" | "render_pdf"; method: string; title: string; deck_id: number | null; pdf: string | null; token: string | null; warnings: string[] }>("presentation_import", { path }),
   /** A drawn page as raw bytes (not JSON), so big decks import quickly. */
@@ -430,6 +511,7 @@ export const api = {
   collectionRemove: (id: number, songIds: number[]) => call<void>("collection_remove", { id, songIds }),
   browseChapter: (version: string, typed: string) => call<ChapterView>("browse_chapter", { version, typed }),
   rebuildSearch: () => call<number>("rebuild_search"),
+  searchBible: (versions: string[], query: string) => call<VerseHit[]>("search_bible", { versions, query }),
   resetSongLooks: () => call<number>("reset_song_looks"),
   musicStatus: () => call<MusicStatus>("music_status"),
   musicSetPlaylist: (mediaIds: number[]) => call<void>("music_set_playlist", { mediaIds }),
@@ -546,10 +628,29 @@ export async function pickPresentation(): Promise<string | null> {
   return typeof r === "string" ? r : null;
 }
 
+/** An EasyWorship or ProPresenter theme file. */
+export async function pickForeignTheme(): Promise<string | null> {
+  if (!inTauri) return "Theme.proTheme";
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const r = await open({ title: "Choose an EasyWorship or ProPresenter theme", filters: [{ name: "EasyWorship or ProPresenter theme", extensions: ["ewtx", "proTheme", "protheme"] }] });
+  return typeof r === "string" ? r : null;
+}
+
 export async function pickCsvSave(name: string): Promise<string | null> {
   if (!inTauri) return name;
   const { save } = await import("@tauri-apps/plugin-dialog");
   return (await save({ title: "Save the song usage report", defaultPath: name, filters: [{ name: "Spreadsheet (CSV)", extensions: ["csv"] }] })) ?? null;
+}
+
+/** Live sermon subtitles: what the speech engine hears, several times a second. */
+export async function onCaption(cb: (c: { text: string; final: boolean }) => void): Promise<() => void> {
+  if (!inTauri) {
+    const ch = new BroadcastChannel("wp-live");
+    ch.onmessage = (e) => e.data.type === "caption" && cb(e.data.caption);
+    return () => ch.close();
+  }
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<{ text: string; final: boolean }>("caption", (e) => cb(e.payload));
 }
 
 export async function onIdentify(cb: (role: string) => void): Promise<() => void> {
@@ -630,7 +731,7 @@ const SONGS: { hit: SongHit; sections: { label: string; en: string[]; fat?: stri
   },
   {
     hit: { id: 2, title: "MHB 50", author: "Isaac Watts", numbers: ["MHB 50"], first_line: "Come, let us join our cheerful songs" },
-    sections: [{ label: "V1", en: ["Come, let us join our cheerful songs", "With angels round the throne;", "Ten thousand thousand are their tongues,", "But all their joys are one."] }],
+    sections: [{ label: "V1", en: ["[G]Come, let us [C]join our [D]cheerful [G]songs", "With [Em]angels [A]round the [D]throne;", "[G]Ten thousand [C]thousand [G]are their [D]tongues,", "But [C]all their [D]joys are [G]one."] }],
   },
 ];
 
@@ -645,6 +746,7 @@ const VERSES: Record<string, { display: string; v: Record<string, string[]> }> =
   },
 };
 
+const MOCK_KEYS: Record<number, string> = { 2: "G" };
 let mState: LiveState = { revision: 0, item_idx: null, slide_idx: 0, mode: "blank", lang_mode: "both", lines_per_slide: 2, media_playing: true, media_restart: 0, stage_message: null, timer: null, alert: null, auto: null, slide_since_ms: 0, repeat: null, lining_out: false };
 const TEMPLATES: Deck[] = [
   { id: null, title: "Offering and tithes", looping: false, seconds: 0, slides: [
@@ -711,6 +813,17 @@ let mNextId = 2;
 const mAcks = new Map<string, { rev: number; at: number }>();
 let mMine: { id: number; name: string; songs: number[] }[] = [];
 const mPages = new Map<string, string[]>();
+let mPulpit: PulpitNote[] = [];
+let mForeign: ForeignDesign[] = [];
+/** Browser preview only: pretend the pastor's phone sent a note. */
+(globalThis as unknown as { __wpNote: (t: string) => void }).__wpNote = (text: string) => {
+  const title = "Sermon notes (preview)";
+  let d = mDecks.find((x) => x.title === title);
+  if (!d) mDecks.push((d = { id: Math.max(0, ...mDecks.map((x) => x.id!)) + 1, title, looping: false, seconds: 0, slides: [] }));
+  d.slides.push({ kind: "text", title: "", body: text, image: null, seconds: null });
+  mPulpit.unshift({ id: Date.now(), device: "Pastor's phone", text, deck_id: d.id!, deck_title: title, slide_idx: d.slides.length - 1 });
+};
+const mSpeech = { on: null as string | null, caption: "", recent: [] as HeardRef[], ready: false };
 function mockPage(token: string, index: number, bytes: Uint8Array, ext: string) {
   let bin = "";
   for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
@@ -791,7 +904,8 @@ function splitSong(id: number, lines: number, mode: LangMode): Slide[] {
         occurrence: occ,
         first_key: i,
         last_key: Math.min(i + lines, sec.en.length) - 1,
-        primary: mode === "second" && sec.fat ? [] : sec.en.slice(i, i + lines),
+        primary: (mode === "second" && sec.fat ? [] : sec.en.slice(i, i + lines)).map((l) => l.replace(/\[[A-G][^\]]*\]/g, "")),
+        chords: sec.en.some((l) => l.includes("[")) ? sec.en.slice(i, i + lines) : undefined,
         second: mode === "primary" || !sec.fat ? [] : sec.fat.slice(i, i + lines),
       });
     }
@@ -826,7 +940,7 @@ function countRepeat(idx: number) {
 
 function emit() {
   chan ??= new BroadcastChannel("wp-live");
-  const payload: Broadcast = { state: mState, item: mItem, slides: mSlides, caption: mCaption, theme_rev: mThemeRev, media: mediaOf(mItem), held: [...mHeld] };
+  const payload: Broadcast = { state: mState, item: mItem, slides: mSlides, caption: mCaption, theme_rev: mThemeRev, media: mediaOf(mItem), held: [...mHeld], song_key: mItem?.kind === "song" ? MOCK_KEYS[mItem.song_id] ?? null : null };
   chan.postMessage({ type: "live", payload });
   window.dispatchEvent(new CustomEvent("wp-local-live", { detail: payload }));
 }
@@ -1026,6 +1140,8 @@ async function mock(cmd: string, a: Record<string, unknown>): Promise<unknown> {
       mMedia = mMedia.map((m) => (m.id === a.id ? { ...m, missing: false, thumb: null } : m));
       return mMedia.find((m) => m.id === a.id);
     }
+    case "identify_monitors":
+      return 1;
     case "identify_output":
       chan?.postMessage({ type: "identify", role: a.role });
       return;
@@ -1088,6 +1204,68 @@ async function mock(cmd: string, a: Record<string, unknown>): Promise<unknown> {
       return;
     case "list_profiles":
       return structuredClone(mProfiles);
+    case "foreign_theme_review": {
+      // the browser preview reads a review made from real theme files (test data)
+      const r = await fetch("/samples/theme-review.json").catch(() => null);
+      if (!r || !r.ok) throw new Error("No sample theme review in the browser preview.");
+      mForeign = (await r.json()) as ForeignDesign[];
+      return mForeign;
+    }
+    case "foreign_theme_import": {
+      const out = (a.chosen as number[]).map((i) => {
+        const d = mForeign[i];
+        const id = Math.max(0, ...mThemes.map((t) => t.id)) + 1;
+        mThemes.push({ id, name: d.name, kind: d.kind, is_default: false, theme: d.preview as never });
+        return { id, name: d.name };
+      });
+      return out;
+    }
+    case "set_transpose":
+      return bump({ transpose: Math.max(-11, Math.min(11, a.semitones as number)) });
+    case "set_camera":
+      return bump({ camera: (a.camera as CameraLive) ?? null });
+    case "set_subtitles":
+      return bump({ subtitles: (a.target as LiveState["subtitles"]) ?? null });
+    case "pulpit_notes":
+      return structuredClone(mPulpit);
+    case "pulpit_dismiss":
+      mPulpit = a.id == null ? [] : mPulpit.filter((n) => n.id !== a.id);
+      return;
+    case "speech_status":
+      return { listening: mSpeech.on, caption: mSpeech.caption, recent: mSpeech.recent, problem: null, vosk_ready: mSpeech.ready, installing: null, windows_speech: true };
+    case "speech_start": {
+      if (a.engine === "vosk" && !mSpeech.ready) throw new Error("The Vosk engine is not downloaded yet. Settings → Scripture recognition → Download.");
+      mSpeech.on = a.engine === "vosk" ? "Vosk" : "Windows Speech";
+      // the browser preview pretends to hear a sermon
+      const lines = ["so turn with me to John three sixteen", "and also first Corinthians thirteen verses four to seven", "Psalm twenty three"];
+      const say = (text: string, final: boolean) => mState.subtitles && (chan ??= new BroadcastChannel("wp-live")).postMessage({ type: "caption", caption: { text, final } });
+      lines.forEach((l, i) =>
+        setTimeout(() => {
+          if (!mSpeech.on) return;
+          say(l.split(" ").slice(0, 4).join(" "), false);
+          setTimeout(() => say(l, true), 400);
+          mSpeech.caption = l;
+          const ref = ["John 3:16", "1 Corinthians 13:4-7", "Psalms 23"][i];
+          mSpeech.recent.unshift({ reference: ref, book_no: 0, chapter: 0, verse_from: null, verse_to: null, heard: l, at: Date.now() / 1000 });
+        }, 1500 + i * 4000),
+      );
+      return;
+    }
+    case "speech_stop":
+      mSpeech.on = null;
+      mSpeech.caption = "";
+      return;
+    case "speech_dismiss":
+      mSpeech.recent = a.reference ? mSpeech.recent.filter((r) => r.reference !== a.reference) : [];
+      return;
+    case "speech_mics":
+      return ["Microphone (Realtek Audio)", "Line In (Behringer UMC202HD)"];
+    case "speech_install_vosk":
+      await new Promise((r) => setTimeout(r, 800));
+      mSpeech.ready = true;
+      return;
+    case "list_fonts":
+      return ["Arial", "Bahnschrift", "Calibri", "Cambria", "Georgia", "Inter", "Noto Sans", "Noto Serif", "Segoe UI", "Tahoma", "Times New Roman", "Trebuchet MS", "Verdana"].map((name) => ({ name, ghanaian: name.startsWith("Noto") || name === "Segoe UI", styles: 4 }));
     case "presentation_import":
       // the browser preview behaves like a PC with LibreOffice: the PDF is drawn here
       return { stage: "render_pdf", method: "libreoffice", title: String(a.path).replace(/\.\w+$/, ""), deck_id: null, pdf: "/samples/harvest.pdf", token: "abc123", warnings: [] };
@@ -1140,7 +1318,7 @@ async function mock(cmd: string, a: Record<string, unknown>): Promise<unknown> {
       let list = SONGS.map((x) => x.hit);
       if (sc.kind === "mine") list = (mMine.find((c) => c.id === sc.id)?.songs ?? []).map((id) => SONGS.find((x) => x.hit.id === id)!.hit);
       if (q) list = list.filter((h) => `${h.title} ${h.numbers.join(" ")} ${h.first_line} ${h.author}`.toLowerCase().includes(q));
-      return list.map((h) => ({ id: h.id, number: h.numbers[0] ?? null, title: h.title, first_line: h.first_line, author: h.author, copyright: "Public Domain", sort_key: (h.numbers[0] ?? "").replace(/\d+/g, (d) => d.padStart(8, "0")) }));
+      return list.map((h) => ({ id: h.id, number: h.numbers[0] ?? null, title: h.title, first_line: h.first_line, author: h.author, copyright: "Public Domain", langs: h.title.includes("FANTE") ? ["en", "fat"] : ["en"], sort_key: (h.numbers[0] ?? "").replace(/\d+/g, (d) => d.padStart(8, "0")) }));
     }
     case "collection_create": {
       const name = String(a.name).trim();
@@ -1169,6 +1347,8 @@ async function mock(cmd: string, a: Record<string, unknown>): Promise<unknown> {
     }
     case "browse_chapter": {
       const typed = String(a.typed).trim();
+      // like the app: words that are not a reference are not a chapter
+      if (!/\d/.test(typed) && !/^(john|jn|yohane)$/i.test(typed)) throw new Error(`“${typed}” is not a Bible reference.`);
       const m = typed.match(/(\d+)(?::(\d+)(?:-(\d+))?)?\s*$/);
       const from = m?.[2] ? Number(m[2]) : 0, to = m?.[3] ? Number(m[3]) : from;
       const v16 = VERSES["jn 3:16"].v[String(a.version)]?.[0] ?? "For God so loved the world…";
@@ -1176,6 +1356,15 @@ async function mock(cmd: string, a: Record<string, unknown>): Promise<unknown> {
         version: a.version, book: "John", book_no: 43, chapter: 3, chapters: 21,
         rows: Array.from({ length: 21 }, (_, i) => ({ verse: i + 1, reference: `John 3:${i + 1}`, text: i + 1 === 16 ? v16 : `(sample text for John 3:${i + 1} in the browser preview)`, heading: null, selected: from > 0 && i + 1 >= from && i + 1 <= to })),
       };
+    }
+    case "search_bible": {
+      const q = String(a.query).toLowerCase();
+      const all = [
+        { version: "NKJV", reference: "John 3:16", book_no: 43, chapter: 3, verse: 16, text: "For God so loved the world that He gave His only begotten Son, that whoever believes in Him should not perish but have everlasting life." },
+        { version: "NKJV", reference: "Psalm 23:1", book_no: 19, chapter: 23, verse: 1, text: "The LORD is my shepherd; I shall not want." },
+        { version: "NKJV", reference: "John 4:10", book_no: 43, chapter: 4, verse: 10, text: "Jesus answered and said to her, “If you knew the gift of God, and who it is who says to you, ‘Give Me a drink,’ you would have asked Him, and He would have given you living water.”" },
+      ];
+      return all.filter((h) => q.replace(/"/g, "").split(/\s+/).every((w) => h.text.toLowerCase().includes(w)));
     }
     case "rebuild_search":
       return SONGS.length;

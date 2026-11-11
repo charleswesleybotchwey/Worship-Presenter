@@ -49,6 +49,15 @@ pub fn resolve(mode: Mode, on_logo: OutputRule, on_blank: OutputRule) -> Mode {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Camera {
+    /// The browser's device id for the camera, and its name for the operator.
+    pub device_id: String,
+    pub label: String,
+    /// "full", "behind" (under the words) or "corner"
+    pub mode: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LiveState {
     pub revision: u64,
     pub schedule_id: Option<i64>,
@@ -85,6 +94,18 @@ pub struct LiveState {
     /// Lining out: one line at a time, next line large on the stage display.
     #[serde(default)]
     pub lining_out: bool,
+    /// Semitones the musicians' chords are moved up (+) or down (−) on the stage view.
+    #[serde(default)]
+    pub transpose: i8,
+    /// A camera on the main screen: full screen, behind the words, or in a corner.
+    #[serde(default)]
+    pub camera: Option<Camera>,
+    /// Live sermon subtitles: "stream" (lower third), "screens" (main) or "both"; None = off.
+    #[serde(default)]
+    pub subtitles: Option<String>,
+    /// Saved-file version, for one-time fixes to older saved states.
+    #[serde(default)]
+    pub state_version: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -137,6 +158,10 @@ pub struct Snapshot {
     pub slide_idx: usize,
 }
 
+/// 2: the language default became Both (older files said Primary only because it was
+/// the old default, so it is reset once).
+pub const STATE_VERSION: u32 = 2;
+
 impl Default for LiveState {
     fn default() -> Self {
         Self {
@@ -146,7 +171,8 @@ impl Default for LiveState {
             position: None,
             slide_idx: 0,
             mode: Mode::Blank,
-            lang_mode: LangMode::Primary,
+            // bilingual hymns show both languages unless the operator chooses one
+            lang_mode: LangMode::Both,
             lines_per_slide: 2,
             previous: None,
             media_playing: true,
@@ -158,6 +184,10 @@ impl Default for LiveState {
             slide_since_ms: 0,
             repeat: None,
             lining_out: false,
+            subtitles: None,
+            camera: None,
+            transpose: 0,
+            state_version: STATE_VERSION,
         }
     }
 }
@@ -179,6 +209,9 @@ pub enum Command {
     SetAuto { auto: Option<AutoAdvance> },
     SetRepeat { repeat: Option<Repeat> },
     SetLiningOut { on: bool },
+    SetSubtitles { target: Option<String> },
+    SetCamera { camera: Option<Camera> },
+    SetTranspose { semitones: i8 },
 }
 
 impl LiveState {
@@ -220,6 +253,9 @@ impl LiveState {
             Command::SetAuto { auto } => n.auto = auto,
             Command::SetRepeat { repeat } => n.repeat = repeat,
             Command::SetLiningOut { on } => n.lining_out = on,
+            Command::SetTranspose { semitones } => n.transpose = semitones.clamp(-11, 11),
+            Command::SetCamera { camera } => n.camera = camera.filter(|c| ["full", "behind", "corner"].contains(&c.mode.as_str())),
+            Command::SetSubtitles { target } => n.subtitles = target.filter(|t| ["stream", "screens", "both"].contains(&t.as_str())),
             Command::SetStageMessage { message } => n.stage_message = message.map(|m| m.trim().to_string()).filter(|m| !m.is_empty()),
             Command::RestartMedia => {
                 n.media_restart = self.media_restart + 1;
@@ -264,6 +300,10 @@ impl LiveState {
         if !project_on_restart {
             s.mode = Mode::Blank;
         }
+        if s.state_version < 2 {
+            s.lang_mode = LangMode::Both;
+        }
+        s.state_version = STATE_VERSION;
         s.revision += 1;
         s
     }
@@ -333,6 +373,10 @@ mod tests {
         let r = LiveState::load(&p, true);
         assert_eq!(r.mode, Mode::Live);
         assert!(!p.with_extension("json.tmp").exists());
+        // a state saved before version 2 had English-only as a default: reset to both
+        std::fs::write(&p, r#"{"revision":3,"schedule_id":null,"item_idx":null,"position":null,"slide_idx":0,"mode":"live","lang_mode":"primary","lines_per_slide":2,"previous":null,"media_playing":true,"media_restart":0,"stage_message":null,"timer":null,"alert":null,"auto":null,"slide_since_ms":0,"repeat":null,"lining_out":false}"#).unwrap();
+        assert_eq!(LiveState::load(&p, false).lang_mode, LangMode::Both);
+        s.save(&p).unwrap();
         // saving again replaces the file (the case Windows is strict about)
         s.apply(Command::Show { slide_idx: 3, position: None }).save(&p).unwrap();
         assert_eq!(LiveState::load(&p, false).slide_idx, 3);

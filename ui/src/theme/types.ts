@@ -8,7 +8,7 @@ import announcement from "../../../crates/wp-core/themes/announcement.json";
 
 export type ThemeKind = "song" | "scripture" | "announcement" | "lower_third" | "foldback";
 export type AnimKind = "none" | "fade" | "slide-up" | "slide-down" | "slide-left" | "slide-right" | "wipe" | "scale";
-export type Field = "lyrics" | "second" | "reference" | "title" | "copyright" | "clock" | "free";
+export type Field = "lyrics" | "second" | "reference" | "title" | "copyright" | "clock" | "free" | "section";
 
 export interface Anim {
   kind: AnimKind;
@@ -127,6 +127,7 @@ export const FIELD_NAMES: Record<Field, string> = {
   copyright: "Copyright line",
   clock: "Clock",
   free: "Fixed text",
+  section: "Section label (Verse 1, Chorus)",
 };
 
 // Noto Sans and Inter ship with the app. The rest are on most Windows PCs.
@@ -172,6 +173,8 @@ export function blankTheme(kind: ThemeKind): Theme {
 export interface SlideData {
   primary: string[];
   second: string[];
+  /** "Verse 1", "Chorus"… for songs (shown only by a section-label layer). */
+  section?: string | null;
   reference?: string | null;
   title?: string | null;
   copyright?: string | null;

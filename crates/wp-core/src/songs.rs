@@ -50,6 +50,9 @@ pub struct SongDoc {
     /// Play order as labels, e.g. "V1 C V2 C"; empty = written order.
     pub sequence: String,
     pub lines_per_slide: Option<u8>,
+    /// Musical key, e.g. "G" (for the musicians' stage view).
+    #[serde(default)]
+    pub key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -130,12 +133,14 @@ pub fn compile(lyrics: &[Lyric]) -> Result<Vec<SplitSection>> {
         }
         let spread = |idx: usize, count: usize| key + (idx * n / count.max(1)) as i64;
         for (j, l) in m.lines.iter().enumerate() {
-            segs.push(Segment { lang: primary.lang.clone(), text: l.clone(), align_key: spread(j, m.lines.len()) });
+            let (text, chords) = crate::chords::split_line(l);
+            segs.push(Segment { lang: primary.lang.clone(), text, align_key: spread(j, m.lines.len()), chords });
         }
         for (lang, secs) in &others {
             if let Some(s) = secs.iter().find(|s| s.label == m.label) {
                 for (j, l) in s.lines.iter().enumerate() {
-                    segs.push(Segment { lang: lang.clone(), text: l.clone(), align_key: spread(j, s.lines.len()) });
+                    let (text, chords) = crate::chords::split_line(l);
+                    segs.push(Segment { lang: lang.clone(), text, align_key: spread(j, s.lines.len()), chords });
                 }
             }
         }
@@ -170,10 +175,11 @@ pub fn preview(doc: &SongDoc, lines_per_slide: u8) -> Result<Vec<Slide>> {
 }
 
 pub fn load(conn: &Connection, id: i64) -> Result<SongDoc> {
-    let (title, author, copyright, ccli, sequence, lps): (String, Option<String>, Option<String>, Option<String>, Option<String>, Option<u8>) = conn.query_row(
-        "SELECT title, author, copyright, ccli, default_sequence, lines_per_slide FROM song WHERE id = ?1",
+    #[allow(clippy::type_complexity)]
+    let (title, author, copyright, ccli, sequence, lps, key): (String, Option<String>, Option<String>, Option<String>, Option<String>, Option<u8>, Option<String>) = conn.query_row(
+        "SELECT title, author, copyright, ccli, default_sequence, lines_per_slide, song_key FROM song WHERE id = ?1",
         [id],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
     )?;
     let mut st = conn.prepare("SELECT h.code, n.number FROM song_number n JOIN hymnal h ON h.id = n.hymnal_id WHERE n.song_id = ?1 ORDER BY h.code")?;
     let numbers = st.query_map([id], |r| Ok(Number { hymnal: r.get(0)?, number: r.get(1)? }))?.collect::<std::result::Result<_, _>>()?;
@@ -188,7 +194,7 @@ pub fn load(conn: &Connection, id: i64) -> Result<SongDoc> {
         .collect::<std::result::Result<_, _>>()?;
     let seq = sequence.unwrap_or_default();
     let sequence = if sequence_list(&seq) == written { String::new() } else { seq };
-    Ok(SongDoc { id: Some(id), title, author, copyright, ccli, numbers, lyrics, sequence, lines_per_slide: lps })
+    Ok(SongDoc { id: Some(id), title, author, copyright, ccli, numbers, lyrics, sequence, lines_per_slide: lps, key })
 }
 
 /// Imported hymns keep their title card ("MHB 1 / — / author") as a [TITLE] block in
@@ -233,8 +239,8 @@ pub fn save(conn: &Connection, doc: &SongDoc) -> Result<i64> {
     let id = match doc.id {
         Some(id) => {
             let n = tx.execute(
-                "UPDATE song SET title=?2, author=?3, copyright=?4, ccli=?5, default_sequence=?6, lines_per_slide=?7, updated_at=datetime('now') WHERE id=?1",
-                params![id, title, clean_opt(&doc.author), clean_opt(&doc.copyright), clean_opt(&doc.ccli), seq, lps],
+                "UPDATE song SET title=?2, author=?3, copyright=?4, ccli=?5, default_sequence=?6, lines_per_slide=?7, song_key=?8, updated_at=datetime('now') WHERE id=?1",
+                params![id, title, clean_opt(&doc.author), clean_opt(&doc.copyright), clean_opt(&doc.ccli), seq, lps, clean_opt(&doc.key)],
             )?;
             if n == 0 {
                 return Err(invalid("This song was deleted while it was being edited."));
@@ -243,8 +249,8 @@ pub fn save(conn: &Connection, doc: &SongDoc) -> Result<i64> {
         }
         None => {
             tx.execute(
-                "INSERT INTO song (title, author, copyright, ccli, default_sequence, lines_per_slide) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![title, clean_opt(&doc.author), clean_opt(&doc.copyright), clean_opt(&doc.ccli), seq, lps],
+                "INSERT INTO song (title, author, copyright, ccli, default_sequence, lines_per_slide, song_key) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![title, clean_opt(&doc.author), clean_opt(&doc.copyright), clean_opt(&doc.ccli), seq, lps, clean_opt(&doc.key)],
             )?;
             tx.last_insert_rowid()
         }
@@ -284,8 +290,8 @@ pub fn save(conn: &Connection, doc: &SongDoc) -> Result<i64> {
             for g in &sec.segments {
                 let idx = per_lang.entry(g.lang.as_str()).or_insert(0);
                 tx.execute(
-                    "INSERT INTO song_segment (section_id, lang, idx, text, align_key) VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![sid, g.lang, *idx, g.text, g.align_key],
+                    "INSERT INTO song_segment (section_id, lang, idx, text, align_key, chords) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![sid, g.lang, *idx, g.text, g.align_key, g.chords],
                 )?;
                 *idx += 1;
             }
@@ -347,6 +353,7 @@ mod tests {
             ],
             sequence: "V1 C V1 C".into(),
             lines_per_slide: None,
+                key: None,
         }
     }
 

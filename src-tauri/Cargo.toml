@@ -16,7 +16,14 @@ tauri-build = { version = "2.7", features = [] }
 wp-core = { path = "../crates/wp-core" }
 wp-remote = { path = "../crates/wp-remote" }
 wp-audio = { path = "../crates/wp-audio" }
-tokio = { version = "1", features = ["sync"] }
+fontdb = { version = "=0.23.0", default-features = false, features = ["std", "fs", "memmap"] }
+ttf-parser = "0.25"
+cpal = "=0.18.2"
+libloading = "0.8"
+ureq = "2"
+sha2 = "0.10"
+zip = { version = "9.5", default-features = false, features = ["deflate"] }
+tokio = { version = "1", features = ["sync", "time"] }
 tauri = { version = "2.12", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2.8"
 serde.workspace = true

@@ -446,3 +446,39 @@ p { margin: 0; }
 .output-body--ndi, .output-body--ndi .output { background: #00ff00 !important; }
 .output-body--ndi .slide--keyed, .output-body--ndi .tv--keyed { background: transparent !important; }
 .te__warn { color: var(--wp-warn); font-size: 12px; }
+
+/* Identify: a big number on every monitor (EasyWorship's Identify) */
+.ident { position: fixed; inset: 0; display: grid; place-content: center; justify-items: center; gap: 2vh; background: #0b2a5b; color: #fff; font-family: "Noto Sans", "Segoe UI", sans-serif; border: 1.2vh solid #f2c94c; box-sizing: border-box; }
+.ident__n { font-size: 45vh; font-weight: 800; line-height: 1; }
+.ident__name { font-size: 5vh; font-weight: 600; }
+.ident__res { font-size: 3.5vh; opacity: 0.75; }
+.font-pick { position: relative; }
+.font-pick__btn { display: flex; align-items: center; justify-content: space-between; gap: 8px; height: 30px; padding: 0 8px; border: 1px solid var(--wp-edge, #555); border-radius: 4px; background: var(--wp-canvas, #222); color: inherit; font-size: 14px; text-align: left; }
+.font-pick__caret { font-family: system-ui; opacity: 0.6; }
+.font-pick__note { color: var(--wp-warn, #f0c07a); font-size: 11px; }
+.font-pick__menu { position: absolute; z-index: 20; top: 52px; left: 0; right: 0; max-height: 340px; display: flex; flex-direction: column; background: var(--wp-overlay, #2a2a2a); border: 1px solid var(--wp-edge, #555); border-radius: 6px; box-shadow: 0 10px 28px rgba(0,0,0,.45); }
+.font-pick__search { margin: 6px; height: 28px; border: 1px solid var(--wp-edge, #555); border-radius: 4px; background: var(--wp-canvas, #222); color: inherit; padding: 0 8px; }
+.font-pick__menu ul { list-style: none; margin: 0; padding: 0 4px 6px; overflow: auto; }
+.font-pick__menu li button { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 8px; height: 30px; padding: 0 8px; border: 0; border-radius: 4px; background: none; color: inherit; font-size: 15px; text-align: left; }
+.font-pick__menu li button:hover, .font-pick__menu li button.is-selected { background: var(--wp-selected, #333); }
+.font-pick__menu li small { color: var(--wp-live, #8ad6aa); font-family: "Noto Sans", sans-serif; font-size: 11px; white-space: nowrap; }
+.font-pick__empty { padding: 8px; color: var(--wp-muted, #999); font-size: 12px; }
+
+/* live sermon subtitles */
+.subtitles { position: absolute; left: 8%; right: 8%; bottom: 4.5%; display: flex; justify-content: center; pointer-events: none; transition: opacity 600ms ease; container-type: inline-size; }
+.subtitles span { max-width: 100%; padding: 0.35em 0.8em; background: rgba(0, 0, 0, 0.72); color: #fff; border-radius: 0.3em; font: 600 3.2cqw/1.3 "Noto Sans", "Segoe UI", sans-serif; text-align: center; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.subtitles--quiet { opacity: 0; }
+
+/* camera on the screens */
+.camfeed { position: absolute; inset: 0; background: #000; }
+.camfeed video { width: 100%; height: 100%; object-fit: cover; display: block; }
+.camfeed--corner { inset: auto 3% 4% auto; width: 30%; aspect-ratio: 16 / 9; border-radius: 0.6vw; overflow: hidden; box-shadow: 0 0.4vw 1.6vw rgba(0,0,0,.6); outline: 0.25vw solid rgba(255,255,255,.85); z-index: 5; }
+.camfeed__problem { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); color: #888; font: 500 1.4vw sans-serif; }
+.output__frame { position: relative; }
+
+/* musicians' stage view: chords over the words */
+.chordline { display: flex; flex-wrap: wrap; align-items: flex-end; margin: 0 0 0.25em; }
+.chordline__piece { display: inline-flex; flex-direction: column; white-space: pre; }
+.chordline__chord { color: #ffb84d; font-weight: 700; font-size: 0.72em; line-height: 1.05; }
+.chordline__text { line-height: 1.15; }
+.stage-view__key { color: #ffb84d; font-weight: 700; }

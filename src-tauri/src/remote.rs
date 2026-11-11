@@ -6,7 +6,7 @@ use crate::{err, AppState, ProgramItem, Res};
 use serde::Serialize;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use wp_core::live::Mode;
 use wp_remote::{Command, Host, Remote};
 
@@ -70,7 +70,9 @@ impl Host for Desk {
             "item": item.as_ref().map(|i| serde_json::json!({ "kind": serde_json::to_value(i).ok().and_then(|v| v.get("kind").cloned()), "title": title })),
             "mode": live.mode,
             "slide_idx": live.slide_idx,
-            "slides": slides.iter().map(|s| serde_json::json!({ "label": s.label, "primary": s.primary, "second": s.second })).collect::<Vec<_>>(),
+            "slides": slides.iter().map(|s| serde_json::json!({ "label": s.label, "primary": s.primary, "second": s.second, "chords": s.chords })).collect::<Vec<_>>(),
+            "song_key": match &item { Some(ProgramItem::Song { song_id, .. }) => st.db.lock().unwrap().query_row("SELECT song_key FROM song WHERE id = ?1", [song_id], |r| r.get::<_, Option<String>>(0)).ok().flatten(), _ => None },
+            "transpose": live.transpose,
             "timer": live.timer,
             "alert": live.alert,
             "stage_message": live.stage_message,
@@ -79,6 +81,13 @@ impl Host for Desk {
             "schedule": items.iter().map(|i| serde_json::json!({ "title": title_of(i) })).collect::<Vec<_>>(),
             "live_index": live_index,
         })
+    }
+
+    fn note(&self, device: &str, text: &str) -> Result<(), String> {
+        let st = self.0.state::<AppState>();
+        let n = crate::add_pulpit_note(&st, device, text)?;
+        let _ = self.0.emit("pulpit-note", n);
+        Ok(())
     }
 
     fn command(&self, cmd: &Command) -> Result<(), String> {

@@ -21,7 +21,7 @@ fn bad(msg: impl Into<String>) -> Error {
 }
 
 fn doc(title: &str) -> SongDoc {
-    SongDoc { id: None, title: title.trim().to_string(), author: None, copyright: None, ccli: None, numbers: vec![], lyrics: vec![], sequence: String::new(), lines_per_slide: None }
+    SongDoc { id: None, title: title.trim().to_string(), author: None, copyright: None, ccli: None, numbers: vec![], lyrics: vec![], sequence: String::new(), lines_per_slide: None, key: None }
 }
 
 /// Our labels: "v1" → V1, "Verse 2" → V2, "chorus" → C, "pre-chorus" → PC …
@@ -62,7 +62,12 @@ fn ol_lines(node: roxmltree::Node) -> Vec<String> {
             match c.tag_name().name() {
                 "br" => out.push(String::new()),
                 "comment" => {}
-                "chord" => walk(c, out),
+                "chord" => {
+                    if let Some(name) = c.attribute("name").or_else(|| c.attribute("root")) {
+                        out.last_mut().unwrap().push_str(&format!("[{name}]"));
+                    }
+                    walk(c, out)
+                }
                 "" if c.is_text() => out.last_mut().unwrap().push_str(c.text().unwrap_or("")),
                 _ => walk(c, out),
             }
@@ -83,6 +88,7 @@ pub fn parse_openlyrics(xml: &str) -> Result<SongDoc> {
     }
     s.copyright = find("copyright").and_then(|n| n.text()).map(|t| t.trim().to_string());
     s.ccli = find("ccliNo").and_then(|n| n.text()).map(|t| t.trim().to_string());
+    s.key = find("key").and_then(|n| n.text()).map(|t| t.trim().to_string()).filter(|k| !k.is_empty());
     for b in root.descendants().filter(|n| n.tag_name().name() == "songbook") {
         if let (Some(name), Some(entry)) = (b.attribute("name"), b.attribute("entry")) {
             s.numbers.push(Number { hymnal: name.trim().to_uppercase(), number: entry.trim().to_string() });
@@ -131,6 +137,8 @@ pub fn parse_opensong(xml: &str) -> Result<SongDoc> {
     }
     s.sequence = get("presentation").map(|p| p.split_whitespace().map(label).collect::<Vec<_>>().join(" ")).unwrap_or_default();
     let lyrics = get("lyrics").ok_or_else(|| bad("the song has no lyrics"))?;
+    s.key = get("key");
+    let mut pending_chords: Option<String> = None;
     let mut secs: Vec<(String, Vec<String>)> = vec![];
     for raw in lyrics.lines() {
         let line = raw.trim_end();
@@ -138,11 +146,21 @@ pub fn parse_opensong(xml: &str) -> Result<SongDoc> {
             secs.push((label(&line[1..line.len() - 1]), vec![]));
             continue;
         }
-        // '.' chord lines, ';' comments, '-' and '|' page and line breaks
-        if line.starts_with('.') || line.starts_with(';') || line.trim() == "---" || line.trim() == "-!!" {
+        // '.' chord lines (kept for the line below), ';' comments, '-' and '|' breaks
+        if let Some(ch) = line.strip_prefix('.') {
+            pending_chords = Some(ch.to_string());
             continue;
         }
-        let text = line.trim_start_matches(|c: char| c.is_ascii_digit()).replace("||", "").replace('|', " ").replace('_', "");
+        if line.starts_with(';') || line.trim() == "---" || line.trim() == "-!!" {
+            continue;
+        }
+        // the lyric line starts one column later than its chord line ('.' vs ' ')
+        let lyric = line.strip_prefix(' ').unwrap_or(line);
+        let line_with_chords = match pending_chords.take() {
+            Some(ch) => merge_chord_line(&ch, lyric),
+            None => lyric.to_string(),
+        };
+        let text = line_with_chords.trim_start_matches(|c: char| c.is_ascii_digit()).replace("||", "").replace('|', " ").replace('_', "");
         let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
         if text.is_empty() {
             continue;
@@ -154,6 +172,40 @@ pub fn parse_opensong(xml: &str) -> Result<SongDoc> {
     }
     s.lyrics = vec![Lyric { lang: "en".into(), body: body_of(&secs) }];
     Ok(s)
+}
+
+/// "G       C" over "Amazing grace" → "[G]Amazing [C]grace" (chords placed by column).
+fn merge_chord_line(chords: &str, lyric: &str) -> String {
+    let lyric: Vec<char> = lyric.chars().collect();
+    let mut marks: Vec<(usize, String)> = vec![];
+    let mut col = 0;
+    let cs: Vec<char> = chords.chars().collect();
+    while col < cs.len() {
+        if cs[col].is_whitespace() {
+            col += 1;
+            continue;
+        }
+        let start = col;
+        while col < cs.len() && !cs[col].is_whitespace() {
+            col += 1;
+        }
+        let name: String = cs[start..col].iter().collect();
+        if crate::chords::is_chord(&name) {
+            marks.push((start, name));
+        }
+    }
+    let mut out = String::new();
+    let mut m = marks.into_iter().peekable();
+    for (i, ch) in lyric.iter().enumerate() {
+        while m.peek().map_or(false, |(c, _)| *c <= i) {
+            out.push_str(&format!("[{}]", m.next().unwrap().1));
+        }
+        out.push(*ch);
+    }
+    for (_, name) in m {
+        out.push_str(&format!(" [{name}]"));
+    }
+    out
 }
 
 // ---------- ProPresenter ----------
@@ -438,6 +490,7 @@ pub fn parse_chordpro(t: &str, fallback_title: &str) -> Result<SongDoc> {
                 "artist" | "composer" | "lyricist" => s.author = Some(v.to_string()),
                 "copyright" => s.copyright = Some(v.to_string()),
                 "ccli" => s.ccli = Some(v.to_string()),
+                "key" => s.key = Some(v.to_string()).filter(|k| !k.is_empty()),
                 "start_of_chorus" | "soc" => {
                     secs.push(("C".into(), vec![]));
                     new_section = false;
@@ -468,18 +521,9 @@ pub fn parse_chordpro(t: &str, fallback_title: &str) -> Result<SongDoc> {
             new_section = true;
             continue;
         }
-        let mut text = String::new();
-        let mut in_chord = false;
-        for c in l.chars() {
-            match c {
-                '[' => in_chord = true,
-                ']' => in_chord = false,
-                _ if !in_chord => text.push(c),
-                _ => {}
-            }
-        }
-        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-        if text.is_empty() {
+        // chords stay inline ("[G]Amazing"); they reach the musicians, not the screens
+        let text = l.split_whitespace().collect::<Vec<_>>().join(" ");
+        if crate::chords::split_line(&text).0.is_empty() {
             continue;
         }
         if new_section || secs.is_empty() {
@@ -745,7 +789,7 @@ mod tests {
         assert_eq!(d.numbers, vec![Number { hymnal: "PAN".into(), number: "12".into() }]);
         assert_eq!(d.sequence, "V1 C V2 C");
         assert_eq!(d.lyrics.len(), 2);
-        assert_eq!(d.lyrics[0].body, "[V1]\nGod is here\nHe is with us\n\n[C]\nSing praise\n\n[V2]\nSecond verse");
+        assert_eq!(d.lyrics[0].body, "[V1]\nGod is [G]here\nHe is with us\n\n[C]\nSing praise\n\n[V2]\nSecond verse");
         assert_eq!(d.lyrics[1].lang, "tw");
         assert_eq!(crate::songs::preview(&d, 2).unwrap().len(), 4);
     }
@@ -754,7 +798,7 @@ mod tests {
     fn opensong() {
         let x = "<?xml version=\"1.0\"?><song><title>Amazing Grace</title><author>John Newton</author><presentation>V1 C</presentation><lyrics>[V1]\n.G       C\n Amazing grace|how sweet\n;comment\n That saved a wretch\n[C]\n I once was lost</lyrics></song>";
         let d = parse_opensong(x).unwrap();
-        assert_eq!(d.lyrics[0].body, "[V1]\nAmazing grace how sweet\nThat saved a wretch\n\n[C]\nI once was lost");
+        assert_eq!(d.lyrics[0].body, "[V1]\n[G]Amazing [C]grace how sweet\nThat saved a wretch\n\n[C]\nI once was lost", "chords placed over the right word");
         assert_eq!(d.sequence, "V1 C");
     }
 
@@ -776,7 +820,10 @@ mod tests {
         let c = "{title: Blessed Assurance}\n{artist: Fanny Crosby}\n[D]Blessed as[G]surance\nJesus is mine\n\n{soc}\nThis is my story\n{eoc}\n\nHeir of sal[A]vation\n\n{soc}\nThis is my story\n{eoc}";
         let d = parse_chordpro(c, "x").unwrap();
         assert_eq!(d.title, "Blessed Assurance");
-        assert_eq!(d.lyrics[0].body, "[V1]\nBlessed assurance\nJesus is mine\n\n[C]\nThis is my story\n\n[V2]\nHeir of salvation", "chords out, repeated chorus kept once");
+        assert_eq!(d.lyrics[0].body, "[V1]\n[D]Blessed as[G]surance\nJesus is mine\n\n[C]\nThis is my story\n\n[V2]\nHeir of sal[A]vation", "chords kept inline for the musicians, repeated chorus kept once");
+        assert_eq!(d.key, None);
+        let k = parse_chordpro("{title: X}\n{key: Bb}\n[Bb]Line", "x").unwrap();
+        assert_eq!(k.key.as_deref(), Some("Bb"));
         let p = parse_plain("Line one\nLine two\n\nChorus\nRefrain line\n\nVerse three line", "Morning Song").unwrap();
         assert_eq!(p.lyrics[0].body, "[V1]\nLine one\nLine two\n\n[C]\nRefrain line\n\n[V2]\nVerse three line");
     }

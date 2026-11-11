@@ -250,3 +250,13 @@ mod tests {
         assert!(src.join("copy/images/a.png").exists());
     }
 }
+
+/// True for a path like "images/logo.png": relative, made only of ordinary names
+/// (no "..", no root, no drive letter, no UNC share), in either slash style.
+pub fn is_plain_relative(path: &str) -> bool {
+    let unified = path.replace('\\', "/");
+    if unified.is_empty() || unified.starts_with('/') || unified.contains(':') {
+        return false;
+    }
+    unified.split('/').all(|part| !part.is_empty() && part != "." && part != "..")
+}

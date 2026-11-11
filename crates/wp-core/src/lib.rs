@@ -6,6 +6,7 @@
 pub mod announcements;
 pub mod backup;
 pub mod browse;
+pub mod chords;
 pub mod cues;
 pub mod db;
 pub mod error;
@@ -21,6 +22,7 @@ pub mod live;
 pub mod reference;
 pub mod schedule;
 pub mod songs;
+pub mod speech_ref;
 pub mod splitter;
 pub mod text;
 pub mod themes;

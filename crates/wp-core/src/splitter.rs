@@ -12,6 +12,9 @@ pub struct Segment {
     pub lang: String,
     pub text: String,
     pub align_key: i64,
+    /// The line with inline chords, for the musicians' stage view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chords: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,6 +62,10 @@ pub struct Slide {
     /// A picture slide (announcements): path in the media library.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
+    /// Primary lines with their chords (same order as `primary`; "" where a line has
+    /// none). Empty when the song has no chords. Only the stage view uses this.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chords: Vec<String>,
 }
 
 pub fn split(sections: &[Section], o: &Options) -> Vec<Slide> {
@@ -93,6 +100,10 @@ pub fn split(sections: &[Section], o: &Options) -> Vec<Slide> {
                 let Some(lang) = lang else { return Vec::new() };
                 sec.segments.iter().filter(|g| &g.lang == lang && chunk.contains(&g.align_key)).map(|g| g.text.clone()).collect()
             };
+            // the musicians' chords for the first language's lines (always, whatever
+            // the congregation is shown)
+            let chord_lines: Vec<String> = sec.segments.iter().filter(|g| g.lang == o.primary && chunk.contains(&g.align_key)).map(|g| g.chords.clone().unwrap_or_default()).collect();
+            let chords = if chord_lines.iter().any(|c| !c.is_empty()) { chord_lines } else { Vec::new() };
             out.push(Slide {
                 label: sec.label.clone(),
                 occurrence: occ,
@@ -101,6 +112,7 @@ pub fn split(sections: &[Section], o: &Options) -> Vec<Slide> {
                 primary: pick(Some(&o.primary), show_primary),
                 second: pick(o.second.as_ref(), show_second),
                 image: None,
+                chords,
             });
         }
     }
@@ -127,7 +139,7 @@ mod tests {
     use super::*;
 
     fn seg(lang: &str, t: &str, k: i64) -> Segment {
-        Segment { lang: lang.into(), text: t.into(), align_key: k }
+        Segment { lang: lang.into(), text: t.into(), align_key: k, chords: None }
     }
 
     fn hymn() -> Vec<Section> {

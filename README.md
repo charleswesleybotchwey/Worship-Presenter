@@ -261,7 +261,7 @@ Also from the brief (round 2):
 - Media: dense list by default (thumbnails optional), "File missing" with Relink.
 - Rehearsal mode (service bar switch or Ctrl+K): Go live, Blank and the Live pane drive a
   simulator labelled Rehearsal; nothing reaches the screens.
-- Output setup and Settings: Identify shows a test pattern for 4 s; asks first if Main is live.
+- Options, outputs: "Identify screens" shows a big number and the monitor's name on every connected monitor for 4 s (as in EasyWorship), so you can pick the right Monitor; "Test pattern" shows colour bars on one open output. Both ask first if something is on the screens.
 - Fixture page (#/fixture) and screenshot baselines (tests/ui/baselines.py).
 
 Needs you, on Windows: the Linear reference captures (docs/design/references/manifest.md)
@@ -428,6 +428,83 @@ A folder is searched, sub-folders included. The review shows recognised songs, s
 look-alike characters fixed (Greek ε → ɛ and so on), files that could not be read (with the
 reason) and songs already in the library (left out by default). A backup is taken first.
 ProPresenter's slide text is RTF; Akan letters written as RTF codes (\u596 → ɔ) come through.
+
+## Scripture recognition (experimental)
+
+Listen in the service bar; Settings → Scripture recognition. Listens to the preacher's
+microphone and suggests the references it hears ("John three sixteen", "first
+Corinthians thirteen verses four to seven", "Psalm twenty three", "Yohane three sixteen")
+in a chip above Live: Preview, Go live (Enter on the button), Esc or × to dismiss, and
+the earlier ones in a list. It never puts anything on the screens by itself; Go live
+uses the usual checks (held output and so on).
+- Vosk (default): light, offline; engine and English model downloaded once (~60 MB).
+  "Bible references only" limits it to book names and numbers: much more accurate.
+- Windows Speech: offline, built in, nothing to download; less accurate.
+- Whisper and cloud services: listed, not available yet.
+- English now; Twi and Fante when speech models for them exist. Book names include the
+  Twi/Ga names from your Bibles; "a good job" is not Job (a chapter number must follow).
+- Tested here: the reference finder on spoken and written forms; the real Vosk engine
+  loads and refuses a missing model cleanly. Recognition itself needs a microphone and the
+  model on Windows; please try it with a recording of a sermon.
+
+## Fonts
+
+The theme editor lists every font installed on this computer, each shown in its own face,
+searchable, marked "ɛ ɔ ✓" when it has the Ghanaian letters (otherwise Noto Sans fills them in).
+
+## Sunday features (11 Nov 2026)
+
+- Bible word search: in Library → Scriptures, type words instead of a reference ("living
+  water"); verses containing them appear with the words highlighted. "Quotes" for an exact
+  phrase; "Search every Bible" to look beyond the chosen one. A plain keyboard finds Twi
+  ("Onyankopon dɔ wiase" finds Yohane 3:16). Each Bible's search index is prepared the
+  first time it is searched (under a second).
+- Pastor's notes: on the phone remote, join as "Pastor's notes" and send points; each one
+  becomes a slide in today's "Sermon notes" deck and waits in a chip above Preview
+  (Preview / Go live / dismiss). Never shown without the operator.
+- Live sermon subtitles (experimental): Subtitles in the service bar (stream, screens or
+  both). Listens to everything the preacher says and shows two lines that fade when he
+  pauses. English now; translation to Twi needs a translation model that does not exist
+  offline yet.
+- Camera on the screens: Camera in the service bar; choose the camera (USB or a capture
+  card), see it, then Full screen, Behind the words or Corner. Main screen only; Blank,
+  Logo and held outputs still win.
+- Musicians' stage view: write chords in the lyrics in brackets before the syllable
+  ("[G]Amazing [C]grace"); the congregation's screens, search and slide lists show the
+  words only; the stage display (and the stage tablet) shows the chords above the words
+  and the song's key (song editor → Key). Chords −/+ in the Live pane transposes them for
+  the band; it resets when a new song goes live. ChordPro, OpenSong and OpenLyrics imports
+  now keep chords and keys.
+
+## Fixes and options (11 Nov 2026, later)
+
+- Closing the control window works again and ends Worship Presenter cleanly (outputs,
+  music, phone remote and the output watchdog stop with it). It used to hang: the window
+  was not allowed to close itself after the "Something is on the screens" check.
+- Themes → "Show verse and chorus labels" (song and lower-third themes): adds a small
+  "Verse 1 / Chorus / Bridge" label above the words. It is an ordinary text layer: drag it
+  to move it, click it to change its font, size and colour; untick to remove it.
+
+## Themes from EasyWorship and ProPresenter
+
+Themes tab → "From EasyWorship or ProPresenter…", then choose a file:
+- EasyWorship theme export (.ewtx): background colour and picture (its opacity becomes
+  dimming), the text box, font, size and colour, the verse label (it becomes a section-label
+  layer), copyright line.
+- ProPresenter 7 theme export (.proTheme, may hold many themes): every slide design becomes
+  a theme of the right kind (songs, scripture, lower third, announcements) with its text
+  boxes (position, font, size, colour, alignment), filled boxes and outlines, pictures from
+  Assets, and the slide background when ProPresenter draws it. Countdown timers are left out.
+The review shows each design as it will look, with its kind; songs, scripture and lower
+thirds are ticked by suggestion, announcement designs are not. Hover a design to see what
+was not carried over (masks, gradients, custom shapes, scrolling text, animations;
+EasyWorship text effects and transitions). Fonts must be installed on this computer; a
+missing one is replaced by Noto Sans. Tested with a real EasyWorship theme (BLACK) and a
+ProPresenter pack of 17 themes (123 designs).
+
+## Security
+
+See docs/security/audit-2026-11-11.md: findings, fixes and what remains. Before each release run `cargo audit` and `npm audit` (in ui/).
 
 ## What's next
 

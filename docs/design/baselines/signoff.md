@@ -16,6 +16,7 @@ development preview (Chromium, sample data); Windows evidence is still required.
 | P01 Low-spec | Not started | Low-spec interface and low-spec projection switches exist (Settings) | Measure on the 4 GB pilot laptop with a 5,000-song library |
 
 Deviations from the brief, with reasons:
+- 3D look by default, at Charles's request (10 Nov 2026): raised buttons, card sections, framed monitors, gradient bars, built from the brief's tokens so Dark and Light both work. Flat (the brief's look) stays one click away in Settings, Appearance, Look. Text selection is switched off outside text fields (double-click to go live was painting words blue). A sun/moon button switches Light and Dark.
 - Layout follows EasyWorship, at Charles's request (10 Nov 2026): Schedule, Preview and Live across the top (each with a text slide list and a small output monitor), the library across the bottom with a folder tree and sortable columns. Tokens, focus, safety and keyboard rules from the brief are unchanged. The screenshot baselines must be recaptured after review.
 - Double-clicking a Preview slide (or the Preview picture) goes live, as in EasyWorship, at Charles's request. It runs the same checks as Go live (held output, no main display, rehearsal). Double-click in the Library and Schedule still never transmits, as the brief requires.
 - Linear reference captures are not in the repository: they must be taken on a Windows machine with permission; the manifest lists what to capture.

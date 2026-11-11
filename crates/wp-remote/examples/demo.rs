@@ -28,6 +28,10 @@ impl Host for Pretend {
             "schedule": [{ "title": "MHB 1, ENG&FANTE" }, { "title": "Yohane 3:16 · TK" }], "live_index": item,
         })
     }
+    fn note(&self, device: &str, text: &str) -> Result<(), String> {
+        println!("note from {device}: {text}");
+        Ok(())
+    }
     fn command(&self, cmd: &Command) -> Result<(), String> {
         {
             let mut s = self.s.lock().unwrap();

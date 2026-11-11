@@ -9,6 +9,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("0002_announcements", include_str!("../migrations/0002_announcements.sql")),
     ("0003_my_collections", include_str!("../migrations/0003_my_collections.sql")),
     ("0004_service_intervals", include_str!("../migrations/0004_service_intervals.sql")),
+    ("0005_chords", include_str!("../migrations/0005_chords.sql")),
 ];
 
 /// Opens (or creates) a profile's library database with WAL and foreign keys on,

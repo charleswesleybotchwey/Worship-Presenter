@@ -130,6 +130,7 @@ pub fn to_slides(d: &Deck) -> Vec<Slide> {
             primary: if s.kind == "text" { s.body.lines().map(str::trim_end).filter(|l| !l.trim().is_empty()).map(str::to_string).collect() } else { vec![] },
             second: vec![],
             image: if s.kind == "picture" { s.image.clone() } else { None },
+            chords: vec![],
         })
         .collect()
 }

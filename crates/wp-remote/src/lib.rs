@@ -23,6 +23,12 @@ use tokio::sync::broadcast;
 
 const REMOTE_HTML: &str = include_str!("../web/remote.html");
 const STAGE_HTML: &str = include_str!("../web/stage.html");
+const ICON_180: &[u8] = include_bytes!("../web/icon-180.png");
+const ICON_64: &[u8] = include_bytes!("../web/icon-64.png");
+
+fn png(bytes: &'static [u8]) -> Response {
+    ([(header::CONTENT_TYPE, "image/png"), (header::CACHE_CONTROL, "max-age=86400")], bytes).into_response()
+}
 
 /// What the phones may ask for. Every one goes through the desktop app's own
 /// checks (held output, rehearsal…), exactly as if pressed at the desk.
@@ -44,6 +50,8 @@ pub trait Host: Send + Sync + 'static {
     /// Current state for phones: live item, slides, mode, service order, timers.
     fn snapshot(&self) -> serde_json::Value;
     fn command(&self, cmd: &Command) -> Result<(), String>;
+    /// A note sent from the pulpit; it waits for the operator (never shown by itself).
+    fn note(&self, device: &str, text: &str) -> Result<(), String>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +60,8 @@ pub enum Role {
     Operator,
     Stage,
     Viewer,
+    /// Sends sermon points to the operator.
+    Preacher,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -86,6 +96,11 @@ struct Session {
 const IDLE_LIMIT: Duration = Duration::from_secs(6 * 3600);
 /// Wrong PINs allowed per address before a pause.
 const MAX_FAILURES: u32 = 5;
+/// Wrong PINs from all devices together per minute before joining pauses for everyone
+/// (stops guessing spread over many addresses).
+const MAX_FAILURES_ALL: u32 = 20;
+/// Devices joined at once.
+const MAX_SESSIONS: usize = 30;
 const LOCKOUT: Duration = Duration::from_secs(60);
 /// At most this many commands per second from one phone.
 const MIN_GAP: Duration = Duration::from_millis(150);
@@ -95,6 +110,7 @@ pub struct Remote {
     pin: Mutex<String>,
     sessions: Mutex<HashMap<String, Session>>,
     failures: Mutex<HashMap<IpAddr, (u32, Instant)>>,
+    failures_all: Mutex<(u32, Instant)>,
     log: Mutex<VecDeque<LogLine>>,
     tx: broadcast::Sender<String>,
 }
@@ -106,6 +122,11 @@ fn now_secs() -> u64 {
 fn random_pin() -> String {
     use rand::Rng;
     format!("{:06}", rand::thread_rng().gen_range(0..1_000_000))
+}
+
+/// Compares without stopping at the first different character (no timing hint).
+fn same_secret(a: &str, b: &str) -> bool {
+    a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 fn random_token() -> String {
@@ -123,6 +144,7 @@ impl Remote {
             pin: Mutex::new(random_pin()),
             sessions: Mutex::new(HashMap::new()),
             failures: Mutex::new(HashMap::new()),
+            failures_all: Mutex::new((0, Instant::now())),
             log: Mutex::new(VecDeque::new()),
             tx,
         })
@@ -199,9 +221,12 @@ impl Remote {
         Router::new()
             .route("/", get(|| async { Html(REMOTE_HTML) }))
             .route("/stage", get(|| async { Html(STAGE_HTML) }))
+            .route("/icon-180.png", get(|| async { png(ICON_180) }))
+            .route("/icon-64.png", get(|| async { png(ICON_64) }))
             .route("/api/join", post(join))
             .route("/api/snapshot", get(snapshot))
             .route("/api/command", post(command))
+            .route("/api/note", post(note))
             .route("/ws", get(ws))
             .with_state(self.clone())
     }
@@ -270,7 +295,17 @@ async fn join(State(r): State<Arc<Remote>>, ConnectInfo(addr): ConnectInfo<Socke
             }
         }
     }
-    if req.pin.trim() != r.pin() {
+    {
+        let mut all = r.failures_all.lock().unwrap();
+        if all.1.elapsed() >= LOCKOUT {
+            *all = (0, Instant::now());
+        }
+        if all.0 >= MAX_FAILURES_ALL {
+            return fail(StatusCode::TOO_MANY_REQUESTS, "Too many wrong PINs on this network. Joining is paused for a minute.");
+        }
+    }
+    if !same_secret(req.pin.trim(), &r.pin()) {
+        r.failures_all.lock().unwrap().0 += 1;
         let mut f = r.failures.lock().unwrap();
         let e = f.entry(ip).or_insert((0, Instant::now()));
         e.0 += 1;
@@ -280,6 +315,9 @@ async fn join(State(r): State<Arc<Remote>>, ConnectInfo(addr): ConnectInfo<Socke
         return fail(StatusCode::UNAUTHORIZED, "That PIN is not right. It is shown on the computer under Settings, Remote.");
     }
     r.failures.lock().unwrap().remove(&ip);
+    if r.sessions.lock().unwrap().len() >= MAX_SESSIONS {
+        return fail(StatusCode::TOO_MANY_REQUESTS, "Too many devices are joined. Sign some out on the computer first.");
+    }
     let token = random_token();
     let device: String = req.device.chars().filter(|c| !c.is_control()).take(40).collect();
     let device = if device.trim().is_empty() { format!("Phone at {ip}") } else { device.trim().to_string() };
@@ -326,6 +364,43 @@ async fn command(State(r): State<Arc<Remote>>, h: HeaderMap, Json(cmd): Json<Com
             r.record(&device, format!("{detail}: {e}"), false);
             fail(StatusCode::CONFLICT, &e)
         }
+    }
+}
+
+#[derive(Deserialize)]
+struct NoteReq {
+    text: String,
+}
+
+/// The preacher (or an operator) sends a point; it goes to the desk to be shown or not.
+async fn note(State(r): State<Arc<Remote>>, h: HeaderMap, Json(req): Json<NoteReq>) -> Response {
+    if !same_origin(&h) {
+        return fail(StatusCode::FORBIDDEN, "Open the remote from the address shown on the computer.");
+    }
+    let token = bearer(&h);
+    let Some((role, device)) = r.session(&token) else { return fail(StatusCode::UNAUTHORIZED, "Join again with the PIN.") };
+    if !matches!(role, Role::Preacher | Role::Operator) {
+        return fail(StatusCode::FORBIDDEN, "Join as Pastor's notes to send points.");
+    }
+    let text: String = req.text.chars().filter(|c| !c.is_control() || *c == '\n').take(600).collect();
+    if text.trim().is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "Write something first.");
+    }
+    {
+        let mut s = r.sessions.lock().unwrap();
+        if let Some(x) = s.get_mut(&token) {
+            if x.last_cmd.map_or(false, |t| t.elapsed() < Duration::from_secs(2)) {
+                return fail(StatusCode::TOO_MANY_REQUESTS, "Sent already. Wait a moment.");
+            }
+            x.last_cmd = Some(Instant::now());
+        }
+    }
+    match r.host.note(&device, text.trim()) {
+        Ok(()) => {
+            r.record(&device, format!("sent a note ({} letters)", text.trim().chars().count()), true);
+            Json(serde_json::json!({ "ok": true })).into_response()
+        }
+        Err(e) => fail(StatusCode::CONFLICT, &e),
     }
 }
 
@@ -391,6 +466,10 @@ mod tests {
     impl Host for Fake {
         fn snapshot(&self) -> serde_json::Value {
             serde_json::json!({ "title": "MHB 1", "slide": 0 })
+        }
+        fn note(&self, _device: &str, text: &str) -> Result<(), String> {
+            self.0.lock().unwrap().push(Command::Show { index: text.len() });
+            Ok(())
         }
         fn command(&self, cmd: &Command) -> Result<(), String> {
             if *cmd == Command::Next && self.0.lock().unwrap().contains(&Command::Blank) {
@@ -459,6 +538,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn preacher_sends_notes_but_cannot_drive() {
+        let (r, fake, app) = app();
+        let (_, v) = call(&app, "POST", "/api/join", None, None, serde_json::json!({ "pin": r.pin(), "role": "preacher", "device": "Pastor" })).await;
+        let t = v["token"].as_str().unwrap().to_string();
+        let (c, _) = call(&app, "POST", "/api/note", Some(&t), None, serde_json::json!({ "text": "Point 1: God is faithful" })).await;
+        assert_eq!(c, StatusCode::OK);
+        let (c, _) = call(&app, "POST", "/api/note", Some(&t), None, serde_json::json!({ "text": "again" })).await;
+        assert_eq!(c, StatusCode::TOO_MANY_REQUESTS, "two notes within 2 s");
+        let (c, _) = call(&app, "POST", "/api/command", Some(&t), None, serde_json::json!({ "cmd": "next" })).await;
+        assert_eq!(c, StatusCode::FORBIDDEN, "notes only, no driving the screens");
+        assert_eq!(fake.0.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
     async fn wrong_pins_lock_out_and_foreign_pages_are_refused() {
         let (r, _f, app) = app();
         for _ in 0..MAX_FAILURES {
@@ -468,6 +561,20 @@ mod tests {
         assert_eq!(c, StatusCode::TOO_MANY_REQUESTS, "even the right PIN waits after 5 wrong ones");
         let (c, _) = call(&app, "POST", "/api/join", None, Some("http://evil.example"), serde_json::json!({ "pin": r.pin(), "role": "operator" })).await;
         assert_eq!(c, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn guessing_from_many_addresses_is_paused() {
+        let fake = Arc::new(Fake(Mutex::new(vec![])));
+        let r = Remote::new(fake);
+        for n in 0..MAX_FAILURES_ALL {
+            let app = r.router().layer(MockConnectInfo(SocketAddr::from(([10, 0, 0, n as u8 + 1], 5555))));
+            call(&app, "POST", "/api/join", None, None, serde_json::json!({ "pin": "999999x", "role": "operator" })).await;
+        }
+        let app = r.router().layer(MockConnectInfo(SocketAddr::from(([10, 0, 1, 1], 5555))));
+        let (c, _) = call(&app, "POST", "/api/join", None, None, serde_json::json!({ "pin": r.pin(), "role": "operator" })).await;
+        assert_eq!(c, StatusCode::TOO_MANY_REQUESTS);
+        assert!(same_secret("123456", "123456") && !same_secret("123456", "123457") && !same_secret("12345", "123456"));
     }
 
     #[test]

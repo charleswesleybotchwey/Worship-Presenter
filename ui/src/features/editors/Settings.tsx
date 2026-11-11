@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, pickCsvSave, type NdiStatus, type RemoteStatus, type ServiceInterval, type UsageRow } from "../../api";
+import { api, pickCsvSave, type SpeechStatus, type NdiStatus, type RemoteStatus, type ServiceInterval, type UsageRow } from "../../api";
 import { OutputOptions } from "./OutputOptions";
 import { ACTION_NAMES, DEFAULT_KEYS, RESERVED, conflict, isSingleLetter, keyName, usePrefs, type Action } from "../../ui/prefs";
 import type { OutputView } from "../../live/outputs";
@@ -7,13 +7,14 @@ import type { OutputView } from "../../live/outputs";
 // Settings (design brief §5): compact category list, one 680 px column of labelled
 // rows with short explanations.
 
-type Cat = "appearance" | "keyboard" | "projection" | "outputs" | "intervals" | "remote" | "library" | "about";
+type Cat = "appearance" | "keyboard" | "projection" | "outputs" | "intervals" | "speech" | "remote" | "library" | "about";
 const CATS: { id: Cat; label: string }[] = [
   { id: "appearance", label: "Appearance" },
   { id: "keyboard", label: "Keyboard" },
   { id: "projection", label: "Projection" },
   { id: "outputs", label: "Outputs" },
   { id: "intervals", label: "Service intervals" },
+  { id: "speech", label: "Scripture recognition" },
   { id: "remote", label: "Phone remote" },
   { id: "library", label: "Library" },
   { id: "about", label: "About" },
@@ -44,6 +45,7 @@ export function Settings({
   onOpenOutputs?: () => void;
 }) {
   const [cat, setCat] = useState<Cat>("appearance");
+  const [depth, setDepth] = useState(() => localStorage.getItem("wp-depth") || "3d");
   const [prefs, setPrefs] = usePrefs();
   const [core, setCore] = useState<Record<string, string>>({});
   const [capturing, setCapturing] = useState<Action | null>(null);
@@ -108,6 +110,21 @@ export function Settings({
                   {(["dark", "light", "system"] as const).map((t) => (
                     <button key={t} role="radio" aria-checked={uiTheme === t} aria-selected={uiTheme === t} onClick={() => setUiTheme(t)}>
                       {t === "dark" ? "Dark" : t === "light" ? "Light" : "Follow Windows"}
+                    </button>
+                  ))}
+                </div>
+              </Row>
+              <Row name="Look" hint="3D gives buttons, cards and screens depth. Flat is plainer and a little lighter on old laptops.">
+                <div className="wp-tabs" role="radiogroup" aria-label="Look">
+                  {(["3d", "flat"] as const).map((v) => (
+                    <button
+                      key={v}
+                      role="radio"
+                      aria-checked={depth === v}
+                      aria-selected={depth === v}
+                      onClick={() => (localStorage.setItem("wp-depth", v), (document.documentElement.dataset.depth = v), setDepth(v))}
+                    >
+                      {v === "3d" ? "3D" : "Flat"}
                     </button>
                   ))}
                 </div>
@@ -191,6 +208,8 @@ export function Settings({
 
           {cat === "intervals" && <IntervalsPanel />}
 
+          {cat === "speech" && <SpeechPanel core={core} setCoreKey={setCoreKey} />}
+
           {cat === "remote" && <RemotePanel />}
 
           {cat === "library" && (
@@ -211,6 +230,10 @@ export function Settings({
 
           {cat === "about" && (
             <>
+              <div className="wp-brand">
+                <img className="wp-brand__dark" src="/brand/wordmark-dark.png" alt="Worship Presenter" />
+                <img className="wp-brand__light" src="/brand/wordmark-light.png" alt="Worship Presenter" />
+              </div>
               <h2>About</h2>
               <Row name="Worship Presenter" hint="Version 0.1.0">
                 <span />
@@ -514,6 +537,109 @@ function IntervalsPanel() {
         </table>
       )}
       {msg && <p className={`wp-banner ${msg.bad ? "wp-banner--bad" : ""}`}>{msg.text}</p>}
+    </>
+  );
+}
+
+function SpeechPanel({ core, setCoreKey }: { core: Record<string, string>; setCoreKey: (k: string, v: string) => Promise<void> | void }) {
+  const [st, setSt] = useState<SpeechStatus | null>(null);
+  const [mics, setMics] = useState<string[]>([]);
+  const [msg, setMsg] = useState<{ text: string; bad?: boolean } | null>(null);
+  const engine = core.speech_engine || "vosk";
+  const refsOnly = core.speech_refs_only !== "false";
+  useEffect(() => {
+    api.speechMics().then(setMics).catch(() => {});
+    const t = setInterval(() => api.speechStatus().then(setSt).catch(() => {}), 600);
+    api.speechStatus().then(setSt).catch(() => {});
+    return () => clearInterval(t);
+  }, []);
+  const go = async (f: () => Promise<unknown>, ok?: string) => {
+    try {
+      await f();
+      setMsg(ok ? { text: ok } : null);
+    } catch (e) {
+      setMsg({ text: String(e instanceof Error ? e.message : e), bad: true });
+    }
+  };
+  const engines: [string, string, string, boolean][] = [
+    ["vosk", "Vosk (recommended)", "Light and offline. Downloaded once (about 60 MB); then works without internet.", true],
+    ["windows", "Windows Speech", "Offline, built into Windows; nothing to download. Less accurate in a noisy church.", !!st?.windows_speech],
+    ["whisper", "Whisper", "Not available yet.", false],
+    ["cloud", "A cloud service with your own key", "Not available yet.", false],
+  ];
+  return (
+    <>
+      <h2>Scripture recognition (experimental)</h2>
+      <p className="wp-note">
+        Listens to the preacher's microphone and suggests the Bible references it hears, above the Live pane. It never puts anything on the screens: you choose Preview or Go live. English now; Twi and Fante when speech models for them exist. Start and stop it with Listen in the service bar.
+      </p>
+      <Row name="Speech engine" hint="Which program turns speech into words.">
+        <div className="speech-engines" role="radiogroup" aria-label="Speech engine">
+          {engines.map(([id, name, hint, ok]) => (
+            <label key={id} className={`speech-engine ${ok ? "" : "is-off"}`}>
+              <input type="radio" name="engine" disabled={!ok} checked={engine === id} onChange={() => void setCoreKey("speech_engine", id)} />
+              <span>
+                <strong>{name}</strong>
+                <small>{hint}</small>
+              </span>
+            </label>
+          ))}
+        </div>
+      </Row>
+      {engine === "vosk" && (
+        <Row name="Vosk engine and English model" hint={st?.vosk_ready ? "Downloaded and ready." : "Needs internet once, about 60 MB."}>
+          {st?.installing ? (
+            <span className="wp-note wp-note--inline">{st.installing}</span>
+          ) : (
+            <button className="wp-btn" onClick={() => go(api.speechInstallVosk, "Downloaded. Choose Listen in the service bar to start.")}>
+              {st?.vosk_ready ? "Download again" : "Download"}
+            </button>
+          )}
+        </Row>
+      )}
+      {engine === "vosk" && (
+        <Row name="Microphone" hint="The preacher's microphone, usually through the mixer's line or USB output.">
+          <select className="wp-input" value={core.speech_mic ?? ""} onChange={(e) => void setCoreKey("speech_mic", e.target.value)}>
+            <option value="">Windows' default microphone</option>
+            {mics.map((m) => (
+              <option key={m} value={m}>
+                {m}
+              </option>
+            ))}
+          </select>
+        </Row>
+      )}
+      {engine === "vosk" && (
+        <Row name="Listen for" hint="References only is far more accurate: Vosk listens only for book names, numbers and words like verse and chapter.">
+          <select className="wp-input" value={refsOnly ? "refs" : "all"} onChange={(e) => void setCoreKey("speech_refs_only", e.target.value === "refs" ? "true" : "false")}>
+            <option value="refs">Bible references only</option>
+            <option value="all">Everything said</option>
+          </select>
+        </Row>
+      )}
+      {engine === "windows" && <p className="wp-note">Windows Speech uses Windows' default microphone (Windows sound settings, Recording).</p>}
+      <Row name="Try it" hint="Read out a reference, e.g. “John three sixteen” or “first Corinthians thirteen verses four to seven”.">
+        {st?.listening ? (
+          <button className="wp-btn" onClick={() => go(api.speechStop)}>
+            Stop
+          </button>
+        ) : (
+          <button className="wp-btn" onClick={() => go(() => api.speechStart(engine, core.speech_mic || null, refsOnly))}>
+            Start listening
+          </button>
+        )}
+      </Row>
+      {st?.listening && <p className="speech-caption">{st.caption ? `Hearing: ${st.caption}` : "Listening…"}</p>}
+      {!!st?.recent.length && (
+        <ul className="remote-log">
+          {st.recent.slice(0, 8).map((r) => (
+            <li key={r.reference + r.at}>
+              <strong>{r.reference}</strong> from “{r.heard}”
+            </li>
+          ))}
+        </ul>
+      )}
+      {(msg || st?.problem) && <p className={`wp-banner ${msg?.bad || (!msg && st?.problem) ? "wp-banner--bad" : ""}`}>{msg?.text ?? st?.problem}</p>}
     </>
   );
 }

@@ -1,4 +1,5 @@
 import type { MediaItem, Slide } from "./api";
+import { sectionName } from "./features/service/SlideList";
 import { MediaView } from "./MediaView";
 import { useTheme } from "./theme/store";
 import { ThemeView, type Phase } from "./theme/ThemeView";
@@ -79,6 +80,6 @@ export function SlideView({
     if (look?.lowerThird || !media) return <ThemeView theme={{ ...theme, background: CLEAR, layers: [] }} data={{ primary: [], second: [] }} />;
     return <MediaView item={media} playing={playing} restart={restart} muted={muted} still={still} />;
   }
-  const data = { primary: slide.primary, second: slide.second, reference: kind === "scripture" ? caption : null, title: kind === "song" ? caption : null };
+  const data = { primary: slide.primary, second: slide.second, reference: kind === "scripture" ? caption : null, title: kind === "song" ? caption : null, section: kind === "song" ? sectionName(slide.label) : null };
   return <ThemeView theme={theme} data={data} phase={phase} showKey={showKey} textKey={textKey} hideText={hideText} still={still} />;
 }

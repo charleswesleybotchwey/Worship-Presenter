@@ -173,7 +173,7 @@ pub fn delete(conn: &Connection, id: i64) -> Result<()> {
 
 // ---------- sharing themes between churches (.wptheme) ----------
 
-const FORMAT: &str = "worship-presenter-theme";
+pub const FORMAT: &str = "worship-presenter-theme";
 
 fn media_refs(v: &Value, out: &mut Vec<String>) {
     match v {
@@ -223,7 +223,10 @@ pub fn import(conn: &Connection, media_dir: &std::path::Path, bytes: &[u8]) -> R
                 .map_err(|_| bad("A file inside the theme is damaged."))?;
             let p = std::path::Path::new(path);
             let kind = crate::media::kind_of(p).ok_or_else(|| bad(format!("The theme contains an unsupported file ({path}).")))?;
-            if path.contains("..") {
+            // only a plain relative path may come from a theme file: no "..", no drive
+            // letter or leading slash (joining an absolute path would replace the media
+            // folder and write anywhere on the computer)
+            if !crate::media::is_plain_relative(path) {
                 return Err(bad("The theme contains an unsafe file path."));
             }
             // reuse an identical file already here (same name or an earlier renamed copy)
@@ -273,6 +276,14 @@ pub fn import(conn: &Connection, media_dir: &std::path::Path, bytes: &[u8]) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn theme_files_cannot_escape_the_media_folder() {
+        for evil in ["../x.png", "C:/Users/x/AppData/x.png", "/etc/x.png", "\\\\server\\share\\x.png", "images/../../x.png", "C:x.png"] {
+            assert!(!crate::media::is_plain_relative(evil), "{evil}");
+        }
+        assert!(crate::media::is_plain_relative("images/church logo.png"));
+    }
 
     #[test]
     fn builtins_are_valid_and_seeded_once() {

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, type ChapterView, type MediaItem, type ProgramItem, type SongRow, type SongScope, type SongTree, type Version } from "../../api";
+import { api, type ChapterView, type VerseHit, type MediaItem, type ProgramItem, type SongRow, type SongScope, type SongTree, type Version } from "../../api";
 import { Icon } from "../../Icon";
 import { MediaLibrary } from "../../MediaLibrary";
 import { AnnouncementList, ContextMenu } from "../service/panes";
@@ -37,7 +37,10 @@ function useWindow(count: number) {
 
 // ---------- Songs ----------
 
-type Sort = { col: "number" | "title" | "first_line" | "author" | "copyright"; dir: 1 | -1 };
+type Sort = { col: "number" | "title" | "first_line" | "langs" | "author" | "copyright"; dir: 1 | -1 };
+
+const LANG_NAMES: Record<string, string> = { en: "English", fat: "Fante", tw: "Twi", ak: "Akan", gaa: "Ga", ga: "Ga", ee: "Ewe", dag: "Dagbani", gur: "Farefare", ha: "Hausa", fr: "French", yo: "Yoruba" };
+const langNames = (l: string[]) => l.map((x) => LANG_NAMES[x] ?? x.toUpperCase()).join(" + ");
 
 function SongsTab({
   searchRef,
@@ -75,7 +78,7 @@ function SongsTab({
 
   const sorted = useMemo(() => {
     if (!sort) return rows;
-    const k = (r: SongRow) => (sort.col === "number" ? r.sort_key : (r[sort.col] ?? "").toLowerCase());
+    const k = (r: SongRow) => (sort.col === "number" ? r.sort_key : sort.col === "langs" ? langNames(r.langs) : (r[sort.col] ?? "").toLowerCase());
     return [...rows].sort((a, b) => (k(a) < k(b) ? -sort.dir : k(a) > k(b) ? sort.dir : 0));
   }, [rows, sort]);
   const win = useWindow(sorted.length);
@@ -165,6 +168,7 @@ function SongsTab({
           {head("number", "Number")}
           {head("title", "Title")}
           {head("first_line", "First line")}
+          {head("langs", "Languages")}
           {head("author", "Author")}
           {head("copyright", "Copyright")}
         </div>
@@ -187,6 +191,7 @@ function SongsTab({
                 <span className="wp-num">{r.number ?? ""}</span>
                 <span>{r.title}</span>
                 <span>{r.first_line ?? ""}</span>
+                <span className={r.langs.length > 1 ? "lt-langs lt-langs--two" : "lt-langs"}>{langNames(r.langs)}</span>
                 <span>{r.author ?? ""}</span>
                 <span>{r.copyright ?? ""}</span>
               </div>
@@ -271,23 +276,41 @@ function ScripturesTab({ refInput, onPreview, onAdd }: { refInput: React.RefObje
   useEffect(() => {
     api.versions().then((v) => (setVersions(v), setPrimary((p) => p || v[0]?.code || ""))).catch(() => {});
   }, []);
+  // a reference opens its chapter; anything else is searched as words
+  const [hits, setHits] = useState<VerseHit[] | null>(null);
+  const [everyBible, setEveryBible] = useState(false);
   useEffect(() => {
-    if (!primary || !typed.trim()) return setView(null);
+    if (!primary || !typed.trim()) return setView(null), setHits(null);
     const t = setTimeout(
       () =>
         api
           .browseChapter(primary, typed)
           .then((v) => {
             setView(v);
+            setHits(null);
             setProblem(null);
             const sel = v.rows.filter((r) => r.selected).map((r) => r.verse);
             setRange(sel.length ? { from: sel[0], to: sel[sel.length - 1] } : null);
           })
-          .catch((e) => setProblem(String(e instanceof Error ? e.message : e))),
-      150,
+          .catch((e) => {
+            const words = typed.replace(/"/g, "").trim();
+            if (words.length < 3 || /^\d/.test(words)) return setProblem(String(e instanceof Error ? e.message : e)), setHits(null);
+            setView(null);
+            api
+              .searchBible(everyBible ? [] : [primary], typed)
+              .then((h) => (setHits(h), setProblem(h.length ? null : `No verse contains “${words}”.`)))
+              .catch((e2) => setProblem(String(e2 instanceof Error ? e2.message : e2)));
+          }),
+      250,
     );
     return () => clearTimeout(t);
-  }, [primary, typed]);
+  }, [primary, typed, everyBible]);
+  const mark = (text: string) => {
+    const words = typed.replace(/"/g, "").toLowerCase().split(/\s+/).filter((w) => w.length > 1);
+    if (!words.length) return text;
+    const re = new RegExp(`(${words.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`, "gi");
+    return text.split(re).map((part, i) => (i % 2 ? <mark key={i}>{part}</mark> : part));
+  };
 
   const vers = second && second !== primary ? [primary, second] : [primary];
   const refFor = (from: number, to: number) => (view ? `${view.book} ${view.chapter}:${from}${to > from ? "-" + to : ""}` : "");
@@ -305,7 +328,7 @@ function ScripturesTab({ refInput, onPreview, onAdd }: { refInput: React.RefObje
           <input
             ref={refInput}
             value={typed}
-            placeholder="Genesis 1:1, Yohane 3:16"
+            placeholder="Yohane 3:16, or words: living water"
             aria-label="Scripture reference"
             onChange={(e) => setTyped(e.target.value)}
             onKeyDown={(e) => {
@@ -346,6 +369,22 @@ function ScripturesTab({ refInput, onPreview, onAdd }: { refInput: React.RefObje
           <span className="lt-th">Scripture</span>
         </div>
         <div className="lt-body" role="grid">
+          {hits?.map((h) => (
+            <div
+              key={h.version + h.reference}
+              role="row"
+              className="lt-row lt-row--verses lt-row--flow"
+              draggable
+              onDragStart={(e) => dragItem(e, { kind: "scripture", reference: h.reference, versions: second && second !== h.version ? [h.version, second] : [h.version] })}
+              onClick={() => onPreview({ kind: "scripture", reference: h.reference, versions: second && second !== h.version ? [h.version, second] : [h.version] })}
+              onContextMenu={(e) => (e.preventDefault(), onAdd({ kind: "scripture", reference: h.reference, versions: [h.version] }))}
+              title="Click to preview; right-click adds to the schedule"
+            >
+              <span>{h.version}</span>
+              <span className="wp-num">{h.reference}</span>
+              <span className="lt-verse">{mark(h.text)}</span>
+            </div>
+          ))}
           {view?.rows.map((r) => (
             <div key={r.verse}>
               {r.heading && <div className="lt-heading">{r.heading}</div>}
@@ -367,10 +406,20 @@ function ScripturesTab({ refInput, onPreview, onAdd }: { refInput: React.RefObje
               </div>
             </div>
           ))}
-          {!view && <p className="wp-empty wp-empty--inline">{problem ?? "Type a reference on the left: a book, a chapter or verses. The whole chapter appears here."}</p>}
+          {!view && !hits?.length && <p className="wp-empty wp-empty--inline">{problem ?? "Type a reference (a book, a chapter or verses) to see the whole chapter, or some words to find the verses that contain them."}</p>}
         </div>
         <footer className="lt-foot">
-          {view ? (
+          {hits ? (
+            <>
+              <span className="wp-num">
+                {hits.length} verse{hits.length === 1 ? "" : "s"} contain “{typed.replace(/"/g, "")}”{hits.length === 200 ? " (first 200)" : ""}
+              </span>
+              <label className="wp-check">
+                <input type="checkbox" checked={everyBible} onChange={(e) => setEveryBible(e.target.checked)} /> Search every Bible
+              </label>
+              <span className="lt-note">Put words in "quotes" for an exact phrase.</span>
+            </>
+          ) : view ? (
             <>
               <button className="wp-icon-btn" aria-label="Previous chapter" onClick={() => goChapter(-1)} disabled={view.chapter <= 1}>
                 ‹
@@ -401,7 +450,7 @@ function ScripturesTab({ refInput, onPreview, onAdd }: { refInput: React.RefObje
 // ---------- Themes ----------
 
 const THEME_KINDS: ThemeKind[] = ["song", "scripture", "lower_third", "announcement"];
-const SAMPLE = { primary: ["song text line one", "song text line two"], second: ["second language line"], reference: "John 3:16", title: "Title" };
+const SAMPLE = { primary: ["song text line one", "song text line two"], second: ["second language line"], reference: "John 3:16", title: "Title", section: "Verse 1" };
 
 function ThemesTab({ version, previewKind, onUseForItem, onEdit }: { version: number; previewKind: ProgramItem["kind"] | null; onUseForItem: (id: number) => void; onEdit: () => void }) {
   const [rows, setRows] = useState<ThemeRow[]>([]);

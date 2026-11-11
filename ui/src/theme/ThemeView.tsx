@@ -28,6 +28,8 @@ function contentFor(l: TextLayer, d: SlideData, clock: string): string[] {
       return [clock];
     case "free":
       return l.text ? l.text.split("\n") : [];
+    case "section":
+      return d.section ? [d.section] : [];
   }
 }
 

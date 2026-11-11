@@ -63,6 +63,20 @@ fn imports_everything_and_answers_lookups() {
     let ch = wp_core::browse::browse_chapter(&conn, "NKJV", "Yohane 3:16-18").unwrap();
     assert_eq!(ch.rows.iter().filter(|r| r.selected).map(|r| r.verse).collect::<Vec<_>>(), vec![16, 17, 18]);
     println!("chapter table: {} {} has {} verses", ch.book, ch.chapter, ch.rows.len());
+    // word search: an English phrase and a Twi word typed without ɔ
+    let t = std::time::Instant::now();
+    let hits = wp_core::browse::search_bible(&conn, &["NKJV".to_string()], "for God so loved the world", 5).unwrap();
+    println!("word search (first time, builds the index) {:?}: {:?}", t.elapsed(), hits.iter().map(|h| h.reference.as_str()).collect::<Vec<_>>());
+    assert!(hits.iter().any(|h| h.reference == "John 3:16"), "{hits:?}");
+    let tw = wp_core::browse::search_bible(&conn, &["TK".to_string()], "Onyankopon dɔ wiase", 3).unwrap();
+    println!("Twi search: {:?}", tw.iter().map(|h| h.reference.clone()).collect::<Vec<_>>());
+    assert!(tw.iter().any(|h| h.reference.ends_with("3:16")), "typed without ɔ, Twi John 3:16 is found: {tw:?}");
+    let exact = wp_core::browse::search_bible(&conn, &["NKJV".to_string()], "\"the Lord is my shepherd\"", 3).unwrap();
+    assert!(exact.first().map_or(false, |h| h.reference.ends_with(" 23:1")), "{exact:?}");
+    let t = std::time::Instant::now();
+    let again = wp_core::browse::search_bible(&conn, &[], "living water", 5).unwrap();
+    println!("all Bibles, second search {:?}: {} hits", t.elapsed(), again.len());
+
     let tree = wp_core::browse::song_tree(&conn).unwrap();
     println!("collections: {:?}", tree.collections.iter().map(|f| (f.name.as_str(), f.count)).collect::<Vec<_>>());
 

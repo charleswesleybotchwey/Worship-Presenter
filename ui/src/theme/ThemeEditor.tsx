@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, pickThemeOpen, pickThemeSave, type MediaItem } from "../api";
+import { api, pickForeignTheme, pickThemeOpen, pickThemeSave, type ForeignDesign, type MediaItem } from "../api";
 import { MediaGrid } from "../MediaLibrary";
+import { FontPicker } from "./FontPicker";
+import { ForeignThemeImport } from "./ForeignThemeImport";
 import { ThemeView, type Phase } from "./ThemeView";
 import {
   FIELD_NAMES,
-  FONTS,
   KIND_NAMES,
   blankTheme,
   newId,
@@ -26,9 +27,9 @@ import {
 const SAMPLES: Record<string, { name: string; data: SlideData }> = {
   bilingual: {
     name: "Hymn, English and Fante",
-    data: { primary: ["O for a thousand tongues to sing", "My great Redeemer’s praise,"], second: ["Meenya ngyiramá apem matow ndwom", "Meyi mo Pomfò ayɛw,"], title: "MHB 1", copyright: "Public Domain" },
+    data: { primary: ["O for a thousand tongues to sing", "My great Redeemer’s praise,"], second: ["Meenya ngyiramá apem matow ndwom", "Meyi mo Pomfò ayɛw,"], title: "MHB 1", copyright: "Public Domain", section: "Verse 1" },
   },
-  single: { name: "Song, one language", data: { primary: ["Great is Thy faithfulness", "O God my Father"], second: [], title: "Great is Thy faithfulness" } },
+  single: { name: "Song, one language", data: { primary: ["Great is Thy faithfulness", "O God my Father"], second: [], title: "Great is Thy faithfulness", section: "Chorus" } },
   scripture: {
     name: "Scripture, two versions",
     data: {
@@ -62,6 +63,32 @@ const ANIMS: { value: AnimKind; label: string }[] = [
 ];
 
 const r1 = (n: number) => Math.round(n * 10) / 10;
+
+const hasSectionLabel = (t: Theme) => t.layers.some((l) => l.kind === "text" && (l as TextLayer).field === "section");
+
+/** Adds a small "Verse 1 / Chorus" label above the words (styled like the lyrics), or removes it. */
+function withSectionLabel(t: Theme, on: boolean): Theme {
+  if (!on) return { ...t, layers: t.layers.filter((l) => !(l.kind === "text" && (l as TextLayer).field === "section")) };
+  if (hasSectionLabel(t)) return t;
+  const lyrics = t.layers.find((l) => l.kind === "text" && (l as TextLayer).field === "lyrics") as TextLayer | undefined;
+  const base = lyrics ?? (t.layers.find((l) => l.kind === "text") as TextLayer | undefined);
+  if (!base) return t;
+  const top = Math.max(1, base.y - 9);
+  const label: TextLayer = {
+    ...structuredClone(base),
+    id: `section-${Date.now().toString(36)}`,
+    name: "Section label",
+    field: "section",
+    text: "",
+    solo: null,
+    x: base.x,
+    y: top,
+    w: base.w,
+    h: 7,
+    style: { ...structuredClone(base.style), size: Math.max(2, Math.round(base.style.size * 0.55 * 10) / 10), minSize: 1.5, autoFit: false, weight: 600, italic: false },
+  };
+  return { ...t, layers: [...t.layers, label] };
+}
 
 /** NDI keys the green behind the lower third to transparency; strong greens in the
  *  theme itself would turn partly see-through. */
@@ -233,21 +260,9 @@ function AnimProps({ title, value, onChange }: { title: string; value: Anim; onC
 }
 
 function TextStyleProps({ s, set }: { s: TextStyle; set: (p: Partial<TextStyle>) => void }) {
-  const custom = !FONTS.includes(s.font);
   return (
     <Group title="Text">
-      <Select
-        label="Font"
-        value={custom ? "__custom" : s.font}
-        options={[...FONTS.map((f) => ({ value: f, label: f })), { value: "__custom", label: "Other font…" }]}
-        onChange={(f) => set({ font: f === "__custom" ? "" : f })}
-      />
-      {custom && (
-        <label className="prop">
-          <span>Font name</span>
-          <input value={s.font} placeholder="As installed in Windows" onChange={(e) => set({ font: e.target.value })} />
-        </label>
-      )}
+      <FontPicker value={s.font} onChange={(font) => set({ font })} />
       <div className="prop-row">
         <Num label="Size" value={s.size} step={0.25} min={0.5} suffix="%" onChange={(size) => set({ size })} />
         <Select
@@ -308,6 +323,7 @@ export function ThemeEditor({ onClose }: { onClose: () => void }) {
   const [showKey, setShowKey] = useState(0);
   const [guides, setGuides] = useState<{ x: number[]; y: number[] }>({ x: [], y: [] });
   const [message, setMessage] = useState<{ text: string; bad?: boolean } | null>(null);
+  const [foreign, setForeign] = useState<{ path: string; designs: ForeignDesign[] } | null>(null);
   const history = useRef<Theme[]>([]);
   const drag = useRef<Drag | null>(null);
   const canvas = useRef<HTMLDivElement>(null);
@@ -606,7 +622,34 @@ export function ThemeEditor({ onClose }: { onClose: () => void }) {
             >
               Import a theme…
             </button>
+            <button
+              className="btn-quiet"
+              onClick={async () => {
+                if (!confirmLeave()) return;
+                const path = await pickForeignTheme();
+                if (!path) return;
+                try {
+                  setForeign({ path, designs: await api.foreignThemeReview(path) });
+                } catch (e) {
+                  setMessage({ text: String(e instanceof Error ? e.message : e), bad: true });
+                }
+              }}
+            >
+              From EasyWorship or ProPresenter…
+            </button>
           </div>
+          {foreign && (
+            <ForeignThemeImport
+              path={foreign.path}
+              designs={foreign.designs}
+              onCancel={() => setForeign(null)}
+              onDone={async (text, first) => {
+                setForeign(null);
+                await refresh(first);
+                setMessage({ text });
+              }}
+            />
+          )}
 
           <section className="te__group te__layers">
             <h3>Layers, front first</h3>
@@ -678,6 +721,12 @@ export function ThemeEditor({ onClose }: { onClose: () => void }) {
                   <input value={theme.name} onChange={(e) => change({ ...theme, name: e.target.value })} />
                 </label>
                 <Select label="Used for" value={theme.kind} options={kinds.map((k) => ({ value: k, label: KIND_NAMES[k] }))} onChange={(kind) => change({ ...theme, kind })} />
+                {(theme.kind === "song" || theme.kind === "lower_third") && (
+                  <label className="prop prop--check" title="Shows Verse 1, Chorus, Bridge… on the slide. Drag the label to move it; click it to change its font and size.">
+                    <input type="checkbox" checked={hasSectionLabel(theme)} onChange={(e) => change(withSectionLabel(theme, e.target.checked))} />
+                    <span>Show verse and chorus labels</span>
+                  </label>
+                )}
               </Group>
               <Group title="Background">
                 <Select

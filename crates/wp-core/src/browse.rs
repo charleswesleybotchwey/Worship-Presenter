@@ -17,6 +17,8 @@ pub struct SongRow {
     pub first_line: Option<String>,
     pub author: Option<String>,
     pub copyright: Option<String>,
+    /// Languages stored, in order, e.g. ["en", "fat"].
+    pub langs: Vec<String>,
     /// Sorts "MHB 9" before "MHB 10".
     pub sort_key: String,
 }
@@ -118,16 +120,18 @@ pub fn browse_songs(conn: &Connection, scope: &Scope, query: &str) -> Result<Vec
     let mut st = conn.prepare(
         "SELECT s.title, s.author, s.copyright,
                 (SELECT h.code || ' ' || n.number FROM song_number n JOIN hymnal h ON h.id = n.hymnal_id WHERE n.song_id = s.id ORDER BY (h.code = ?2) DESC, h.code LIMIT 1),
-                (SELECT g.text FROM song_section c JOIN song_segment g ON g.section_id = c.id WHERE c.song_id = s.id AND c.label <> 'TITLE' ORDER BY c.idx, g.idx LIMIT 1)
+                (SELECT g.text FROM song_section c JOIN song_segment g ON g.section_id = c.id WHERE c.song_id = s.id AND c.label <> 'TITLE' ORDER BY c.idx, g.idx LIMIT 1),
+                (SELECT group_concat(lang, ',') FROM (SELECT lang FROM song_lyric l WHERE l.song_id = s.id ORDER BY l.rowid))
          FROM song s WHERE s.id = ?1",
     )?;
     let mut rows = Vec::with_capacity(ids.len());
     for id in &ids {
-        if let Ok((title, author, copyright, number, first_line)) = st.query_row(params![id, prefer.as_deref().unwrap_or("")], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, Option<String>>(3)?, r.get::<_, Option<String>>(4)?))
+        if let Ok((title, author, copyright, number, first_line, langs)) = st.query_row(params![id, prefer.as_deref().unwrap_or("")], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, Option<String>>(3)?, r.get::<_, Option<String>>(4)?, r.get::<_, Option<String>>(5)?))
         }) {
             let key = sort_key(&number, &title);
-            rows.push(SongRow { id: *id, number, title, first_line, author, copyright, sort_key: key });
+            let langs = langs.map(|l| l.split(',').map(str::to_string).collect()).unwrap_or_default();
+            rows.push(SongRow { id: *id, number, title, first_line, author, copyright, langs, sort_key: key });
         }
     }
     // a search keeps its relevance order; a folder is listed in number order
@@ -236,6 +240,79 @@ pub fn browse_chapter(conn: &Connection, version_code: &str, typed: &str) -> Res
     Ok(ChapterView { version: version_code.into(), book, book_no: r.book_no, chapter, chapters, rows })
 }
 
+// ---------- Bible word search ----------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct VerseHit {
+    pub version: String,
+    pub reference: String,
+    pub book_no: u16,
+    pub chapter: u16,
+    pub verse: u16,
+    pub text: String,
+}
+
+/// Fills the word index for one Bible the first time it is searched (about a second).
+/// Text is folded like song search, so "Onyankopon" finds "Onyankopɔn".
+fn index_version(conn: &Connection, vid: i64) -> Result<()> {
+    // Bibles imported before 11 Nov 2026 were indexed unfolded: redo each one once
+    let key = format!("bible_fts_folded:{vid}");
+    let done: bool = conn.query_row("SELECT count(*) FROM setting WHERE key = ?1", [&key], |r| r.get::<_, i64>(0))? > 0;
+    if done {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM bible_fts WHERE version_id = ?1", [vid])?;
+    tx.execute("INSERT OR REPLACE INTO setting (key, value) VALUES (?1, '1')", [&key])?;
+    {
+        let mut read = tx.prepare("SELECT book_no, chapter, verse, text FROM bible_verse WHERE version_id = ?1")?;
+        let mut write = tx.prepare("INSERT INTO bible_fts (text, version_id, book_no, chapter, verse) VALUES (?1, ?2, ?3, ?4, ?5)")?;
+        let rows = read.query_map([vid], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, r.get::<_, String>(3)?)))?;
+        for row in rows {
+            let (b, c, v, t) = row?;
+            write.execute(params![crate::text::fold(&t), vid, b, c, v])?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// Verses containing all the words typed (in any order; "quotes" for an exact phrase),
+/// best matches first, in the chosen Bibles (all Bibles when none are given).
+pub fn search_bible(conn: &Connection, versions: &[String], query: &str, limit: usize) -> Result<Vec<VerseHit>> {
+    let folded = crate::text::fold(query);
+    let phrase = query.trim().starts_with('"');
+    let words: Vec<String> = folded.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(|w| w.replace('"', "")).collect();
+    if words.is_empty() {
+        return Ok(vec![]);
+    }
+    let fts = if phrase { format!("\"{}\"", words.join(" ")) } else { words.iter().map(|w| format!("\"{w}\"*")).collect::<Vec<_>>().join(" ") };
+    let mut ids: Vec<(i64, String)> = conn.prepare("SELECT id, code FROM bible_version ORDER BY code")?.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<std::result::Result<_, _>>()?;
+    if !versions.is_empty() {
+        ids.retain(|(_, c)| versions.contains(c));
+    }
+    let mut hits = vec![];
+    for (vid, code) in &ids {
+        index_version(conn, *vid)?;
+        let mut st = conn.prepare(
+            "SELECT f.book_no, f.chapter, f.verse, v.text, b.name
+             FROM bible_fts f JOIN bible_verse v ON v.version_id = f.version_id AND v.book_no = f.book_no AND v.chapter = f.chapter AND v.verse = f.verse
+             JOIN bible_book b ON b.version_id = f.version_id AND b.book_no = f.book_no
+             WHERE bible_fts MATCH ?1 AND f.version_id = ?2 ORDER BY bm25(bible_fts) LIMIT ?3",
+        )?;
+        let rows = st.query_map(params![fts, vid, limit as i64], |r| {
+            let (b, c, v): (u16, u16, u16) = (r.get(0)?, r.get(1)?, r.get(2)?);
+            let name: String = r.get(4)?;
+            Ok(VerseHit { version: code.clone(), reference: format!("{name} {c}:{v}"), book_no: b, chapter: c, verse: v, text: r.get(3)? })
+        })?;
+        for h in rows {
+            hits.push(h?);
+        }
+    }
+    hits.truncate(limit);
+    Ok(hits)
+}
+
 // ---------- maintenance ----------
 
 /// EasyWorship's "Rebuild search keys": rewrites every song's search entry.
@@ -272,6 +349,7 @@ mod tests {
                 lyrics: vec![crate::songs::Lyric { lang: "en".into(), body: format!("[V1]\nFirst line of {title}") }],
                 sequence: String::new(),
                 lines_per_slide: Some(3),
+                key: None,
             };
             crate::songs::save(&c, &d).unwrap();
         }
@@ -288,6 +366,7 @@ mod tests {
         assert_eq!(rows.iter().map(|r| r.number.clone().unwrap()).collect::<Vec<_>>(), vec!["MHB 9", "MHB 10", "MHB 851"]);
         assert_eq!(rows[0].first_line.as_deref(), Some("First line of MHB 9"));
         assert_eq!(rows[0].copyright.as_deref(), Some("Public Domain"));
+        assert_eq!(rows[0].langs, vec!["en".to_string()]);
         let found = browse_songs(&c, &Scope::Hymnal { code: "NCAN".into() }, "first line").unwrap();
         assert_eq!(found.len(), 1, "a search inside a collection stays inside it");
     }

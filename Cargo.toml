@@ -9,13 +9,13 @@ edition = "2021"
 license = "Proprietary"
 
 [workspace.dependencies]
-rusqlite = { version = "0.32", features = ["bundled", "backup", "collation"] }
+rusqlite = { version = "0.41.1", features = ["bundled", "backup", "collation"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"
 flate2 = "1"
 base64 = "0.22"
 libloading = "0.8"
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9.5", default-features = false, features = ["deflate"] }
 roxmltree = "0.20"
 unicode-normalization = "0.1"

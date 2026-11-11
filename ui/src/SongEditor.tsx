@@ -18,7 +18,7 @@ const langName = (c: string) => LANGS.find((l) => l.code === c)?.name ?? c;
 // Most keyboards here cannot type these directly.
 const CHARS = ["ɛ", "ɔ", "Ɛ", "Ɔ", "ŋ", "Ŋ", "ɣ", "ʒ"];
 
-const EMPTY: SongDoc = { id: null, title: "", author: null, copyright: null, ccli: null, numbers: [], lyrics: [{ lang: "en", body: "[V1]\n" }], sequence: "", lines_per_slide: null };
+const EMPTY: SongDoc = { id: null, title: "", author: null, copyright: null, ccli: null, numbers: [], lyrics: [{ lang: "en", body: "[V1]\n" }], sequence: "", lines_per_slide: null, key: null };
 
 function numbersToText(n: SongDoc["numbers"]) {
   return n.map((x) => `${x.hymnal} ${x.number}`).join(", ");
@@ -227,6 +227,10 @@ export function SongEditor({
               <label className="field">
                 <span>CCLI number</span>
                 <input value={doc.ccli ?? ""} onChange={(e) => update({ ccli: e.target.value })} />
+              </label>
+              <label className="field" title="For the musicians' stage view. Write chords in the lyrics in brackets before the syllable: [G]Amazing [C]grace">
+                <span>Key</span>
+                <input value={doc.key ?? ""} placeholder="e.g. G" maxLength={6} onChange={(e) => update({ key: e.target.value || null })} />
               </label>
             </div>
 
