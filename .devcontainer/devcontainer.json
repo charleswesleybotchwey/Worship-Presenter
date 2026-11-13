@@ -4,7 +4,7 @@
   "features": {
     "ghcr.io/devcontainers/features/rust:1": { "version": "latest", "profile": "minimal" }
   },
-  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev libssl-dev libasound2-dev && npm run setup",
+  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev libssl-dev libasound2-dev cmake clang libclang-dev && npm run setup",
   "forwardPorts": [5173],
   "portsAttributes": {
     "5173": { "label": "Worship Presenter (browser preview)", "onAutoForward": "openBrowser" }

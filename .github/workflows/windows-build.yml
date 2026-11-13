@@ -24,6 +24,9 @@ jobs:
   build:
     runs-on: windows-latest
     timeout-minutes: 90
+    env:
+      # Whisper (whisper-rs) generates its C bindings for Windows with LLVM's libclang
+      LIBCLANG_PATH: C:\Program Files\LLVM\bin
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -40,6 +43,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+
+      - name: LLVM for Whisper's bindings
+        shell: pwsh
+        run: |
+          if (!(Test-Path "$env:LIBCLANG_PATH\libclang.dll")) { choco install llvm -y --no-progress }
+          Get-Item "$env:LIBCLANG_PATH\libclang.dll" | Select-Object FullName, Length
 
       - name: Install JavaScript packages
         run: npm run setup

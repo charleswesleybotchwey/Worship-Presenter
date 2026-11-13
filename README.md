@@ -732,7 +732,8 @@ the service bar. Ctrl+K still searches everything; its setup entries open Settin
   Scripture recognition → Whisper → model Base (~150 MB) or Small (~490 MB, more
   accurate) → Download once. It hears whole phrases (transcribed at each pause, or every
   7 s), with Bible book names as a hint; its habitual "Thank you." on silence is dropped.
-  whisper.cpp is compiled into the app (CMake; ready-made bindings, see .cargo/config.toml).
+  whisper.cpp is compiled into the app (needs CMake, and LLVM/clang to generate its bindings;
+  the Windows workflow sets LIBCLANG_PATH, the Codespace installs libclang-dev).
 - It follows the preacher: "verse seventeen", "verses sixteen to eighteen", "chapter four
   verse two", "the next verse", "the next chapter", and a reference spread over two
   sentences ("turn to the book of Romans" … "chapter eight and verse one"). A lone book

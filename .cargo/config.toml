@@ -1,3 +1,0 @@
-[env]
-# whisper-rs: use its ready-made bindings (no clang needed to build)
-WHISPER_DONT_GENERATE_BINDINGS = "1"
