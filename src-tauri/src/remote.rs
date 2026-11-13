@@ -97,9 +97,16 @@ impl Host for Desk {
             Command::Next => crate::show_slide(app.clone(), st(), None, Some(1)).map(drop),
             Command::Previous => crate::show_slide(app.clone(), st(), None, Some(-1)).map(drop),
             Command::Show { index } => crate::show_slide(app.clone(), st(), Some(*index), None).map(drop),
-            Command::Blank => crate::set_mode(app.clone(), st(), Mode::Blank).map(drop),
-            Command::Logo => crate::set_mode(app.clone(), st(), Mode::Logo).map(drop),
-            Command::Clear => crate::set_mode(app.clone(), st(), Mode::Clear).map(drop),
+            // switches: pressed again, the words come back
+            Command::Blank | Command::Logo | Command::Clear => {
+                let want = match cmd {
+                    Command::Blank => Mode::Blank,
+                    Command::Logo => Mode::Logo,
+                    _ => Mode::Clear,
+                };
+                let now = st().live.lock().unwrap().mode;
+                crate::set_mode(app.clone(), st(), if now == want { Mode::Live } else { want }).map(drop)
+            }
             Command::Resume => crate::set_mode(app.clone(), st(), Mode::Live).map(drop),
             // what the service window holds (Preview, the schedule's place): it does these
             Command::GoLivePreview | Command::NextItem | Command::PreviousItem => {

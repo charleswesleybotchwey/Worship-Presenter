@@ -35,9 +35,8 @@ impl Host for Pretend {
     fn command(&self, cmd: &Command) -> Result<(), String> {
         {
             let mut s = self.s.lock().unwrap();
-            let held = s.2.is_some() && s.1 != "live";
+            // as in the app: slides change behind Blank/Logo, and going live ends them
             match cmd {
-                Command::Next | Command::Previous | Command::Show { .. } | Command::GoLiveItem { .. } if held => return Err("Output is held. Choose Resume output first.".into()),
                 Command::Next => s.0 = (s.0 + 1).min(2),
                 Command::Previous => s.0 = s.0.saturating_sub(1),
                 Command::Show { index } => s.0 = (*index).min(2),
@@ -46,6 +45,10 @@ impl Host for Pretend {
                 Command::Clear => s.1 = "clear",
                 Command::Resume => s.1 = "live",
                 Command::GoLiveItem { index } => *s = (0, "live", Some(*index)),
+                // Preview lives in the service window; the demo has none, so it just goes live
+                Command::GoLivePreview => s.1 = "live",
+                Command::NextItem => *s = (0, "live", Some(s.2.map_or(0, |i| i + 1))),
+                Command::PreviousItem => *s = (0, "live", Some(s.2.map_or(0, |i| i.saturating_sub(1)))),
             }
         }
         if let Some(r) = self.remote.lock().unwrap().as_ref() {

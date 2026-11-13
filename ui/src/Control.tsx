@@ -391,6 +391,8 @@ export function Control() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [preview, previewIdx, canGoLive, main.condition, latched, run, rehearsal, advanceAfterLive, selected, schedule]);
 
+  // Blank, Logo and Clear are switches: pressed again, the words come back
+  const toggleMode = (m: Mode) => setMode((rehearsal ? reh?.mode : state?.mode) === m ? "live" : m);
   const setMode = (m: Mode) => (rehearsal ? (setReh((r) => (r ? { ...r, mode: m } : r)), Promise.resolve(undefined)) : run(api.setMode(m)));
   const resume = () => (rehearsal ? (setReh((r) => (r ? { ...r, mode: "live" } : r)), liveSurface.current?.focus()) : run(api.setMode("live")).then(() => liveSurface.current?.focus()));
   const step = (d: number) => {
@@ -478,7 +480,7 @@ export function Control() {
         if (act === "previous") return step(-1);
         if (act === "nextItem") return void stepSchedule(1);
         if (act === "previousItem") return void stepSchedule(-1);
-        return void setMode(act === "blank" ? "blank" : act === "logo" ? "logo" : "clear");
+        return void toggleMode(act === "blank" ? "blank" : act === "logo" ? "logo" : "clear");
       }
       const slides = rehearsal ? reh?.slides ?? [] : liveSlides;
       if (/^[1-9]$/.test(k) && slides.length) {
@@ -564,9 +566,9 @@ export function Control() {
       case "live.previous": return toService(), step(-1);
       case "live.nextitem": return toService(), void stepSchedule(1);
       case "live.previousitem": return toService(), void stepSchedule(-1);
-      case "live.blank": return void setMode("blank");
-      case "live.logo": return void setMode("logo");
-      case "live.clear": return void setMode("clear");
+      case "live.blank": return void toggleMode("blank");
+      case "live.logo": return void toggleMode("logo");
+      case "live.clear": return void toggleMode("clear");
       case "live.resume": return void setMode("live");
       case "live.timer": return palette("timer");
       case "live.alert": return palette("alert");
@@ -1294,8 +1296,9 @@ export function Control() {
           </span>
           <span className="wp-pane__sub">{conf?.item ? itemTitle(conf.item) : ""}</span>
           <span className="wp-spacer" />
-          <button className={`wp-btn ${state?.mode === "blank" ? "is-pressed" : ""}`} aria-pressed={state?.mode === "blank"} onClick={() => setMode("blank")}>
-            <Icon name={state?.mode === "blank" ? "check" : "blank"} /> Blank
+          <button className={`wp-btn wp-mode ${state?.mode === "blank" ? "is-on is-on--blank" : ""}`} aria-pressed={state?.mode === "blank"} onClick={() => toggleMode("blank")} title={state?.mode === "blank" ? "Blank is on: press again to bring the words back" : "Black screens"}>
+            {state?.mode === "blank" && <span className="wp-mode__dot" aria-hidden="true" />}
+            <Icon name="blank" /> Blank{state?.mode === "blank" && <span className="wp-mode__on">ON</span>}
           </button>
           <button className="wp-btn" onClick={() => setActiveTab("service")}>
             Return to service
@@ -1519,22 +1522,25 @@ export function Control() {
   );
 }
 
-function ServiceActions({ state, latched, onMode, onResume }: { state: LiveState | undefined; latched: boolean; onMode: (m: Mode) => void; onResume: () => void }) {
-  const btn = (m: Mode, label: string, icon: string) => (
-    <button className={`wp-btn ${state?.mode === m ? "is-pressed" : ""}`} aria-pressed={state?.mode === m} onClick={() => onMode(m)}>
-      <Icon name={state?.mode === m ? "check" : icon} /> {label}
-    </button>
-  );
+// Resume is the lit switch pressed again (and Live → Resume in the menu bar)
+function ServiceActions({ state, onMode }: { state: LiveState | undefined; latched?: boolean; onMode: (m: Mode) => void; onResume?: () => void }) {
+  // a switch: on, it stands out in its own colour; pressed again, the words come back
+  const tips: Record<string, string> = { blank: "Black screens", logo: "The logo on the screens", clear: "Hide the words, keep the background" };
+  const btn = (m: Mode, label: string, icon: string) => {
+    const on = state?.mode === m;
+    return (
+      <button className={`wp-btn wp-mode ${on ? `is-on is-on--${m}` : ""}`} aria-pressed={on} onClick={() => onMode(state?.mode === m ? "live" : m)} title={on ? `${label} is on: press again to bring the words back` : tips[m]}>
+        {on && <span className="wp-mode__dot" aria-hidden="true" />}
+        <Icon name={icon} /> {label}
+        {on && <span className="wp-mode__on">ON</span>}
+      </button>
+    );
+  };
   return (
     <div className="wp-service-actions" role="group" aria-label="Screens">
       {btn("blank", "Blank", "blank")}
       {btn("logo", "Logo", "logo")}
       {btn("clear", "Clear", "clear")}
-      {latched && (
-        <button className="wp-btn wp-btn--resume" onClick={onResume}>
-          Resume output
-        </button>
-      )}
     </div>
   );
 }
