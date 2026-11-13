@@ -33,18 +33,70 @@ pub struct Speech {
     caption: Mutex<String>,
     recent: Mutex<VecDeque<Detection>>,
     problem: Mutex<Option<String>>,
-    install: Mutex<Option<String>>,
+    pub(crate) install: Mutex<Option<String>>,
+    /// Follows the preacher: book, chapter and verse so far.
+    tracker: Mutex<speech_ref::Tracker>,
+    /// What was said in the last ~15 seconds (for recognising a verse read aloud).
+    said: Mutex<VecDeque<(std::time::Instant, String)>>,
+    last_quote_check: Mutex<Option<std::time::Instant>>,
+    /// Everything heard since Listen was pressed (time, words), for the sermon notes.
+    log: Mutex<Vec<(String, String)>>,
+    /// Every scripture suggested since then (time, reference).
+    log_refs: Mutex<Vec<(String, String)>>,
 }
 
 impl Speech {
-    fn heard(&self, text: &str, aliases: &[wp_core::reference::Alias]) {
+    fn heard(&self, app: &AppHandle, text: &str, aliases: &[wp_core::reference::Alias]) {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let clock = app.state::<AppState>().db.lock().unwrap().query_row("SELECT strftime('%H:%M:%S', 'now', 'localtime')", [], |r| r.get::<_, String>(0)).unwrap_or_default();
+        {
+            let mut log = self.log.lock().unwrap();
+            if log.len() < 20_000 {
+                log.push((clock.clone(), text.trim().to_string()));
+            }
+        }
+        // references, following the preacher ("verse seventeen", "the next verse", a
+        // reference spread over two sentences)
+        let mut found = self.tracker.lock().unwrap().feed(text, aliases);
+        // a verse read aloud without its reference (at most every 3 seconds)
+        {
+            let mut said = self.said.lock().unwrap();
+            said.push_back((std::time::Instant::now(), text.to_string()));
+            while said.front().is_some_and(|(t, _)| t.elapsed().as_secs() > 15) {
+                said.pop_front();
+            }
+            let due = self.last_quote_check.lock().unwrap().map_or(true, |t| t.elapsed().as_millis() > 3000);
+            if due && found.is_empty() {
+                *self.last_quote_check.lock().unwrap() = Some(std::time::Instant::now());
+                let window = said.iter().map(|(_, s)| s.as_str()).collect::<Vec<_>>().join(" ");
+                drop(said);
+                let st = app.state::<AppState>();
+                // the Bibles of the reading on the screens, else every Bible
+                let versions: Vec<String> = match &*st.item.lock().unwrap() {
+                    Some(crate::ProgramItem::Scripture { versions, .. }) => versions.clone(),
+                    _ => vec![],
+                };
+                let quote = wp_core::speech_quote::find(&st.db.lock().unwrap(), &versions, &window).ok().flatten();
+                if let Some(q) = quote {
+                    let reference = format!("{} {}:{}", speech_ref::book_display(q.book_no), q.chapter, q.verse);
+                    found.push(speech_ref::Heard {
+                        reference,
+                        book_no: q.book_no,
+                        chapter: q.chapter,
+                        verse_from: Some(q.verse),
+                        verse_to: None,
+                        heard: format!("heard the verse read ({}%, {})", q.score, q.version),
+                    });
+                }
+            }
+        }
         let mut recent = self.recent.lock().unwrap();
-        for h in speech_ref::find(text, aliases) {
+        for h in found {
             // the same reference again within half a minute is the preacher repeating it
             if recent.iter().any(|d| d.heard.reference == h.reference && now.saturating_sub(d.at) < 30) {
                 continue;
             }
+            self.log_refs.lock().unwrap().push((clock.clone(), h.reference.clone()));
             recent.push_front(Detection { heard: h, at: now });
             recent.truncate(20);
         }
@@ -99,6 +151,8 @@ pub struct SpeechStatus {
     vosk_ready: bool,
     installing: Option<String>,
     windows_speech: bool,
+    /// Whisper models downloaded ("base.en", "small.en").
+    whisper_models: Vec<String>,
 }
 
 #[tauri::command(async)]
@@ -112,6 +166,7 @@ pub fn speech_status(st: State<'_, AppState>) -> SpeechStatus {
         vosk_ready: vosk_ready(&speech_dir(&st)),
         installing: s.install.lock().unwrap().clone(),
         windows_speech: cfg!(windows),
+        whisper_models: WHISPER_MODELS.iter().filter(|(m, _, _)| whisper_path(&speech_dir(&st), m).exists()).map(|(m, _, _)| m.to_string()).collect(),
     }
 }
 
@@ -153,6 +208,12 @@ pub async fn speech_start(app: AppHandle, engine: String, mic: Option<String>, r
     let aliases = wp_core::library::aliases(&st.db.lock().unwrap()).map_err(err)?;
     let stop = Arc::new(AtomicBool::new(false));
     *st.speech.stop.lock().unwrap() = Some(stop.clone());
+    // a sermon at a time: listening again more than an hour later starts a new transcript
+    let stale = st.speech.log.lock().unwrap().is_empty() || st.speech.last_quote_check.lock().unwrap().map_or(true, |t| t.elapsed().as_secs() > 3600);
+    if stale {
+        st.speech.log.lock().unwrap().clear();
+        st.speech.log_refs.lock().unwrap().clear();
+    }
     let label = match engine.as_str() {
         "vosk" => {
             let dir = speech_dir(&st).join("vosk");
@@ -185,7 +246,29 @@ pub async fn speech_start(app: AppHandle, engine: String, mic: Option<String>, r
                 .map_err(err)?;
             "Windows Speech"
         }
-        "whisper" | "cloud" => return Err("That engine is not available yet. Use Vosk or Windows Speech.".into()),
+        "whisper" => {
+            // the best downloaded model (small is more accurate, base is lighter)
+            let dir = speech_dir(&st);
+            let wanted = st.db.lock().unwrap().query_row("SELECT value FROM setting WHERE key = 'speech_whisper_model'", [], |r| r.get::<_, String>(0)).ok();
+            let model = wanted
+                .iter()
+                .map(String::as_str)
+                .chain(["small.en", "base.en"])
+                .map(|m| whisper_path(&dir, m))
+                .find(|p| p.exists())
+                .ok_or("No Whisper model is downloaded yet. Settings → Scripture recognition → Whisper → Download.")?;
+            let h = app.clone();
+            std::thread::Builder::new()
+                .name("speech-whisper".into())
+                .spawn(move || {
+                    if let Err(e) = run_whisper(&h, &model, mic.as_deref(), &aliases, &stop) {
+                        h.state::<AppState>().speech.fail(e);
+                    }
+                })
+                .map_err(err)?;
+            "Whisper"
+        }
+        "cloud" => return Err("That engine is not available yet.".into()),
         other => return Err(format!("Unknown speech engine {other}.")),
     };
     *st.speech.engine.lock().unwrap() = Some(label.into());
@@ -248,7 +331,7 @@ fn run_windows(app: &AppHandle, aliases: &[wp_core::reference::Alias], stop: &At
                 } else if let Some(t) = line.strip_prefix("R\t") {
                     speech.caption(t);
                     Speech::subtitle(app, t, true);
-                    speech.heard(t, aliases);
+                    speech.heard(app, t, aliases);
                 } else if let Some(t) = line.strip_prefix("H\t") {
                     speech.caption(t);
                     Speech::subtitle(app, t, false);
@@ -352,7 +435,6 @@ fn reference_vocabulary() -> String {
 }
 
 fn run_vosk(app: &AppHandle, dir: &Path, mic: Option<&str>, references_only: bool, aliases: &[wp_core::reference::Alias], stop: &AtomicBool) -> Result<(), String> {
-    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     let v = Vosk::load(dir)?;
     unsafe { (v.set_log)(-1) };
     let model_path = std::ffi::CString::new(dir.join("model").to_string_lossy().as_bytes()).map_err(err)?;
@@ -370,7 +452,46 @@ fn run_vosk(app: &AppHandle, dir: &Path, mic: Option<&str>, references_only: boo
         unsafe { (v.model_free)(model) };
         return Err("Vosk could not start listening.".into());
     }
-    // microphone: chosen by name, or Windows' default
+    let (stream, rx) = open_mic(mic)?;
+    let speech = &app.state::<AppState>().speech;
+    let mut last_partial = Instant::now();
+    while !stop.load(Ordering::Relaxed) {
+        let Ok(chunk) = rx.recv_timeout(Duration::from_millis(200)) else { continue };
+        let done = unsafe { (v.accept)(rec, chunk.as_ptr(), chunk.len() as i32) };
+        if done == 1 {
+            let t = json_text(unsafe { (v.result)(rec) }, "text");
+            if !t.is_empty() {
+                speech.caption(&t);
+                Speech::subtitle(app, &t, true);
+                speech.heard(app, &t, aliases);
+            }
+        } else if last_partial.elapsed() > Duration::from_millis(250) {
+            let t = json_text(unsafe { (v.partial)(rec) }, "partial");
+            if !t.is_empty() {
+                speech.caption(&t);
+                Speech::subtitle(app, &t, false);
+            }
+            last_partial = Instant::now();
+        }
+    }
+    drop(stream);
+    unsafe {
+        (v.rec_free)(rec);
+        (v.model_free)(model);
+    }
+    Ok(())
+}
+
+// ---------- download (once, on request) ----------
+
+const VOSK_VERSION: &str = "0.3.45";
+
+/// SHA-256 of the official release downloads. The engine is program code that gets
+/// loaded into Worship Presenter, so a download that does not match is refused.
+
+/// The microphone (chosen by name, or Windows' default) as 16 kHz mono samples.
+fn open_mic(mic: Option<&str>) -> Result<(cpal::Stream, std::sync::mpsc::Receiver<Vec<i16>>), String> {
+    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     let host = cpal::default_host();
     let device = match mic {
         Some(name) => host.input_devices().map_err(err)?.find(|d| d.description().map(|x| x.name() == name).unwrap_or(false)),
@@ -418,41 +539,9 @@ fn run_vosk(app: &AppHandle, dir: &Path, mic: Option<&str>, references_only: boo
     }
     .map_err(|e| format!("The microphone could not be opened ({e})."))?;
     stream.play().map_err(|e| format!("The microphone could not start ({e})."))?;
-    let speech = &app.state::<AppState>().speech;
-    let mut last_partial = Instant::now();
-    while !stop.load(Ordering::Relaxed) {
-        let Ok(chunk) = rx.recv_timeout(Duration::from_millis(200)) else { continue };
-        let done = unsafe { (v.accept)(rec, chunk.as_ptr(), chunk.len() as i32) };
-        if done == 1 {
-            let t = json_text(unsafe { (v.result)(rec) }, "text");
-            if !t.is_empty() {
-                speech.caption(&t);
-                Speech::subtitle(app, &t, true);
-                speech.heard(&t, aliases);
-            }
-        } else if last_partial.elapsed() > Duration::from_millis(250) {
-            let t = json_text(unsafe { (v.partial)(rec) }, "partial");
-            if !t.is_empty() {
-                speech.caption(&t);
-                Speech::subtitle(app, &t, false);
-            }
-            last_partial = Instant::now();
-        }
-    }
-    drop(stream);
-    unsafe {
-        (v.rec_free)(rec);
-        (v.model_free)(model);
-    }
-    Ok(())
+    Ok((stream, rx))
 }
 
-// ---------- download (once, on request) ----------
-
-const VOSK_VERSION: &str = "0.3.45";
-
-/// SHA-256 of the official release downloads. The engine is program code that gets
-/// loaded into Worship Presenter, so a download that does not match is refused.
 fn vosk_engine_sha256() -> Option<&'static str> {
     if cfg!(windows) {
         Some("f1dcc9cca460630f81ea8f71794f69c80bed6556d2a4e6237b5785e1d2dff34b")
@@ -474,7 +563,7 @@ fn vosk_engine_url() -> String {
     format!("https://github.com/alphacep/vosk-api/releases/download/v{VOSK_VERSION}/vosk-{platform}-{VOSK_VERSION}.zip")
 }
 
-fn download(url: &str, progress: &dyn Fn(String), what: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn download(url: &str, progress: &dyn Fn(String), what: &str) -> Result<Vec<u8>, String> {
     use std::io::Read;
     let resp = ureq::get(url).timeout(Duration::from_secs(600)).call().map_err(|e| format!("Could not download the {what} ({e}). Check the internet connection."))?;
     let total: Option<usize> = resp.header("Content-Length").and_then(|v| v.parse().ok());
@@ -591,4 +680,261 @@ mod tests {
         unsafe { (v.set_log)(-1) };
         assert!(unsafe { (v.model_new)(p.as_ptr()) }.is_null(), "a missing model is refused, not a crash");
     }
+}
+
+// ---------- Whisper (whisper.cpp, offline) ----------
+//
+// OpenAI's Whisper model run on this computer: far better than Vosk or Windows Speech
+// with accents and a live room. It hears whole phrases: the microphone is listened to
+// continuously and each phrase is transcribed when the speaker pauses (or every few
+// seconds in a long run), then goes through the same reference and verse finding.
+
+/// (name, file, approximate size in MB)
+const WHISPER_MODELS: [(&str, &str, u64); 2] = [("base.en", "ggml-base.en.bin", 148), ("small.en", "ggml-small.en.bin", 488)];
+
+fn whisper_path(dir: &Path, model: &str) -> PathBuf {
+    let file = WHISPER_MODELS.iter().find(|(m, _, _)| *m == model).map(|(_, f, _)| *f).unwrap_or("ggml-base.en.bin");
+    dir.join("whisper").join(file)
+}
+
+/// Bible book names, so Whisper expects them ("First Corinthians", "Habakkuk").
+const WHISPER_PROMPT: &str = "Sermon with Bible readings: Genesis, Exodus, Leviticus, Deuteronomy, Joshua, Judges, Ruth, Samuel, Kings, Chronicles, Nehemiah, Esther, Job, Psalms, Proverbs, Ecclesiastes, Isaiah, Jeremiah, Lamentations, Ezekiel, Daniel, Hosea, Habakkuk, Zechariah, Malachi, Matthew, Mark, Luke, John, Acts, Romans, First Corinthians, Galatians, Ephesians, Philippians, Colossians, Thessalonians, Timothy, Hebrews, James, Peter, Jude, Revelation. John chapter three verse sixteen.";
+
+/// Whisper's habit on silence or music: invented phrases. These are thrown away.
+fn whisper_junk(t: &str) -> bool {
+    let l = t.trim().to_lowercase();
+    l.is_empty() || l.starts_with('[') || l.starts_with('(') || matches!(l.trim_end_matches(['.', '!']), "thank you" | "thanks for watching" | "you" | "amen" | "bye")
+}
+
+fn run_whisper(app: &AppHandle, model: &Path, mic: Option<&str>, aliases: &[wp_core::reference::Alias], stop: &AtomicBool) -> Result<(), String> {
+    use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+    let speech = &app.state::<AppState>().speech;
+    speech.caption("Loading the Whisper model…");
+    let ctx = WhisperContext::new_with_params(model, WhisperContextParameters::default()).map_err(|e| format!("The Whisper model could not be loaded ({e}). Download it again in Settings."))?;
+    let mut state = ctx.create_state().map_err(|e| format!("Whisper could not start ({e})."))?;
+    let (_stream, rx) = open_mic(mic)?;
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, 8) as i32;
+    speech.caption("Listening…");
+    let mut buf: Vec<f32> = Vec::new();
+    let mut voiced = 0usize; // samples of speech in buf
+    let mut quiet = 0usize; // samples of silence since the last speech
+    let mut floor = 0.004f32; // background noise level, learnt as we go
+    while !stop.load(Ordering::Relaxed) {
+        let Ok(chunk) = rx.recv_timeout(Duration::from_millis(200)) else { continue };
+        let f: Vec<f32> = chunk.iter().map(|s| *s as f32 / 32768.0).collect();
+        let rms = (f.iter().map(|x| x * x).sum::<f32>() / f.len().max(1) as f32).sqrt();
+        let speaking = rms > (floor * 3.0).max(0.008);
+        if speaking {
+            voiced += f.len();
+            quiet = 0;
+        } else {
+            quiet += f.len();
+            floor = floor * 0.98 + rms * 0.02;
+        }
+        buf.extend_from_slice(&f);
+        // nothing said for a while: forget the silence
+        if voiced == 0 && buf.len() > 16_000 * 3 {
+            buf.drain(..buf.len() - 16_000);
+        }
+        // transcribe at a pause (0.6 s) after enough speech, or every 7 s in a long run
+        let pause = quiet > 16_000 * 6 / 10 && voiced > 16_000 * 8 / 10;
+        if !(pause || buf.len() > 16_000 * 7) {
+            continue;
+        }
+        let audio = std::mem::take(&mut buf);
+        voiced = 0;
+        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        params.set_language(Some("en"));
+        params.set_n_threads(threads);
+        params.set_no_context(true);
+        params.set_single_segment(true);
+        params.set_suppress_blank(true);
+        params.set_print_special(false);
+        params.set_print_progress(false);
+        params.set_print_realtime(false);
+        params.set_print_timestamps(false);
+        params.set_initial_prompt(WHISPER_PROMPT);
+        if state.full(params, &audio).is_err() {
+            continue;
+        }
+        let mut text = String::new();
+        for i in 0..state.full_n_segments() {
+            if let Some(seg) = state.get_segment(i) {
+                if let Ok(t) = seg.to_str_lossy() {
+                    text.push_str(&t);
+                }
+            }
+        }
+        let text = text.trim().to_string();
+        if whisper_junk(&text) {
+            continue;
+        }
+        speech.caption(&text);
+        Speech::subtitle(app, &text, true);
+        speech.heard(app, &text, aliases);
+    }
+    Ok(())
+}
+
+/// Downloads a Whisper model from the official whisper.cpp models (Hugging Face).
+#[tauri::command]
+pub async fn speech_install_whisper(app: AppHandle, model: String) -> Res<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let st = app.state::<AppState>();
+        let Some((name, file, mb)) = WHISPER_MODELS.iter().find(|(m, _, _)| *m == model).copied() else {
+            return Err(format!("Unknown Whisper model {model}."));
+        };
+        let progress = |m: String| *st.speech.install.lock().unwrap() = Some(m);
+        let result = (|| -> Result<(), String> {
+            let url = format!("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{file}");
+            let bytes = download(&url, &progress, &format!("Whisper {name} model (about {mb} MB)"))?;
+            // a real model file: whisper.cpp's "ggml" signature and about the right size
+            let sig_ok = bytes.len() > 8 && &bytes[0..4] == b"lmgg";
+            let size_ok = (bytes.len() as u64) > mb * 1_000_000 * 9 / 10 && (bytes.len() as u64) < mb * 1_000_000 * 11 / 10;
+            if !sig_ok || !size_ok {
+                return Err("The downloaded file is not a Whisper model, so it was not installed. Try again later or on another network.".into());
+            }
+            let path = whisper_path(&speech_dir(&st), name);
+            std::fs::create_dir_all(path.parent().unwrap()).map_err(err)?;
+            let tmp = path.with_extension("part");
+            std::fs::write(&tmp, &bytes).map_err(err)?;
+            std::fs::rename(&tmp, &path).map_err(err)?;
+            Ok(())
+        })();
+        *st.speech.install.lock().unwrap() = None;
+        result
+    })
+    .await
+    .map_err(err)?
+}
+
+#[derive(Serialize)]
+pub struct RecordingTest {
+    /// (seconds into the recording, what Whisper heard)
+    transcript: Vec<(u32, String)>,
+    /// (seconds, reference, how it was found)
+    found: Vec<(u32, String, String)>,
+    model: String,
+    seconds: u32,
+    took_seconds: u32,
+}
+
+/// The test bench: runs a sermon recording through Whisper and the same reference and
+/// verse finding as live listening, and reports what would have been suggested.
+#[tauri::command]
+pub async fn speech_test_recording(app: AppHandle, path: String) -> Res<RecordingTest> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+        let st = app.state::<AppState>();
+        let dir = speech_dir(&st);
+        let (model_name, model) = ["small.en", "base.en"].iter().map(|m| (m.to_string(), whisper_path(&dir, m))).find(|(_, p)| p.exists()).ok_or("Download a Whisper model first (Settings → Scripture recognition).")?;
+        let audio = wp_audio::decode_mono_16k(std::path::Path::new(&path))?;
+        let started = std::time::Instant::now();
+        let ctx = WhisperContext::new_with_params(&model, WhisperContextParameters::default()).map_err(|e| format!("The Whisper model could not be loaded ({e})."))?;
+        let mut state = ctx.create_state().map_err(|e| format!("Whisper could not start ({e})."))?;
+        let aliases = wp_core::library::aliases(&st.db.lock().unwrap()).map_err(err)?;
+        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, 8) as i32;
+        // phrases: split at pauses, as when listening live (at most 7 s each)
+        let mut phrases: Vec<(usize, usize)> = vec![];
+        let (mut start, mut quiet, mut floor) = (0usize, 0usize, 0.004f32);
+        for (i, block) in audio.chunks(3200).enumerate() {
+            let rms = (block.iter().map(|x| x * x).sum::<f32>() / block.len().max(1) as f32).sqrt();
+            if rms > (floor * 3.0).max(0.008) {
+                quiet = 0;
+            } else {
+                quiet += block.len();
+                floor = floor * 0.98 + rms * 0.02;
+            }
+            let end = (i + 1) * 3200;
+            if (quiet > 9600 && end - start > 12_800) || end - start > 16_000 * 7 {
+                phrases.push((start, end.min(audio.len())));
+                start = end;
+            }
+        }
+        if start < audio.len() {
+            phrases.push((start, audio.len()));
+        }
+        let mut tracker = wp_core::speech_ref::Tracker::new();
+        let mut window: VecDeque<(u32, String)> = VecDeque::new();
+        let (mut transcript, mut found) = (vec![], vec![]);
+        for (k, (a, b)) in phrases.iter().enumerate() {
+            *st.speech.install.lock().unwrap() = Some(format!("Testing the recording… {}%", k * 100 / phrases.len().max(1)));
+            let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+            params.set_language(Some("en"));
+            params.set_n_threads(threads);
+            params.set_no_context(true);
+            params.set_single_segment(true);
+            params.set_print_special(false);
+            params.set_print_progress(false);
+            params.set_print_realtime(false);
+            params.set_print_timestamps(false);
+            params.set_initial_prompt(WHISPER_PROMPT);
+            if state.full(params, &audio[*a..*b]).is_err() {
+                continue;
+            }
+            let mut text = String::new();
+            for i in 0..state.full_n_segments() {
+                if let Some(seg) = state.get_segment(i) {
+                    text.push_str(&seg.to_str_lossy().unwrap_or_default());
+                }
+            }
+            let text = text.trim().to_string();
+            if whisper_junk(&text) {
+                continue;
+            }
+            let at = (*a / 16_000) as u32;
+            transcript.push((at, text.clone()));
+            let refs = tracker.feed(&text, &aliases);
+            for h in &refs {
+                found.push((at, h.reference.clone(), format!("said: “{}”", h.heard)));
+            }
+            window.push_back((at, text.clone()));
+            while window.front().is_some_and(|(t, _)| at.saturating_sub(*t) > 15) {
+                window.pop_front();
+            }
+            if refs.is_empty() {
+                let w = window.iter().map(|(_, s)| s.as_str()).collect::<Vec<_>>().join(" ");
+                if let Ok(Some(q)) = wp_core::speech_quote::find(&st.db.lock().unwrap(), &[], &w) {
+                    let r = format!("{} {}:{}", speech_ref::book_display(q.book_no), q.chapter, q.verse);
+                    if !found.iter().any(|f: &(u32, String, String)| f.1 == r && at.saturating_sub(f.0) < 30) {
+                        found.push((at, r, format!("verse read aloud ({}%, {})", q.score, q.version)));
+                    }
+                }
+            }
+        }
+        *st.speech.install.lock().unwrap() = None;
+        Ok(RecordingTest { transcript, found, model: model_name, seconds: (audio.len() / 16_000) as u32, took_seconds: started.elapsed().as_secs() as u32 })
+    })
+    .await
+    .map_err(err)?
+}
+
+/// The sermon as heard since Listen was pressed: the scriptures, then every word, with
+/// times. Saved as a text file to edit into notes or posts.
+#[tauri::command]
+pub fn speech_save_notes(st: State<'_, AppState>, path: String) -> Res<usize> {
+    let log = st.speech.log.lock().unwrap().clone();
+    if log.is_empty() {
+        return Err("Nothing has been heard yet. Press Listen during the sermon (Whisper works best).".into());
+    }
+    let refs = st.speech.log_refs.lock().unwrap().clone();
+    let date = st.db.lock().unwrap().query_row("SELECT strftime('%d %m %Y', 'now', 'localtime')", [], |r| r.get::<_, String>(0)).unwrap_or_default();
+    let mut out = format!("Sermon transcript, {date}\r\n\r\n");
+    if !refs.is_empty() {
+        out.push_str("Scriptures\r\n");
+        let mut seen: Vec<&str> = vec![];
+        for (t, r) in &refs {
+            if !seen.contains(&r.as_str()) {
+                seen.push(r);
+                out.push_str(&format!("  {t}  {r}\r\n"));
+            }
+        }
+        out.push_str("\r\n");
+    }
+    out.push_str("What was said\r\n");
+    for (t, line) in &log {
+        out.push_str(&format!("[{t}] {line}\r\n"));
+    }
+    std::fs::write(&path, out.as_bytes()).map_err(|e| format!("The file could not be saved ({e})."))?;
+    Ok(log.len())
 }

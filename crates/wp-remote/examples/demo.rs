@@ -59,6 +59,7 @@ impl Host for Pretend {
 async fn main() {
     let host = Arc::new(Pretend { s: Mutex::new((0, "live", Some(0))), remote: Mutex::new(None) });
     let remote = Remote::new(host.clone());
+    remote.set_follow(true);
     *host.remote.lock().unwrap() = Some(remote.clone());
     let port: u16 = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(7300);
     let (_tx, rx) = tokio::sync::oneshot::channel();

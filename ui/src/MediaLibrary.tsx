@@ -1,7 +1,7 @@
 import { dragItem, useGoLive } from "./dnd";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { PopupMenu, type MenuEntry } from "./PopupMenu";
-import { api, pickMediaFiles, type MediaItem } from "./api";
+import { api, pickMediaFiles, type ItemCollection, type MediaItem } from "./api";
 import { makeThumb, useMediaUrl } from "./theme/media";
 import type { ThemeKind } from "./theme/types";
 import { Icon } from "./Icon";
@@ -55,6 +55,7 @@ export function MediaGrid({
   actions,
   menuFor,
   draggableItems,
+  onlyIds,
 }: {
   kind?: MediaItem["kind"] | "";
   onPick: (m: MediaItem) => void;
@@ -64,6 +65,8 @@ export function MediaGrid({
   menuFor?: (m: MediaItem, ctl: MediaGridControl) => MenuEntry[] | Promise<MenuEntry[]>;
   /** Items can be dragged to the schedule. */
   draggableItems?: boolean;
+  /** Show only these items (a media collection). */
+  onlyIds?: number[] | null;
 }) {
   const dragProps = (m: MediaItem) =>
     draggableItems && !m.missing
@@ -127,8 +130,8 @@ export function MediaGrid({
       newest: (a, b) => b.id - a.id,
       size: (a, b) => b.bytes - a.bytes,
     };
-    return [...items].sort(by[sort]);
-  }, [items, sort]);
+    return [...items].filter((m) => !onlyIds || onlyIds.includes(m.id)).sort(by[sort]);
+  }, [items, sort, onlyIds]);
 
   const importFiles = async () => {
     const paths = await pickMediaFiles();
@@ -252,6 +255,26 @@ export function MediaLibrary({ onPreview, onAdd, version }: { onPreview: (m: Med
   };
 
   const live = useGoLive();
+  // "My collections" for media (Easter backgrounds…)
+  const [colls, setColls] = useState<ItemCollection[]>([]);
+  const [showColl, setShowColl] = useState<number | null>(null);
+  const [collIds, setCollIds] = useState<number[]>([]);
+  const loadColls = () => api.itemCollections("media").then(setColls).catch(() => {});
+  useEffect(() => void loadColls(), []);
+  useEffect(() => {
+    if (showColl == null) return setCollIds([]);
+    api.itemCollectionItems(showColl).then((xs) => setCollIds(xs.flatMap((x) => (x.kind === "media" ? [x.media_id] : [])))).catch(() => {});
+  }, [showColl, colls]);
+  const toColl = async (m: MediaItem, id: number | null) => {
+    let cid = id;
+    if (cid == null) {
+      const name = prompt("Name of the new collection (e.g. Easter backgrounds)");
+      if (!name?.trim()) return;
+      cid = await api.itemCollectionCreate("media", name);
+    }
+    await api.itemCollectionAdd(cid, { kind: "media", media_id: m.id, title: m.title });
+    void loadColls();
+  };
   // EasyWorship's media menu (right-click a picture, video or sound), then the extras
   const menuFor = async (m: MediaItem, g: MediaGridControl): Promise<MenuEntry[]> => {
     const what = m.kind === "image" ? "Image" : m.kind === "video" ? "Video" : "Audio";
@@ -332,6 +355,12 @@ export function MediaLibrary({ onPreview, onAdd, version }: { onPreview: (m: Med
       },
       { label: "&Refresh", run: g.refresh },
       "-",
+      {
+        label: "Add to co&llection",
+        sub: [...colls.map((c) => ({ label: c.name, run: () => void toColl(m, c.id) })), ...(colls.length ? ["-" as const] : []), { label: "New collection…", run: () => void toColl(m, null) }],
+      },
+      ...(showColl != null ? [{ label: "Remove from this collection", run: () => void api.itemCollectionRemove(showColl, { kind: "media", media_id: m.id, title: m.title }).then(loadColls) } as MenuEntry] : []),
+      "-",
       { label: "Pre&view", run: () => onPreview(m) },
       { label: "&Go live", run: () => live(item) },
       { label: "Add to sc&hedule", run: () => onAdd(m) },
@@ -350,11 +379,25 @@ export function MediaLibrary({ onPreview, onAdd, version }: { onPreview: (m: Med
   return (
     <>
       {note && <p className={note.bad ? "form-error" : "notice"}>{note.text}</p>}
+      {colls.length > 0 && (
+        <label className="media__show">
+          Show{" "}
+          <select value={showColl ?? ""} onChange={(e) => setShowColl(e.target.value ? Number(e.target.value) : null)} aria-label="Show media">
+            <option value="">All media</option>
+            {colls.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name} ({c.count})
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
       <MediaGrid
         key={version + (note?.text ?? "")}
         onPick={onPreview}
         draggableItems
         menuFor={menuFor}
+        onlyIds={showColl == null ? null : collIds}
         actions={(m) => (
           <>
             <button className="icon-btn" aria-label={`Add ${m.title} to the service`} title="Add to the service" onClick={() => onAdd(m)}>

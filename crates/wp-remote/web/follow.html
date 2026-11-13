@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#111111">
+<title>Follow along</title>
+<link rel="icon" href="/icon-64.png">
+<style>
+  :root { --bg: #111; --fg: #f4f4f4; --dim: #9a9a9a; --accent: #f2b705; --size: 22px; color-scheme: dark; }
+  @media (prefers-color-scheme: light) { :root { --bg: #fafafa; --fg: #151515; --dim: #666; --accent: #8a6400; color-scheme: light; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 400 var(--size)/1.45 "Noto Sans", "Segoe UI", system-ui, sans-serif; padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom); }
+  header { position: sticky; top: 0; background: var(--bg); padding: 10px 14px; border-bottom: 1px solid #8884; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; z-index: 1; }
+  header h1 { font-size: 16px; margin: 0; flex: 1 1 100%; color: var(--dim); font-weight: 600; }
+  button { font: 600 15px system-ui, sans-serif; padding: 8px 12px; border-radius: 8px; border: 1px solid #8886; background: transparent; color: var(--fg); }
+  button[aria-pressed="true"] { background: var(--fg); color: var(--bg); }
+  main { padding: 12px 16px 40vh; }
+  .slide { padding: 10px 12px; margin: 6px 0; border-radius: 10px; opacity: .55; transition: opacity .2s; }
+  .slide.now { opacity: 1; background: #8882; }
+  .label { font-size: 13px; color: var(--dim); text-transform: uppercase; letter-spacing: .05em; }
+  .second { color: var(--accent); font-style: italic; }
+  p { margin: 2px 0; }
+  .wait { color: var(--dim); text-align: center; margin-top: 30vh; font-size: 18px; }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">Follow along</h1>
+  <button data-lang="primary">English</button>
+  <button data-lang="second">Fante / Twi</button>
+  <button data-lang="both">Both</button>
+  <span style="flex:1"></span>
+  <button id="smaller" aria-label="Smaller words">A−</button>
+  <button id="bigger" aria-label="Bigger words">A+</button>
+</header>
+<main id="main"><p class="wait">Connecting…</p></main>
+<script>
+  const main = document.getElementById("main"), title = document.getElementById("title");
+  let lang = localStorage.getItem("follow-lang") || "both";
+  let size = Number(localStorage.getItem("follow-size") || 22);
+  let last = null, lastIdx = -1;
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+  function applySize() { document.documentElement.style.setProperty("--size", size + "px"); localStorage.setItem("follow-size", size); }
+  function setLang(l) { lang = l; localStorage.setItem("follow-lang", l); document.querySelectorAll("[data-lang]").forEach((b) => b.setAttribute("aria-pressed", b.dataset.lang === l)); if (last) render(last); }
+  document.querySelectorAll("[data-lang]").forEach((b) => (b.onclick = () => setLang(b.dataset.lang)));
+  document.getElementById("smaller").onclick = () => { size = Math.max(16, size - 3); applySize(); };
+  document.getElementById("bigger").onclick = () => { size = Math.min(48, size + 3); applySize(); };
+  function render(v) {
+    last = v;
+    if (v.closed) { title.textContent = "Follow along"; main.innerHTML = '<p class="wait">Following along has been closed.</p>'; return; }
+    if (!v.slides || !v.slides.length) { title.textContent = "Follow along"; main.innerHTML = '<p class="wait">The words will appear here when they are on the screens.</p>'; lastIdx = -1; return; }
+    title.textContent = v.title || "";
+    main.innerHTML = v.slides.map((s, i) => {
+      const p = lang !== "second" || !(s.second || []).length ? (s.primary || []).map((l) => `<p>${esc(l)}</p>`).join("") : "";
+      const sec = lang !== "primary" ? (s.second || []).map((l) => `<p class="second">${esc(l)}</p>`).join("") : "";
+      return `<section class="slide ${i === v.slide_idx ? "now" : ""}" id="s${i}">${s.label ? `<div class="label">${esc(s.label)}</div>` : ""}${p}${sec}</section>`;
+    }).join("");
+    if (v.slide_idx !== lastIdx) { lastIdx = v.slide_idx; document.getElementById("s" + v.slide_idx)?.scrollIntoView({ behavior: "smooth", block: "center" }); }
+  }
+  function connect() {
+    const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/follow/ws");
+    ws.onmessage = (e) => { try { render(JSON.parse(e.data)); } catch {} };
+    ws.onclose = () => setTimeout(connect, 3000);
+  }
+  applySize(); setLang(lang); connect();
+</script>
+</body>
+</html>

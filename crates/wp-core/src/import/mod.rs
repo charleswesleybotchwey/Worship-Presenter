@@ -8,6 +8,7 @@ pub mod ewb;
 pub mod review;
 pub mod foreign_themes;
 pub mod songfiles;
+pub mod vpl;
 
 use crate::Result;
 use rusqlite::{params, Connection};

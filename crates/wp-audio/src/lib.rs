@@ -493,3 +493,55 @@ mod tests {
         assert_eq!(e.status().index, Some(1));
     }
 }
+
+/// A sound file as 16 kHz mono samples (for testing speech recognition on a recording).
+pub fn decode_mono_16k(path: &std::path::Path) -> Result<Vec<f32>, String> {
+    use rodio::Source;
+    let file = std::fs::File::open(path).map_err(|e| format!("could not open the recording ({e})"))?;
+    let dec = rodio::Decoder::new(std::io::BufReader::new(file)).map_err(|e| format!("not a sound file this computer can read ({e})"))?;
+    let rate = dec.sample_rate().get() as f64;
+    let ch = dec.channels().get() as usize;
+    let samples: Vec<f32> = dec.collect();
+    let mono: Vec<f32> = samples.chunks(ch.max(1)).map(|c| c.iter().sum::<f32>() / c.len() as f32).collect();
+    let step = rate / 16000.0;
+    let mut out = Vec::with_capacity((mono.len() as f64 / step) as usize + 1);
+    let mut pos = 0.0f64;
+    while (pos as usize) < mono.len() {
+        out.push(mono[pos as usize]);
+        pos += step;
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod decode_tests {
+    #[test]
+    fn a_wav_becomes_16k_mono() {
+        // one second of a 440 Hz tone, 44.1 kHz stereo 16-bit
+        let path = std::env::temp_dir().join("wp-decode-test.wav");
+        let (rate, secs) = (44_100u32, 1u32);
+        let n = rate * secs;
+        let mut b = Vec::new();
+        b.extend_from_slice(b"RIFF");
+        b.extend_from_slice(&(36 + n * 4).to_le_bytes());
+        b.extend_from_slice(b"WAVEfmt ");
+        b.extend_from_slice(&16u32.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&2u16.to_le_bytes());
+        b.extend_from_slice(&rate.to_le_bytes());
+        b.extend_from_slice(&(rate * 4).to_le_bytes());
+        b.extend_from_slice(&4u16.to_le_bytes());
+        b.extend_from_slice(&16u16.to_le_bytes());
+        b.extend_from_slice(b"data");
+        b.extend_from_slice(&(n * 4).to_le_bytes());
+        for i in 0..n {
+            let v = ((i as f32 / rate as f32 * 440.0 * std::f32::consts::TAU).sin() * 12_000.0) as i16;
+            b.extend_from_slice(&v.to_le_bytes());
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        std::fs::write(&path, b).unwrap();
+        let s = super::decode_mono_16k(&path).unwrap();
+        assert!((15_900..=16_100).contains(&s.len()), "{} samples", s.len());
+        assert!(s.iter().cloned().fold(0.0f32, f32::max) > 0.3);
+    }
+}

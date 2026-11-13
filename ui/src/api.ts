@@ -232,6 +232,17 @@ export interface RemoteStatus {
   lan_ip: string | null;
   sessions: { id: string; role: "operator" | "stage" | "viewer"; device: string; ip: string; joined_secs_ago: number; idle_secs: number }[];
   log: { at: number; device: string; action: string; ok: boolean }[];
+  /** Lyrics on the congregation's phones (read-only, no PIN). */
+  follow?: boolean;
+  follow_url?: string | null;
+  follow_qr_svg?: string | null;
+}
+
+export interface ItemCollection {
+  id: number;
+  kind: "scripture" | "media";
+  name: string;
+  count: number;
 }
 
 export interface ThemeRule {
@@ -282,6 +293,7 @@ export interface SpeechStatus {
   vosk_ready: boolean;
   installing: string | null;
   windows_speech: boolean;
+  whisper_models?: string[];
 }
 
 export interface FontFamily {
@@ -300,6 +312,8 @@ export interface OutputConfig {
   alpha: boolean;
   song_theme_id: number | null;
   scripture_theme_id: number | null;
+  /** EasyWorship's "NDI Stream" output monitor (null: a monitor). */
+  ndi?: { width: number; height: number; fps: number } | null;
   on_logo: "logo" | "blank" | "transparent" | "ignore";
   on_blank: "blank" | "transparent" | "ignore";
   show_on_startup: boolean;
@@ -330,6 +344,8 @@ export interface VerseHit {
   chapter: number;
   verse: number;
   text: string;
+  /** Found through another Bible (English words, Fante Bible chosen). */
+  found_in?: string | null;
 }
 
 export interface SongRow {
@@ -462,6 +478,21 @@ export const api = {
   mediaUsedBy: (id: number) => call<string[]>("media_used_by", { id }),
   themeRules: () => call<ThemeRule[]>("theme_rules"),
   themeGallery: () => call<Theme[]>("theme_gallery"),
+  syncStatus: () => call<{ folder: string | null; role: "share" | "follow" | null; shared_ms: number | null; taken_ms: number | null; waiting: [string, number] | null; computer: string }>("sync_status"),
+  syncSet: (folder: string | null, role: string | null) => call<void>("sync_set", { folder, role }),
+  syncShareNow: () => call<number>("sync_share_now"),
+  syncTakeNow: () => call<string>("sync_take_now"),
+  bibleCatalogue: () => call<{ id: string; language: string; title: string }[]>("bible_catalogue"),
+  bibleDownload: (id: string, code: string, title: string, lang: string) => call<number>("bible_download", { id, code, title, lang }),
+  itemCollections: (kind: "scripture" | "media") => call<ItemCollection[]>("item_collections", { kind }),
+  itemCollectionCreate: (kind: "scripture" | "media", name: string) => call<number>("item_collection_create", { kind, name }),
+  itemCollectionRename: (id: number, name: string) => call<void>("item_collection_rename", { id, name }),
+  itemCollectionDelete: (id: number) => call<void>("item_collection_delete", { id }),
+  itemCollectionAdd: (id: number, item: ProgramItem) => call<void>("item_collection_add", { id, item }),
+  itemCollectionRemove: (id: number, item: ProgramItem) => call<void>("item_collection_remove", { id, item }),
+  itemCollectionItems: (id: number) => call<ProgramItem[]>("item_collection_items", { id }),
+  outlineDeck: (text: string, version: string) => call<Deck>("outline_deck", { text, version }),
+  quickSong: (typed: string) => call<SongHit[]>("quick_song", { typed }),
   saveThemeRules: (rules: ThemeRule[]) => call<void>("save_theme_rules", { rules }),
   resolveTheme: (item: ProgramItem) => call<number | null>("resolve_theme", { item }),
   setMediaOptions: (id: number, repeat: "loop" | "once" | null, fit: "fit" | "fill" | "stretch" | null) => call<void>("set_media_options", { id, repeat, fit }),
@@ -507,6 +538,9 @@ export const api = {
   speechDismiss: (reference: string | null) => call<void>("speech_dismiss", { reference }),
   speechMics: () => call<string[]>("speech_mics"),
   speechInstallVosk: () => call<void>("speech_install_vosk"),
+  speechInstallWhisper: (model: string) => call<void>("speech_install_whisper", { model }),
+  speechSaveNotes: (path: string) => call<number>("speech_save_notes", { path }),
+  speechTestRecording: (path: string) => call<{ transcript: [number, string][]; found: [number, string, string][]; model: string; seconds: number; took_seconds: number }>("speech_test_recording", { path }),
   presentationImport: (path: string) =>
     call<{ stage: "done" | "render_pdf"; method: string; title: string; deck_id: number | null; pdf: string | null; token: string | null; warnings: string[] }>("presentation_import", { path }),
   /** A drawn page as raw bytes (not JSON), so big decks import quickly. */
@@ -549,6 +583,14 @@ export const api = {
   remoteStatus: () => call<RemoteStatus>("remote_status"),
   remoteStart: (everywhere: boolean, port: number) => call<void>("remote_start", { everywhere, port }),
   remoteStop: () => call<void>("remote_stop"),
+  remoteFollow: (on: boolean) => call<void>("remote_follow", { on }),
+  remoteControlKey: (on: boolean) => call<string | null>("remote_control_key", { on }),
+  remoteControlKeyGet: () => call<string | null>("remote_control_key_get"),
+  midiPorts: () => call<string[]>("midi_ports"),
+  midiUse: (port: string | null) => call<void>("midi_use", { port }),
+  midiLearn: (action: string) => call<void>("midi_learn", { action }),
+  midiForget: (action: string) => call<void>("midi_forget", { action }),
+  midiStatus: () => call<{ port: string | null; learning: string | null; map: Record<string, string> }>("midi_status"),
   remoteNewPin: () => call<string>("remote_new_pin"),
   remoteRevoke: (id: string) => call<void>("remote_revoke", { id }),
   remoteEndAll: () => call<void>("remote_end_all"),
@@ -685,6 +727,14 @@ export async function ndiFrameUrl(name: string, url: string): Promise<string> {
   return `${base}frame/${encodeURIComponent(name)}?url=${encodeURIComponent(url)}`;
 }
 
+/** A sermon recording, for testing scripture recognition. */
+export async function pickRecording(): Promise<string | null> {
+  if (!inTauri) return "sermon.mp3";
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const r = await open({ title: "Choose a sermon recording", filters: [{ name: "Recordings", extensions: ["mp3", "wav", "m4a", "aac", "flac", "ogg"] }] });
+  return typeof r === "string" ? r : null;
+}
+
 export async function pickForeignTheme(): Promise<string | null> {
   if (!inTauri) return "Theme.proTheme";
   const { open } = await import("@tauri-apps/plugin-dialog");
@@ -696,6 +746,31 @@ export async function pickCsvSave(name: string): Promise<string | null> {
   if (!inTauri) return name;
   const { save } = await import("@tauri-apps/plugin-dialog");
   return (await save({ title: "Save the song usage report", defaultPath: name, filters: [{ name: "Spreadsheet (CSV)", extensions: ["csv"] }] })) ?? null;
+}
+
+/** Actions from button boxes and MIDI pads that the service window carries out. */
+export async function onControlAction(cb: (a: string) => void): Promise<() => void> {
+  if (!inTauri) {
+    (window as unknown as { __wpControl?: (a: string) => void }).__wpControl = cb;
+    return () => {};
+  }
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<string>("control-action", (e) => cb(e.payload));
+}
+
+/** The shared folder for sync. */
+export async function pickFolder(): Promise<string | null> {
+  if (!inTauri) return "D:\\OneDrive\\Church";
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const r = await open({ title: "Choose the shared folder (OneDrive, Google Drive, a network folder…)", directory: true });
+  return typeof r === "string" ? r : null;
+}
+
+/** Where to save the sermon transcript (a text file). */
+export async function pickTextSave(name: string): Promise<string | null> {
+  if (!inTauri) return name;
+  const { save } = await import("@tauri-apps/plugin-dialog");
+  return (await save({ title: "Save the sermon transcript", defaultPath: name, filters: [{ name: "Text", extensions: ["txt"] }] })) ?? null;
 }
 
 /** Live sermon subtitles: what the speech engine hears, several times a second. */
@@ -871,6 +946,9 @@ let mMine: { id: number; name: string; songs: number[] }[] = [];
 const mPages = new Map<string, string[]>();
 let mPulpit: PulpitNote[] = [];
 let mForeign: ForeignDesign[] = [];
+let mMidi: { port: string | null; learning: string | null; map: Record<string, string> } = { port: null, learning: null, map: {} };
+let mSync: { folder: string | null; role: "share" | "follow" | null; shared_ms: number | null; taken_ms: number | null; waiting: [string, number] | null } = { folder: null, role: null, shared_ms: null, taken_ms: null, waiting: ["MAIN-PC", Date.now() - 600000] };
+let mColls: { id: number; kind: "scripture" | "media"; name: string; items: ProgramItem[] }[] = [];
 // browser preview: theme rules matched on the sample songs' titles ("MHB 1" is in MHB)
 let mRules: ThemeRule[] = [];
 const mResolve = (item: ProgramItem | null | undefined): number | null => {
@@ -1074,7 +1152,6 @@ async function mock(cmd: string, a: Record<string, unknown>): Promise<unknown> {
           if (mMusic.rules.on_live === "duck") mMusic.ducked = true;
         }
       }
-      if (mItem && mState.mode !== "live") throw new Error("Output is held (blank, logo or text cleared). Choose Resume output first.");
       mPrev = { item: mItem, slides: mSlides, idx: mState.slide_idx };
       const item = a.item as ProgramItem;
       if (item.kind === "song" && item.lyrics?.length) {
@@ -1101,7 +1178,6 @@ async function mock(cmd: string, a: Record<string, unknown>): Promise<unknown> {
     }
     case "show_slide": {
       if (!mSlides.length) throw new Error("Nothing is live. Send an item to Live first.");
-      if (mState.mode !== "live") throw new Error("Output is held. Choose Resume output to go back to the live slide.");
       const idx = Math.max(0, Math.min(mSlides.length - 1, a.slideIdx != null ? (a.slideIdx as number) : mState.slide_idx + ((a.delta as number) ?? 0)));
       return bump({ slide_idx: idx, slide_since_ms: Date.now(), repeat: countRepeat(idx) });
     }
@@ -1496,6 +1572,67 @@ async function mock(cmd: string, a: Record<string, unknown>): Promise<unknown> {
     case "ndi_audio":
     case "theme_rules":
       return mRules;
+    case "sync_status":
+      return { ...mSync, computer: "MEDIA-LAPTOP" };
+    case "sync_set":
+      mSync.folder = (a.folder as string) ?? null;
+      mSync.role = (a.role as "share" | "follow") ?? null;
+      return;
+    case "sync_share_now":
+      mSync.shared_ms = Date.now();
+      return 3;
+    case "sync_take_now":
+      mSync.taken_ms = Date.now();
+      mSync.waiting = null;
+      return "MAIN-PC";
+    case "bible_catalogue":
+      return [
+        { id: "engwebp", language: "English", title: "World English Bible" },
+        { id: "engkjv", language: "English", title: "King James Version" },
+        { id: "eweXYZ", language: "Ewe", title: "Ewe Bible (sample)" },
+      ];
+    case "bible_download":
+      await new Promise((ok) => setTimeout(ok, 300));
+      return 31102;
+    case "item_collections":
+      return mColls.filter((c) => c.kind === a.kind).map((c) => ({ id: c.id, kind: c.kind, name: c.name, count: c.items.length }));
+    case "item_collection_create": {
+      const id = mColls.length + 1;
+      mColls.push({ id, kind: a.kind as "scripture" | "media", name: String(a.name), items: [] });
+      return id;
+    }
+    case "item_collection_rename":
+      mColls.forEach((c) => c.id === a.id && (c.name = String(a.name)));
+      return;
+    case "item_collection_delete":
+      mColls = mColls.filter((c) => c.id !== a.id);
+      return;
+    case "item_collection_add": {
+      const c = mColls.find((x) => x.id === a.id);
+      if (c && !c.items.some((i) => JSON.stringify(i) === JSON.stringify(a.item))) c.items.push(a.item as ProgramItem);
+      return;
+    }
+    case "item_collection_remove": {
+      const c = mColls.find((x) => x.id === a.id);
+      if (c) c.items = c.items.filter((i) => JSON.stringify(i) !== JSON.stringify(a.item));
+      return;
+    }
+    case "item_collection_items":
+      return mColls.find((c) => c.id === a.id)?.items ?? [];
+    case "outline_deck": {
+      const lines = String(a.text).split("\n").map((l) => l.replace(/^\s*([-•*]|\d+[.)])\s*/, "").trim()).filter(Boolean);
+      const slides: DeckSlide[] = [{ kind: "text", title: lines[0] ?? "Sermon", body: "", image: null, seconds: null }];
+      for (const l of lines.slice(1)) {
+        slides.push({ kind: "text", title: "", body: l, image: null, seconds: null });
+        if (/John 3:16/i.test(l)) slides.push({ kind: "text", title: "John 3:16", body: "16 For God so loved the world that He gave His only begotten Son…", image: null, seconds: null });
+      }
+      return { id: null, title: lines[0] ?? "Sermon", looping: false, seconds: 0, slides };
+    }
+    case "quick_song": {
+      const t = String(a.typed).trim().toUpperCase().replace(/\s+/g, " ");
+      const want = /^\d+$/.test(t) ? `MHB ${t}` : t.replace(/^([A-Z]+)\s*(\d+)$/, "$1 $2");
+      return SONGS.filter((s) => s.hit.numbers.includes(want)).map((s) => s.hit);
+    }
     case "theme_gallery": {
       const r = await fetch("/samples/gallery.json");
       return (await r.json()) as Theme[];
@@ -1512,6 +1649,28 @@ async function mock(cmd: string, a: Record<string, unknown>): Promise<unknown> {
     }
     case "reveal_media":
       return;
+    case "remote_control_key":
+      return a.on ? "3f9a0c1d2e4b5a6978c0d1e2f3a4b5c6d7e8" : null;
+    case "remote_control_key_get":
+      return null;
+    case "midi_ports":
+      return ["Akai LPD8", "Loopback MIDI"];
+    case "midi_use":
+      mMidi.port = (a.port as string) ?? null;
+      return;
+    case "midi_learn":
+      mMidi.learning = String(a.action);
+      setTimeout(() => ((mMidi.map[mMidi.learning!] = "note 36"), (mMidi.learning = null)), 600);
+      return;
+    case "midi_forget":
+      delete mMidi.map[String(a.action)];
+      return;
+    case "midi_status":
+      return { ...mMidi, map: { ...mMidi.map } };
+    case "speech_save_notes":
+      return 42;
+    case "speech_test_recording":
+      return { transcript: [[2, "please turn with me to the book of Romans"], [6, "chapter eight and verse one"], [14, "there is therefore now no condemnation to those who are in Christ Jesus"]], found: [[6, "Romans 8:1", "said: “chapter eight and verse one”"]], model: "small.en", seconds: 20, took_seconds: 9 };
     case "set_window_look":
     case "show_main_window":
       return;

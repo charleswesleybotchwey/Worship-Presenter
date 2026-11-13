@@ -16,7 +16,7 @@ pub struct Running {
     pub addr: SocketAddr,
 }
 
-struct Desk(AppHandle);
+pub(crate) struct Desk(pub(crate) AppHandle);
 
 impl Desk {
     fn service_items(&self) -> (Option<String>, Vec<wp_core::schedule::Item>) {
@@ -101,6 +101,16 @@ impl Host for Desk {
             Command::Logo => crate::set_mode(app.clone(), st(), Mode::Logo).map(drop),
             Command::Clear => crate::set_mode(app.clone(), st(), Mode::Clear).map(drop),
             Command::Resume => crate::set_mode(app.clone(), st(), Mode::Live).map(drop),
+            // what the service window holds (Preview, the schedule's place): it does these
+            Command::GoLivePreview | Command::NextItem | Command::PreviousItem => {
+                use tauri::Emitter;
+                let name = match cmd {
+                    Command::GoLivePreview => "go-live",
+                    Command::NextItem => "next-item",
+                    _ => "previous-item",
+                };
+                app.emit_to("main", "control-action", name).map_err(|e| e.to_string())
+            }
             Command::GoLiveItem { index } => {
                 let (_, items) = self.service_items();
                 let it = items.get(*index).ok_or("That item is no longer in the service order.")?;
@@ -129,6 +139,10 @@ pub struct RemoteStatus {
     lan_ip: Option<String>,
     sessions: Vec<wp_remote::SessionInfo>,
     log: Vec<wp_remote::LogLine>,
+    /// Lyrics on the congregation's phones (read-only, no PIN).
+    follow: bool,
+    follow_url: Option<String>,
+    follow_qr_svg: Option<String>,
 }
 
 #[tauri::command(async)]
@@ -136,10 +150,11 @@ pub fn remote_status(st: tauri::State<'_, AppState>) -> RemoteStatus {
     let r = st.remote.lock().unwrap();
     let ip = lan_ip();
     match r.as_ref() {
-        None => RemoteStatus { running: false, url: None, stage_url: None, pin: None, qr_svg: None, lan_ip: ip.map(|i| i.to_string()), sessions: vec![], log: vec![] },
+        None => RemoteStatus { running: false, url: None, stage_url: None, pin: None, qr_svg: None, lan_ip: ip.map(|i| i.to_string()), sessions: vec![], log: vec![], follow: false, follow_url: None, follow_qr_svg: None },
         Some(x) => {
             let host = if x.addr.ip().is_unspecified() { ip.unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST)) } else { x.addr.ip() };
             let url = format!("http://{host}:{}/", x.addr.port());
+            let follow_url = format!("{url}follow");
             RemoteStatus {
                 running: true,
                 stage_url: Some(format!("{url}stage")),
@@ -149,6 +164,9 @@ pub fn remote_status(st: tauri::State<'_, AppState>) -> RemoteStatus {
                 lan_ip: ip.map(|i| i.to_string()),
                 sessions: x.remote.sessions(),
                 log: x.remote.log().into_iter().rev().take(30).collect(),
+                follow: x.remote.follow_on(),
+                follow_qr_svg: Some(wp_remote::qr_svg(&follow_url)),
+                follow_url: Some(follow_url),
             }
         }
     }
@@ -169,7 +187,44 @@ pub async fn remote_start(app: AppHandle, everywhere: bool, port: u16) -> Res<()
         .serve(SocketAddr::new(ip, port), rx)
         .await
         .map_err(|e| format!("The remote could not start on port {port} ({e}). Try another port."))?;
+    // follow along on phones, if it was switched on
+    let on = st.db.lock().unwrap().query_row("SELECT value FROM setting WHERE key = 'follow_enabled'", [], |r| r.get::<_, String>(0)).map(|v| v == "1").unwrap_or(false);
+    remote.set_follow(on);
+    let key = st.db.lock().unwrap().query_row("SELECT value FROM setting WHERE key = 'control_key'", [], |r| r.get::<_, String>(0)).ok();
+    remote.set_control_key(key);
     *st.remote.lock().unwrap() = Some(Running { remote, stop: tx, addr });
+    Ok(())
+}
+
+/// Makes a new control key for button boxes (Stream Deck through Companion), or switches
+/// button-box control off. Returns the key.
+#[tauri::command]
+pub fn remote_control_key(st: tauri::State<'_, AppState>, on: bool) -> Res<Option<String>> {
+    let key = on.then(wp_remote::random_key);
+    let conn = st.db.lock().unwrap();
+    match &key {
+        Some(k) => conn.execute("INSERT OR REPLACE INTO setting (key, value) VALUES ('control_key', ?1)", [k]).map_err(err)?,
+        None => conn.execute("DELETE FROM setting WHERE key = 'control_key'", []).map_err(err)?,
+    };
+    drop(conn);
+    if let Some(x) = st.remote.lock().unwrap().as_ref() {
+        x.remote.set_control_key(key.clone());
+    }
+    Ok(key)
+}
+
+#[tauri::command]
+pub fn remote_control_key_get(st: tauri::State<'_, AppState>) -> Option<String> {
+    st.db.lock().unwrap().query_row("SELECT value FROM setting WHERE key = 'control_key'", [], |r| r.get::<_, String>(0)).ok()
+}
+
+/// Opens or closes lyrics on the congregation's phones (remembered).
+#[tauri::command]
+pub fn remote_follow(st: tauri::State<'_, AppState>, on: bool) -> Res<()> {
+    st.db.lock().unwrap().execute("INSERT OR REPLACE INTO setting (key, value) VALUES ('follow_enabled', ?1)", [if on { "1" } else { "0" }]).map_err(err)?;
+    if let Some(x) = st.remote.lock().unwrap().as_ref() {
+        x.remote.set_follow(on);
+    }
     Ok(())
 }
 

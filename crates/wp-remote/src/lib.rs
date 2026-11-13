@@ -9,7 +9,7 @@
 //! `Host`, and calls `publish` whenever the live state changes.
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{ConnectInfo, Query, State};
+use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
@@ -23,6 +23,9 @@ use tokio::sync::broadcast;
 
 const REMOTE_HTML: &str = include_str!("../web/remote.html");
 const STAGE_HTML: &str = include_str!("../web/stage.html");
+const FOLLOW_HTML: &str = include_str!("../web/follow.html");
+/// At most this many phones following along at once.
+const MAX_FOLLOWERS: usize = 400;
 const ICON_180: &[u8] = include_bytes!("../web/icon-180.png");
 const ICON_64: &[u8] = include_bytes!("../web/icon-64.png");
 
@@ -44,6 +47,11 @@ pub enum Command {
     Resume,
     /// Send service-order item `index` live from its first slide.
     GoLiveItem { index: usize },
+    /// Send what is in Preview live (Stream Deck, Companion, MIDI).
+    GoLivePreview,
+    /// The next / previous item of the service order.
+    NextItem,
+    PreviousItem,
 }
 
 pub trait Host: Send + Sync + 'static {
@@ -113,10 +121,23 @@ pub struct Remote {
     failures_all: Mutex<(u32, Instant)>,
     log: Mutex<VecDeque<LogLine>>,
     tx: broadcast::Sender<String>,
+    /// Lyrics on the congregation's phones (no PIN, read-only): only while switched on.
+    follow: std::sync::atomic::AtomicBool,
+    followers: std::sync::atomic::AtomicUsize,
+    /// The key for button boxes (Bitfocus Companion, Stream Deck); None: switched off.
+    control_key: Mutex<Option<String>>,
 }
 
 fn now_secs() -> u64 {
     SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// A long random key for button boxes (36 hex characters, from the system's secure source).
+pub fn random_key() -> String {
+    use rand::RngCore;
+    let mut b = [0u8; 18];
+    rand::rngs::OsRng.fill_bytes(&mut b);
+    b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
 fn random_pin() -> String {
@@ -147,6 +168,9 @@ impl Remote {
             failures_all: Mutex::new((0, Instant::now())),
             log: Mutex::new(VecDeque::new()),
             tx,
+            follow: std::sync::atomic::AtomicBool::new(false),
+            followers: std::sync::atomic::AtomicUsize::new(0),
+            control_key: Mutex::new(None),
         })
     }
 
@@ -217,6 +241,24 @@ impl Remote {
         Some((x.role, x.device.clone()))
     }
 
+    /// Opens or closes the follow-along page (lyrics on the congregation's phones).
+    pub fn set_follow(&self, on: bool) {
+        self.follow.store(on, std::sync::atomic::Ordering::Relaxed);
+        if !on {
+            // phones following along notice and stop
+            let _ = self.tx.send(self.host.snapshot().to_string());
+        }
+    }
+
+    /// Switches button-box control on with this key (None switches it off).
+    pub fn set_control_key(&self, key: Option<String>) {
+        *self.control_key.lock().unwrap() = key.filter(|k| k.len() >= 16);
+    }
+
+    pub fn follow_on(&self) -> bool {
+        self.follow.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub fn router(self: &Arc<Self>) -> Router {
         Router::new()
             .route("/", get(|| async { Html(REMOTE_HTML) }))
@@ -228,6 +270,10 @@ impl Remote {
             .route("/api/command", post(command))
             .route("/api/note", post(note))
             .route("/ws", get(ws))
+            .route("/api/v1/{action}", get(control).post(control))
+            .route("/api/v1/item/{n}", get(control_item).post(control_item))
+            .route("/follow", get(follow_page))
+            .route("/follow/ws", get(follow_ws))
             .with_state(self.clone())
     }
 
@@ -419,6 +465,135 @@ async fn ws(State(r): State<Arc<Remote>>, h: HeaderMap, Query(q): Query<WsQuery>
     up.on_upgrade(move |socket| push(r, q.token, socket))
 }
 
+#[derive(Deserialize)]
+struct KeyQuery {
+    key: Option<String>,
+}
+
+/// Button boxes (Bitfocus Companion, Stream Deck through Companion): one address per
+/// action, with the control key in "?key=" or the X-Key header.
+async fn control(State(r): State<Arc<Remote>>, ConnectInfo(addr): ConnectInfo<SocketAddr>, h: HeaderMap, Path(action): Path<String>, Query(q): Query<KeyQuery>) -> Response {
+    let cmd = match action.as_str() {
+        "go-live" => Command::GoLivePreview,
+        "next" => Command::Next,
+        "previous" => Command::Previous,
+        "next-item" => Command::NextItem,
+        "previous-item" => Command::PreviousItem,
+        "blank" => Command::Blank,
+        "logo" => Command::Logo,
+        "clear" => Command::Clear,
+        "resume" => Command::Resume,
+        _ => return fail(StatusCode::NOT_FOUND, "Unknown action. Use go-live, next, previous, next-item, previous-item, blank, logo, clear, resume or item/N."),
+    };
+    run_control(r, addr, h, q, cmd, &action)
+}
+
+async fn control_item(State(r): State<Arc<Remote>>, ConnectInfo(addr): ConnectInfo<SocketAddr>, h: HeaderMap, Path(n): Path<usize>, Query(q): Query<KeyQuery>) -> Response {
+    // people count from 1
+    run_control(r, addr, h, q, Command::GoLiveItem { index: n.saturating_sub(1) }, &format!("item {n}"))
+}
+
+fn run_control(r: Arc<Remote>, addr: SocketAddr, h: HeaderMap, q: KeyQuery, cmd: Command, what: &str) -> Response {
+    let Some(want) = r.control_key.lock().unwrap().clone() else {
+        return fail(StatusCode::FORBIDDEN, "Button-box control is switched off (Settings → Phone remote).");
+    };
+    let given = q.key.or_else(|| h.get("x-key").and_then(|v| v.to_str().ok()).map(str::to_string)).unwrap_or_default();
+    if !constant_eq(given.as_bytes(), want.as_bytes()) {
+        r.record("button box", format!("wrong key from {}", addr.ip()), false);
+        return fail(StatusCode::UNAUTHORIZED, "Wrong control key.");
+    }
+    let ok = r.host.command(&cmd);
+    r.record("button box", what.to_string(), ok.is_ok());
+    match ok {
+        Ok(()) => {
+            let _ = r.tx.send(r.host.snapshot().to_string());
+            Json(serde_json::json!({ "ok": true })).into_response()
+        }
+        Err(e) => fail(StatusCode::CONFLICT, &e),
+    }
+}
+
+fn constant_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// What the congregation's phones may see: exactly what is on the screens (the item's
+/// title and its words, both languages), never the service order, notes, timers or chords.
+pub fn public_view(snap: &serde_json::Value, open: bool) -> serde_json::Value {
+    if !open {
+        return serde_json::json!({ "closed": true });
+    }
+    let kind = snap["item"]["kind"].as_str().unwrap_or("");
+    let words = matches!(kind, "song" | "scripture" | "announcement");
+    let showing = snap["mode"].as_str() == Some("live") && words;
+    let slides: Vec<serde_json::Value> = if showing {
+        snap["slides"]
+            .as_array()
+            .map(|a| a.iter().map(|s| serde_json::json!({ "label": s["label"], "primary": s["primary"], "second": s["second"] })).collect())
+            .unwrap_or_default()
+    } else {
+        vec![]
+    };
+    serde_json::json!({
+        "title": if showing { snap["item"]["title"].clone() } else { serde_json::Value::Null },
+        "kind": if showing { kind } else { "" },
+        "slide_idx": if showing { snap["slide_idx"].clone() } else { serde_json::Value::Null },
+        "slides": slides,
+    })
+}
+
+async fn follow_page(State(r): State<Arc<Remote>>) -> Response {
+    if !r.follow_on() {
+        return (StatusCode::NOT_FOUND, Html("<!doctype html><meta name=viewport content='width=device-width'><body style='font:18px sans-serif;padding:2em'>Following along is not open right now.")).into_response();
+    }
+    Html(FOLLOW_HTML).into_response()
+}
+
+async fn follow_ws(State(r): State<Arc<Remote>>, h: HeaderMap, up: WebSocketUpgrade) -> Response {
+    if !same_origin(&h) {
+        return fail(StatusCode::FORBIDDEN, "Wrong origin.");
+    }
+    if !r.follow_on() {
+        return fail(StatusCode::FORBIDDEN, "Following along is not open.");
+    }
+    if r.followers.load(std::sync::atomic::Ordering::Relaxed) >= MAX_FOLLOWERS {
+        return fail(StatusCode::SERVICE_UNAVAILABLE, "Too many phones are following along.");
+    }
+    up.on_upgrade(move |socket| push_public(r, socket))
+}
+
+/// The follow-along page: the public view on connect and on every change.
+async fn push_public(r: Arc<Remote>, mut socket: WebSocket) {
+    use std::sync::atomic::Ordering;
+    r.followers.fetch_add(1, Ordering::Relaxed);
+    let mut rx = r.tx.subscribe();
+    let send_now = |r: &Arc<Remote>| public_view(&r.host.snapshot(), r.follow_on()).to_string();
+    if socket.send(Message::Text(send_now(&r).into())).await.is_ok() {
+        let mut tick = tokio::time::interval(Duration::from_secs(20));
+        loop {
+            tokio::select! {
+                msg = rx.recv() => {
+                    let text = match msg {
+                        Ok(t) => serde_json::from_str::<serde_json::Value>(&t).map(|v| public_view(&v, r.follow_on()).to_string()).unwrap_or_else(|_| send_now(&r)),
+                        Err(broadcast::error::RecvError::Lagged(_)) => send_now(&r),
+                        Err(_) => break,
+                    };
+                    if socket.send(Message::Text(text.into())).await.is_err() || !r.follow_on() {
+                        break;
+                    }
+                }
+                _ = tick.tick() => {
+                    if !r.follow_on() || socket.send(Message::Ping(Vec::new().into())).await.is_err() {
+                        break;
+                    }
+                }
+                incoming = socket.recv() => if !matches!(incoming, Some(Ok(_))) { break },
+            }
+        }
+    }
+    r.followers.fetch_sub(1, Ordering::Relaxed);
+}
+
 /// Sends a full snapshot on connect and on every change; ends when the session is revoked.
 async fn push(r: Arc<Remote>, token: String, mut socket: WebSocket) {
     let mut rx = r.tx.subscribe();
@@ -451,6 +626,30 @@ async fn push(r: Arc<Remote>, token: String, mut socket: WebSocket) {
         }
     }
     let _ = socket.send(Message::Close(None)).await;
+}
+
+#[cfg(test)]
+mod follow_tests {
+    #[test]
+    fn phones_see_only_the_words_on_the_screens() {
+        let snap = serde_json::json!({
+            "item": { "kind": "song", "title": "MHB 1" }, "mode": "live", "slide_idx": 0,
+            "slides": [{ "label": "V1", "primary": ["O for a thousand tongues"], "second": ["Meenya ngyiram\u{e1}"], "chords": ["[G]O for"] }],
+            "service": [{ "title": "Sermon notes" }], "timer": { "label": "Sermon" }, "song_key": "G",
+        });
+        let v = super::public_view(&snap, true);
+        assert_eq!(v["title"], "MHB 1");
+        assert_eq!(v["slides"][0]["primary"][0], "O for a thousand tongues");
+        let text = v.to_string();
+        for private in ["Sermon notes", "chords", "timer", "service", "song_key", "[G]"] {
+            assert!(!text.contains(private), "{private} must not reach phones: {text}");
+        }
+        let blank = serde_json::json!({ "item": { "kind": "song", "title": "MHB 1" }, "mode": "blank", "slides": [{ "primary": ["x"] }] });
+        assert_eq!(super::public_view(&blank, true)["slides"].as_array().unwrap().len(), 0, "blank screens: nothing on phones");
+        let media = serde_json::json!({ "item": { "kind": "media", "title": "video.mp4" }, "mode": "live", "slides": [] });
+        assert!(super::public_view(&media, true)["title"].is_null());
+        assert_eq!(super::public_view(&snap, false), serde_json::json!({ "closed": true }), "closed unless switched on");
+    }
 }
 
 #[cfg(test)]
@@ -535,6 +734,24 @@ mod tests {
         r.revoke_all();
         let (c, _) = call(&app, "GET", "/api/snapshot", Some(&op), None, serde_json::json!(null)).await;
         assert_eq!(c, StatusCode::UNAUTHORIZED, "End of service signs every phone out");
+    }
+
+    #[tokio::test]
+    async fn button_boxes_need_the_control_key() {
+        let (r, fake, app) = app();
+        let (c, _) = call(&app, "POST", "/api/v1/next?key=anything", None, None, serde_json::json!({})).await;
+        assert_eq!(c, StatusCode::FORBIDDEN, "switched off until a key is made");
+        r.set_control_key(Some("k3y-for-the-media-desk-0001".into()));
+        let (c, _) = call(&app, "POST", "/api/v1/next?key=wrong", None, None, serde_json::json!({})).await;
+        assert_eq!(c, StatusCode::UNAUTHORIZED);
+        assert!(fake.0.lock().unwrap().is_empty(), "a wrong key does nothing");
+        for path in ["/api/v1/next", "/api/v1/go-live", "/api/v1/blank", "/api/v1/item/3"] {
+            let (c, _) = call(&app, "POST", &format!("{path}?key=k3y-for-the-media-desk-0001"), None, None, serde_json::json!({})).await;
+            assert_eq!(c, StatusCode::OK, "{path}");
+        }
+        assert_eq!(*fake.0.lock().unwrap(), vec![Command::Next, Command::GoLivePreview, Command::Blank, Command::GoLiveItem { index: 2 }], "item/3 counts from 1");
+        let (c, _) = call(&app, "POST", "/api/v1/explode?key=k3y-for-the-media-desk-0001", None, None, serde_json::json!({})).await;
+        assert_eq!(c, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

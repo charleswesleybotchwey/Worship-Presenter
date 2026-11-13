@@ -14,6 +14,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 mod ndi;
+mod midi;
 mod remote;
 mod music;
 mod fonts;
@@ -95,6 +96,7 @@ pub struct AppState {
     /// The latest live subtitle words and when they came (for the NDI renderer).
     caption_now: Mutex<(String, Option<Instant>)>,
     ndi_inputs: ndi::Inputs,
+    midi: midi::Midi,
     /// Output windows being built now (one build at a time per output).
     building: Mutex<std::collections::HashSet<String>>,
     /// When each output window was (re)built: the watchdog waits 15 s for it to load.
@@ -305,15 +307,16 @@ fn preview_scripture(st: State<'_, AppState>, reference: String, versions: Vec<S
 /// Sends an item to air at a slide.
 #[tauri::command(async)]
 fn go_live(app: AppHandle, st: State<'_, AppState>, item: ProgramItem, slide_idx: usize) -> Res<LiveState> {
+    // from Blank, Logo, Clear or a restart, Go live shows the new item (as EasyWorship does)
     let live0 = st.live.lock().unwrap().clone();
-    if live0.latched() {
-        return Err("Output is held (blank, logo or text cleared). Choose Resume output first.".into());
-    }
     let (slides, caption) = build_slides(&st.db.lock().unwrap(), &item, &live0)?;
     let idx = slide_idx.min(slides.len().saturating_sub(1));
     let pos = slides.get(idx).map(splitter::position_of);
     let mut next = live0.apply(Command::GoLive { item_idx: 0, slide_idx: idx, position: pos });
     next.slide_since_ms = cues::now_ms();
+    // Go live is the operator's deliberate "show this": outputs held black after being
+    // rebuilt come back with it
+    st.held.lock().unwrap().clear();
     // a different song starts in its written key on the stage view
     let same = st.item.lock().unwrap().as_ref().map_or(false, |cur| serde_json::to_value(cur).ok() == serde_json::to_value(&item).ok());
     if !same {
@@ -358,10 +361,8 @@ fn show_slide(app: AppHandle, st: State<'_, AppState>, slide_idx: Option<usize>,
     if n == 0 {
         return Err("Nothing is live. Send an item to Live first.".into());
     }
+    // behind Blank or Logo the slide still changes; the screens show it on Resume
     let cur = st.live.lock().unwrap().clone();
-    if cur.latched() {
-        return Err("Output is held. Choose Resume output to go back to the live slide.".into());
-    }
     let idx = match (slide_idx, delta) {
         (Some(i), _) => i.min(n - 1),
         (None, Some(d)) => (cur.slide_idx as i64 + d).clamp(0, n as i64 - 1) as usize,
@@ -474,6 +475,9 @@ async fn list_displays(app: AppHandle) -> Res<Vec<Display>> {
 /// it opens in a normal window on the control screen, so there is always a picture.
 #[tauri::command]
 async fn open_output(app: AppHandle, st: State<'_, AppState>, role: String, display_index: Option<usize>) -> Res<()> {
+    if let Some(f) = wp_core::options::output(&st.db.lock().unwrap(), &role).ok().and_then(|c| c.ndi) {
+        return start_ndi_output(&app, &role, f);
+    }
     // remember the monitor by index and name, so it is found again next time
     if let Ok(mut c) = wp_core::options::output(&st.db.lock().unwrap(), &role) {
         let name = display_index.and_then(|i| app.available_monitors().ok().and_then(|m| m.get(i).and_then(|m| m.name().cloned())));
@@ -894,6 +898,178 @@ fn themes_changed(app: &AppHandle, st: &AppState) {
 }
 
 /// Saves a theme (new when id is None); outputs pick up the change at once.
+// ---------- sync between church computers ----------
+
+fn setting_of(st: &AppState, key: &str) -> Option<String> {
+    st.db.lock().unwrap().query_row("SELECT value FROM setting WHERE key = ?1", [key], |r| r.get::<_, String>(0)).ok().filter(|v| !v.is_empty())
+}
+
+fn computer_name() -> String {
+    std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_else(|_| "this computer".into())
+}
+
+fn profile_name(st: &AppState) -> String {
+    st.profile.lock().unwrap().0.clone()
+}
+
+/// Shares this computer's library into the shared folder.
+fn sync_share(st: &AppState) -> Res<usize> {
+    let folder = setting_of(st, "sync_folder").ok_or("Choose the shared folder first.")?;
+    let n = wp_core::sync::share(&st.db.lock().unwrap(), &st.profile_dir().join("media"), std::path::Path::new(&folder), &profile_name(st), &computer_name()).map_err(err)?;
+    let now = cues::now_ms().to_string();
+    st.db.lock().unwrap().execute("INSERT OR REPLACE INTO setting (key, value) VALUES ('sync_shared_ms', ?1)", [&now]).map_err(err)?;
+    Ok(n)
+}
+
+/// Takes the shared library (a backup first; this computer's settings and outputs kept).
+fn sync_take(app: &AppHandle, st: &AppState) -> Res<String> {
+    let folder = setting_of(st, "sync_folder").ok_or("Choose the shared folder first.")?;
+    let db_path = st.profile_dir().join("library.db");
+    let mut g = st.db.lock().unwrap();
+    wp_core::backup::create(&g, &st.backups(), "before-sync").map_err(err)?;
+    let keep = wp_core::sync::local_rows(&g).map_err(err)?;
+    // close the library file before it is replaced, then open the new one
+    *g = rusqlite::Connection::open_in_memory().map_err(err)?;
+    let taken = wp_core::sync::take(std::path::Path::new(&folder), &profile_name(st), &st.profile_dir().join("media"), &db_path);
+    *g = wp_core::db::open(&db_path).map_err(err)?;
+    let m = taken.map_err(err)?;
+    wp_core::sync::restore_local_rows(&g, &keep).map_err(err)?;
+    g.execute("INSERT OR REPLACE INTO setting (key, value) VALUES ('sync_taken_ms', ?1)", [m.shared_ms.to_string()]).map_err(err)?;
+    drop(g);
+    let _ = app.emit("library-updated", &m.computer);
+    Ok(m.computer)
+}
+
+#[derive(Serialize)]
+struct SyncStatus {
+    folder: Option<String>,
+    role: Option<String>,
+    shared_ms: Option<i64>,
+    taken_ms: Option<i64>,
+    /// An update waiting from another computer: (its name, when).
+    waiting: Option<(String, i64)>,
+    computer: String,
+}
+
+#[tauri::command(async)]
+fn sync_status(st: State<'_, AppState>) -> SyncStatus {
+    let folder = setting_of(&st, "sync_folder");
+    let taken = setting_of(&st, "sync_taken_ms").and_then(|v| v.parse().ok());
+    let waiting = folder.as_deref().and_then(|f| wp_core::sync::waiting(std::path::Path::new(f), &profile_name(&st), taken.unwrap_or(0))).filter(|m| m.computer != computer_name()).map(|m| (m.computer, m.shared_ms));
+    SyncStatus { folder, role: setting_of(&st, "sync_role"), shared_ms: setting_of(&st, "sync_shared_ms").and_then(|v| v.parse().ok()), taken_ms: taken, waiting, computer: computer_name() }
+}
+
+#[tauri::command(async)]
+fn sync_set(st: State<'_, AppState>, folder: Option<String>, role: Option<String>) -> Res<()> {
+    let conn = st.db.lock().unwrap();
+    for (k, v) in [("sync_folder", folder), ("sync_role", role.filter(|r| r == "share" || r == "follow"))] {
+        match v {
+            Some(v) => conn.execute("INSERT OR REPLACE INTO setting (key, value) VALUES (?1, ?2)", [k, &v]).map_err(err)?,
+            None => conn.execute("DELETE FROM setting WHERE key = ?1", [k]).map_err(err)?,
+        };
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn sync_share_now(app: AppHandle) -> Res<usize> {
+    tauri::async_runtime::spawn_blocking(move || sync_share(&app.state::<AppState>())).await.map_err(err)?
+}
+
+#[tauri::command]
+async fn sync_take_now(app: AppHandle) -> Res<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let st = app.state::<AppState>();
+        if st.item.lock().unwrap().is_some() && st.live.lock().unwrap().mode == Mode::Live {
+            return Err("Something is live: update after the service (or press Blank first).".into());
+        }
+        sync_take(&app, &st)
+    })
+    .await
+    .map_err(err)?
+}
+
+/// eBible.org's freely shareable Bibles (needs internet).
+#[tauri::command]
+async fn bible_catalogue() -> Res<Vec<wp_core::import::vpl::Offer>> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let bytes = speech::download("https://ebible.org/Scriptures/translations.csv", &|_| {}, "the list of Bibles")?;
+        let list = wp_core::import::vpl::catalogue(&String::from_utf8_lossy(&bytes));
+        if list.is_empty() {
+            return Err("The list of Bibles could not be read. Try again later.".into());
+        }
+        Ok(list)
+    })
+    .await
+    .map_err(err)?
+}
+
+/// Downloads one Bible from eBible.org and adds it to the library (a backup first).
+#[tauri::command]
+async fn bible_download(app: AppHandle, id: String, code: String, title: String, lang: String) -> Res<usize> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') || id.is_empty() {
+            return Err("Unknown Bible.".to_string());
+        }
+        let st = app.state::<AppState>();
+        let progress = |m: String| *st.speech.install.lock().unwrap() = Some(m);
+        let result = (|| -> Result<usize, String> {
+            let bytes = speech::download(&format!("https://ebible.org/Scriptures/{id}_vpl.zip"), &progress, &title)?;
+            let text = wp_core::import::vpl::text_of(&bytes).map_err(err)?;
+            let conn = st.db.lock().unwrap();
+            wp_core::backup::create(&conn, &st.backups(), "before-import").map_err(err)?;
+            let r = wp_core::import::vpl::import(&conn, &text, &code, &title, &lang, &format!("{id}_vpl.zip")).map_err(err)?;
+            Ok(r.read)
+        })();
+        *st.speech.install.lock().unwrap() = None;
+        result
+    })
+    .await
+    .map_err(err)?
+}
+
+/// "My collections" for scripture readings and media.
+#[tauri::command(async)]
+fn item_collections(st: State<'_, AppState>, kind: String) -> Res<Vec<wp_core::item_collections::ItemCollection>> {
+    wp_core::item_collections::list(&st.db.lock().unwrap(), &kind).map_err(err)
+}
+#[tauri::command(async)]
+fn item_collection_create(st: State<'_, AppState>, kind: String, name: String) -> Res<i64> {
+    wp_core::item_collections::create(&st.db.lock().unwrap(), &kind, &name).map_err(err)
+}
+#[tauri::command(async)]
+fn item_collection_rename(st: State<'_, AppState>, id: i64, name: String) -> Res<()> {
+    wp_core::item_collections::rename(&st.db.lock().unwrap(), id, &name).map_err(err)
+}
+#[tauri::command(async)]
+fn item_collection_delete(st: State<'_, AppState>, id: i64) -> Res<()> {
+    wp_core::item_collections::delete(&st.db.lock().unwrap(), id).map_err(err)
+}
+#[tauri::command(async)]
+fn item_collection_add(st: State<'_, AppState>, id: i64, item: serde_json::Value) -> Res<()> {
+    wp_core::item_collections::add(&st.db.lock().unwrap(), id, &item).map_err(err)
+}
+#[tauri::command(async)]
+fn item_collection_remove(st: State<'_, AppState>, id: i64, item: serde_json::Value) -> Res<()> {
+    wp_core::item_collections::remove(&st.db.lock().unwrap(), id, &item).map_err(err)
+}
+#[tauri::command(async)]
+fn item_collection_items(st: State<'_, AppState>, id: i64) -> Res<Vec<serde_json::Value>> {
+    wp_core::item_collections::items(&st.db.lock().unwrap(), id).map_err(err)
+}
+
+/// A sermon outline turned into slides (not saved: the operator checks them first).
+#[tauri::command(async)]
+fn outline_deck(st: State<'_, AppState>, text: String, version: String) -> Res<wp_core::announcements::Deck> {
+    wp_core::outline::to_deck(&st.db.lock().unwrap(), &text, &version).map_err(err)
+}
+
+/// The quick box's hymn numbers ("555", "MHB 555").
+#[tauri::command(async)]
+fn quick_song(st: State<'_, AppState>, typed: String) -> Res<Vec<wp_core::library::SongHit>> {
+    wp_core::library::quick_song(&st.db.lock().unwrap(), &typed).map_err(err)
+}
+
 /// The starter gallery of ready-made themes.
 #[tauri::command(async)]
 fn theme_gallery() -> Vec<serde_json::Value> {
@@ -1023,7 +1199,7 @@ fn identify_output(app: AppHandle, role: String) {
 }
 
 /// Settings the core uses; only these keys can be written.
-const SETTINGS: &[&str] = &["project_on_restart", "low_spec_mode", "lines_per_slide", "advance_after_go_live", "font_fallback", "speech_engine", "speech_mic", "speech_refs_only", "logo_media_id", "brand_colors", "brand_font", "brand_heading_font"];
+const SETTINGS: &[&str] = &["project_on_restart", "low_spec_mode", "lines_per_slide", "advance_after_go_live", "font_fallback", "speech_engine", "speech_mic", "speech_refs_only", "speech_whisper_model", "quick_hymnal", "logo_media_id", "brand_colors", "brand_font", "brand_heading_font"];
 
 #[tauri::command(async)]
 fn get_settings(st: State<'_, AppState>) -> Res<std::collections::HashMap<String, String>> {
@@ -1382,9 +1558,15 @@ fn output_config(st: State<'_, AppState>, role: String) -> Res<wp_core::options:
 async fn save_output_config(app: AppHandle, config: wp_core::options::OutputConfig) -> Res<()> {
     let st = app.state::<AppState>();
     wp_core::options::save_output(&st.db.lock().unwrap(), &config).map_err(err)?;
-    let open = st.outputs.lock().unwrap().get(&config.role).copied();
-    if let Some(display) = open {
-        build_output(&app, &config.role, display)?;
+    if let Some(f) = config.ndi {
+        // EasyWorship's "NDI Stream" output monitor: no window, sent over NDI
+        start_ndi_output(&app, &config.role, f)?;
+    } else {
+        stop_ndi_output(&app, &config.role);
+        let open = st.outputs.lock().unwrap().get(&config.role).copied();
+        if let Some(display) = open {
+            build_output(&app, &config.role, display)?;
+        }
     }
     let _ = app.emit("output-config-changed", config.role.clone());
     Ok(())
@@ -1471,7 +1653,12 @@ async fn search_bible(app: AppHandle, versions: Vec<String>, query: String) -> R
     tauri::async_runtime::spawn_blocking(move || {
         let st = app.state::<AppState>();
         let conn = st.db.lock().unwrap();
-        wp_core::browse::search_bible(&conn, &versions, &query, 200).map_err(err)
+        // one Bible chosen: its own words, else English words shown in that Bible
+        if versions.len() == 1 {
+            wp_core::browse::search_bible_in(&conn, &versions[0], &query, 200).map_err(err)
+        } else {
+            wp_core::browse::search_bible(&conn, &versions, &query, 200).map_err(err)
+        }
     })
     .await
     .map_err(err)?
@@ -1695,6 +1882,168 @@ fn pct_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// What a full-screen output sent over NDI shows (the same choices as its window would
+/// make): the item's theme, else the output's, else the rules', else the default; Blank,
+/// Logo and Clear; pictures, presentation slides, and a video's preview picture.
+pub(crate) fn full_content(st: &AppState, role: &str) -> (wp_render::Content, serde_json::Value, String, bool) {
+    let (mut c, _lt, _sig, _clock) = ndi_content(st);
+    let live = st.live.lock().unwrap().clone();
+    let item = st.item.lock().unwrap().clone();
+    let slides = st.slides.lock().unwrap().clone();
+    let caption = st.caption.lock().unwrap().clone();
+    let rev = *st.theme_rev.lock().unwrap();
+    let conn = st.db.lock().unwrap();
+    let cfg = wp_core::options::output(&conn, role).ok();
+    let setting = |k: &str| conn.query_row("SELECT value FROM setting WHERE key = ?1", [k], |r| r.get::<_, String>(0)).ok();
+    let brand = wp_render::Brand::from_settings(setting("brand_colors").as_deref(), setting("brand_font").as_deref(), setting("brand_heading_font").as_deref());
+    let picture = |path: &str, fit: &str| serde_json::json!({ "background": { "kind": "image", "color": "#000000", "image": format!("media:{path}"), "fit": fit, "dim": 0 }, "layers": [] });
+    let black = serde_json::json!({ "background": { "kind": "color", "color": "#000000" }, "layers": [] });
+    let clear = serde_json::json!({ "background": { "kind": "transparent" }, "layers": [] });
+    let alpha = cfg.as_ref().map_or(false, |c| c.alpha);
+    let mut theme = match live.mode {
+        Mode::Blank => {
+            if cfg.as_ref().map_or(false, |c| c.on_blank == "transparent") || alpha { clear.clone() } else { black.clone() }
+        }
+        Mode::Logo => {
+            let logo = setting("logo_media_id").and_then(|id| id.parse::<i64>().ok()).and_then(|id| wp_core::media::get(&conn, &st.profile_dir().join("media"), id).ok());
+            match logo {
+                Some(m) if m.kind == "image" => picture(&m.path, "cover"),
+                Some(m) => m.thumb.as_deref().map(|t| picture(t, "cover")).unwrap_or_else(|| black.clone()),
+                None => black.clone(),
+            }
+        }
+        _ => match &item {
+            Some(ProgramItem::Song { song_id, theme_id, .. }) => {
+                let id = theme_id.or(cfg.as_ref().and_then(|c| c.song_theme_id)).or_else(|| wp_core::theme_rules::for_song(&conn, *song_id).ok().flatten());
+                id.and_then(|i| wp_core::themes::get(&conn, i).ok()).or_else(|| wp_core::themes::for_kind(&conn, "song").ok()).unwrap_or(black.clone())
+            }
+            Some(ProgramItem::Scripture { versions, theme_id, .. }) => {
+                let id = theme_id.or(cfg.as_ref().and_then(|c| c.scripture_theme_id)).or_else(|| wp_core::theme_rules::for_scripture(&conn, versions).ok().flatten());
+                id.and_then(|i| wp_core::themes::get(&conn, i).ok()).or_else(|| wp_core::themes::for_kind(&conn, "scripture").ok()).unwrap_or(black.clone())
+            }
+            Some(ProgramItem::Announcement { .. }) => {
+                let s = slides.get(live.slide_idx);
+                match s.and_then(|s| s.image.clone()) {
+                    Some(img) => picture(&img, "contain"),
+                    None => {
+                        if let Some(s) = s {
+                            c.primary = s.primary.clone();
+                            c.title = caption.clone();
+                        }
+                        wp_core::themes::for_kind(&conn, "announcement").unwrap_or(black.clone())
+                    }
+                }
+            }
+            Some(ProgramItem::Media { media_id, .. }) => match wp_core::media::get(&conn, &st.profile_dir().join("media"), *media_id) {
+                Ok(m) => {
+                    let fit = if m.fit.as_deref() == Some("fill") { "cover" } else { "contain" };
+                    match m.kind.as_str() {
+                        "image" => picture(&m.path, fit),
+                        // the built-in renderer sends still pictures: a video shows its preview
+                        "video" => m.thumb.as_deref().map(|t| picture(t, fit)).unwrap_or(black.clone()),
+                        _ => black.clone(),
+                    }
+                }
+                Err(_) => black.clone(),
+            },
+            None => black.clone(),
+        },
+    };
+    drop(conn);
+    // the full-screen look shows song and scripture words (the lower-third rules aside)
+    if matches!(live.mode, Mode::Live | Mode::Clear) {
+        if let (Some(ProgramItem::Song { .. }) | Some(ProgramItem::Scripture { .. }), Some(s)) = (&item, slides.get(live.slide_idx)) {
+            c.primary = s.primary.clone();
+            c.second = s.second.clone();
+        }
+    }
+    if alpha {
+        theme["background"] = serde_json::json!({ "kind": "transparent" });
+    }
+    let theme = brand.resolve(&theme);
+    let has_clock = theme.to_string().contains("\"clock\"");
+    let sig = format!("{}|{}|{:?}|{}|{:?}|{:?}|{}|{}|{}", live.revision, rev, live.mode, brand.key(), c.primary, c.alert, c.text_scale, c.text_shift, theme.to_string().len());
+    (c, theme, sig, has_clock)
+}
+
+/// Starts (or restarts) an output as an NDI stream, closing its window if it had one.
+fn start_ndi_output(app: &AppHandle, role: &str, f: wp_core::options::NdiFormat) -> Res<()> {
+    let st = app.state::<AppState>();
+    st.outputs.lock().unwrap().remove(role);
+    st.acks.lock().unwrap().remove(role);
+    if let Some(w) = app.get_webview_window(&format!("output-{role}")) {
+        let _ = w.destroy();
+    }
+    let name = match role {
+        "main" => "Worship Presenter Main",
+        "alternate" => "Worship Presenter Alternate",
+        _ => "Worship Presenter Foldback",
+    };
+    let key = format!("out-{role}");
+    let (slot, stats, stop) = st.ndi.start_pump(&key, name, None, f.fps)?;
+    // the alternate output is the lower-third look: built-in renderer, exact transparency
+    if role == "alternate" {
+        ndi::run_builtin_as(app.clone(), slot, stats, stop, None, f.width, f.height);
+        return Ok(());
+    }
+    // full screen: like FreeShow, send the real output page (videos, animations, camera)
+    #[cfg(windows)]
+    {
+        match ndi_window(app, role, f) {
+            Ok(hwnd) => match ndi::capture::start(hwnd, slot.clone(), stats.clone(), false) {
+                Ok(running) => {
+                    if let Some(j) = st.ndi.jobs.lock().unwrap().get_mut(&key) {
+                        j.capture = Some(running);
+                    }
+                    return Ok(());
+                }
+                Err(e) => eprintln!("NDI window capture failed, using the built-in renderer: {e}"),
+            },
+            Err(e) => eprintln!("NDI window failed, using the built-in renderer: {e}"),
+        }
+    }
+    ndi::run_builtin_as(app.clone(), slot, stats, stop, Some(role.to_string()), f.width, f.height);
+    Ok(())
+}
+
+/// The output page for an NDI stream: a real output window at the NDI size, off the
+/// visible desktop and out of the taskbar (WebView2 has no off-screen painting, so it is
+/// captured instead; the flags in BROWSER_ARGS keep it from being throttled).
+#[cfg(windows)]
+fn ndi_window(app: &AppHandle, role: &str, f: wp_core::options::NdiFormat) -> Res<*mut std::ffi::c_void> {
+    let label = format!("output-ndi-{role}");
+    if let Some(w) = app.get_webview_window(&label) {
+        let _ = w.destroy();
+        let t = Instant::now();
+        while app.get_webview_window(&label).is_some() && t.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    let w = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(format!("index.html#/output/{role}").into()))
+        .additional_browser_args(BROWSER_ARGS)
+        .title(format!("Worship Presenter – NDI {role}"))
+        .decorations(false)
+        .resizable(false)
+        .skip_taskbar(true)
+        .focused(false)
+        .inner_size(f.width as f64, f.height as f64)
+        .position(-20000.0, 0.0)
+        .build()
+        .map_err(err)?;
+    let _ = w.set_size(tauri::PhysicalSize::new(f.width, f.height));
+    let _ = w.set_position(tauri::PhysicalPosition::new(-20000, 0));
+    // give the page a moment to load before frames are taken
+    std::thread::sleep(Duration::from_millis(800));
+    Ok(w.hwnd().map_err(err)?.0 as *mut std::ffi::c_void)
+}
+
+fn stop_ndi_output(app: &AppHandle, role: &str) {
+    app.state::<AppState>().ndi.stop(&format!("out-{role}"));
+    if let Some(w) = app.get_webview_window(&format!("output-ndi-{role}")) {
+        let _ = w.destroy();
+    }
+}
+
 /// "V2" → "Verse 2", "C" → "Chorus" (as the screens label sections).
 fn section_name(label: &str) -> String {
     let letters: String = label.chars().take_while(|c| c.is_ascii_alphabetic()).collect();
@@ -1803,6 +2152,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
         .item(&item("file.service", "&Open or start a service order…", "")?)
         .item(&item("file.import", "&Import songs or Bibles…", "")?)
         .item(&item("file.backups", "&Backups…", "")?)
+        .item(&item("file.print-order", "&Print the service order…", "Ctrl+P")?)
         .separator()
         .item(&item("file.outputs", "Output &setup…", "")?)
         .item(&item("file.settings", "Se&ttings", "")?)
@@ -1950,7 +2300,10 @@ fn set_repeat(app: AppHandle, st: State<'_, AppState>, label: Option<String>, to
 /// Browser arguments for every window (they must match across windows). Tauri's
 /// defaults, plus camera access for the app's own pages without a prompt that would
 /// appear on the projector (only the app's code runs there: see the CSP).
-pub(crate) const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --use-fake-ui-for-media-stream --disable-pinch";
+/// The same for every window (WebView2 windows share one engine). As FreeShow does for its
+/// NDI windows (backgroundThrottling off, autoplay without a click): output windows that
+/// are covered, minimised or off the desktop keep playing videos and animations.
+pub(crate) const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion --use-fake-ui-for-media-stream --disable-pinch --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows --autoplay-policy=no-user-gesture-required";
 
 /// The Live pane's quick change: words larger/smaller and up/down for this item only.
 #[tauri::command(async)]
@@ -2220,6 +2573,7 @@ pub fn run() {
                 pulpit: Mutex::new(Default::default()),
                 caption_now: Mutex::new((String::new(), None)),
                 ndi_inputs: ndi::Inputs::default(),
+                midi: midi::Midi::default(),
                 building: Mutex::new(Default::default()),
                 born: Mutex::new(HashMap::new()),
                 seen: Mutex::new(Default::default()),
@@ -2254,7 +2608,39 @@ pub fn run() {
                         }
                     }
                 }
-                for c in cfgs.into_iter().filter(|c| c.show_on_startup) {
+                // sync: a following computer takes a waiting update before anything is shown;
+                // a sharing computer shares now and every 30 minutes
+                match setting_of(&st, "sync_role").as_deref() {
+                    Some("follow") => {
+                        let taken = setting_of(&st, "sync_taken_ms").and_then(|v| v.parse().ok()).unwrap_or(0);
+                        let waiting = setting_of(&st, "sync_folder").and_then(|f| wp_core::sync::waiting(std::path::Path::new(&f), &profile_name(&st), taken));
+                        if waiting.is_some_and(|m| m.computer != computer_name()) {
+                            let _ = sync_take(&h2, &st);
+                        }
+                    }
+                    Some("share") => {
+                        let h = h2.clone();
+                        std::thread::spawn(move || loop {
+                            std::thread::sleep(Duration::from_secs(20));
+                            let st = h.state::<AppState>();
+                            if setting_of(&st, "sync_role").as_deref() != Some("share") {
+                                break;
+                            }
+                            let _ = sync_share(&st);
+                            std::thread::sleep(Duration::from_secs(30 * 60));
+                        });
+                    }
+                    _ => {}
+                }
+                // the MIDI pads chosen last time
+                let midi_port: Option<String> = st.db.lock().unwrap().query_row("SELECT value FROM setting WHERE key = 'midi_port'", [], |r| r.get(0)).ok();
+                if let Some(p) = midi_port {
+                    let _ = midi::connect(&h2, &p);
+                }
+                for c in cfgs.iter().filter(|c| c.ndi.is_some()) {
+                    let _ = start_ndi_output(&h2, &c.role, c.ndi.unwrap());
+                }
+                for c in cfgs.into_iter().filter(|c| c.show_on_startup && c.ndi.is_none()) {
                     if let Some(i) = wp_core::options::pick_display(&c, &names) {
                         st.outputs.lock().unwrap().insert(c.role.clone(), Some(i));
                         st.acks.lock().unwrap().insert(c.role.clone(), (Instant::now(), 0));
@@ -2406,6 +2792,9 @@ pub fn run() {
             speech::speech_dismiss,
             speech::speech_mics,
             speech::speech_install_vosk,
+            speech::speech_install_whisper,
+            speech::speech_test_recording,
+            speech::speech_save_notes,
             presentation_import,
             presentation_page,
             presentation_finish,
@@ -2442,6 +2831,14 @@ pub fn run() {
             remote::remote_status,
             remote::remote_start,
             remote::remote_stop,
+            remote::remote_follow,
+            remote::remote_control_key,
+            midi::midi_ports,
+            midi::midi_use,
+            midi::midi_learn,
+            midi::midi_status,
+            midi::midi_forget,
+            remote::remote_control_key_get,
             remote::remote_new_pin,
             remote::remote_revoke,
             remote::remote_end_all,
@@ -2456,6 +2853,21 @@ pub fn run() {
             set_media_options,
             theme_rules,
             theme_gallery,
+            quick_song,
+            outline_deck,
+            item_collections,
+            bible_catalogue,
+            sync_status,
+            sync_set,
+            sync_share_now,
+            sync_take_now,
+            bible_download,
+            item_collection_create,
+            item_collection_rename,
+            item_collection_delete,
+            item_collection_add,
+            item_collection_remove,
+            item_collection_items,
             save_theme_rules,
             resolve_theme,
             reveal_media,

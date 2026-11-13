@@ -586,6 +586,12 @@ export function AnnouncementList({
           <button role="menuitem" onClick={() => (setMenu(null), onNew(null))}>
             Blank
           </button>
+          <button role="menuitem" onClick={() => (setMenu(null), window.dispatchEvent(new CustomEvent("wp-outline")))}>
+            From a sermon outline…
+          </button>
+          <button role="menuitem" onClick={() => (setMenu(null), window.dispatchEvent(new CustomEvent("wp-offering")))}>
+            Offering slide (MoMo, QR)…
+          </button>
           {templates.map((t) => (
             <button key={t.title} role="menuitem" onClick={() => (setMenu(null), onNew(t))}>
               From the pack: {t.title}

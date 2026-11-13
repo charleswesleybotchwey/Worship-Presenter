@@ -19,7 +19,7 @@
         "minWidth": 1280,
         "minHeight": 720,
         "url": "index.html#/control",
-        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --use-fake-ui-for-media-stream --disable-pinch",
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion --use-fake-ui-for-media-stream --disable-pinch --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows --autoplay-policy=no-user-gesture-required",
         "visible": false,
         "backgroundColor": "#191918",
         "zoomHotkeysEnabled": false,

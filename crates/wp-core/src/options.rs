@@ -43,10 +43,23 @@ pub struct OutputConfig {
     /// blank | transparent | ignore
     pub on_blank: String,
     pub show_on_startup: bool,
+    /// EasyWorship's "NDI Stream" output monitor: this output is sent over NDI in this
+    /// format instead of opening on a monitor (None = a monitor or custom position).
+    #[serde(default)]
+    pub ndi: Option<NdiFormat>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct NdiFormat {
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
 }
 
 #[derive(Serialize, Deserialize, Default)]
 struct Extra {
+    #[serde(default)]
+    ndi: Option<NdiFormat>,
     display_index: Option<usize>,
     custom: Option<Rect>,
     #[serde(default)]
@@ -81,6 +94,7 @@ pub fn outputs(conn: &Connection) -> Result<Vec<OutputConfig>> {
                 on_logo: r.get(4)?,
                 on_blank: r.get(5)?,
                 show_on_startup: extra.show_on_startup,
+                ndi: extra.ndi,
             })
         })?
         .collect::<std::result::Result<_, _>>()?;
@@ -104,7 +118,14 @@ pub fn save_output(conn: &Connection, c: &OutputConfig) -> Result<()> {
     if !["logo", "blank", "transparent", "ignore"].contains(&c.on_logo.as_str()) || !["blank", "transparent", "ignore"].contains(&c.on_blank.as_str()) {
         return Err(bad("Unknown logo or blank behaviour."));
     }
+    if let Some(f) = c.ndi {
+        let ok = matches!((f.width, f.height), (1280, 720) | (1920, 1080) | (1024, 768) | (3840, 2160)) && matches!(f.fps, 24 | 25 | 30 | 50 | 60);
+        if !ok {
+            return Err(bad("Choose one of the listed NDI formats."));
+        }
+    }
     let extra = Extra {
+        ndi: c.ndi,
         display_index: c.display_index,
         custom: c.custom,
         margins: c.margins,
@@ -259,6 +280,21 @@ pub fn usage_csv(rows: &[UsageRow]) -> String {
 }
 
 #[cfg(test)]
+mod ndi_tests {
+    #[test]
+    fn ndi_stream_is_kept_with_the_output() {
+        let c = crate::db::open_memory().unwrap();
+        let mut main = super::output(&c, "main").unwrap();
+        assert_eq!(main.ndi, None);
+        main.ndi = Some(super::NdiFormat { width: 1280, height: 720, fps: 60 });
+        super::save_output(&c, &main).unwrap();
+        assert_eq!(super::output(&c, "main").unwrap().ndi, Some(super::NdiFormat { width: 1280, height: 720, fps: 60 }));
+        main.ndi = Some(super::NdiFormat { width: 777, height: 720, fps: 60 });
+        assert!(super::save_output(&c, &main).is_err());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -288,6 +324,7 @@ mod tests {
         let mut c = OutputConfig {
             role: "main".into(), name: "Main".into(), display_index: Some(1), display_name: Some("EPSON PJ".into()), custom: None,
             margins: Margins::default(), alpha: false, song_theme_id: None, scripture_theme_id: None, on_logo: "logo".into(), on_blank: "blank".into(), show_on_startup: true,
+            ndi: None,
         };
         let now = vec!["EPSON PJ".to_string(), "Laptop".to_string()];
         assert_eq!(pick_display(&c, &now), Some(0), "renumbered: found by name");

@@ -47,6 +47,45 @@ pub fn search_songs(conn: &Connection, query: &str, limit: usize) -> Result<Vec<
     hits(conn, ids)
 }
 
+/// The quick box's hymn numbers: "555" (the main hymnbook), "MHB 555", "mhb555",
+/// "ncan 12". Returns nothing for anything else (so "John 3" stays scripture). Where a
+/// number has an English and a bilingual song, the one with more languages comes first.
+pub fn quick_song(conn: &Connection, typed: &str) -> Result<Vec<SongHit>> {
+    let t = typed.trim();
+    let split = t.find(|c: char| c.is_ascii_digit()).unwrap_or(t.len());
+    let (code, num) = (t[..split].trim(), t[split..].trim());
+    if num.is_empty() || !num.chars().next().unwrap().is_ascii_digit() || !num.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Ok(vec![]);
+    }
+    let code: String = if code.is_empty() {
+        // the chosen main hymnbook, else the one with the most songs
+        let chosen: Option<String> = conn.query_row("SELECT value FROM setting WHERE key = 'quick_hymnal'", [], |r| r.get(0)).ok();
+        match chosen.filter(|c| !c.is_empty()) {
+            Some(c) => c,
+            None => match conn
+                .query_row("SELECT h.code FROM hymnal h JOIN song_number n ON n.hymnal_id = h.id GROUP BY h.id ORDER BY count(*) DESC LIMIT 1", [], |r| r.get(0))
+                .ok()
+            {
+                Some(c) => c,
+                None => return Ok(vec![]),
+            },
+        }
+    } else {
+        let known: Option<String> = conn.query_row("SELECT code FROM hymnal WHERE upper(code) = upper(?1)", [code], |r| r.get(0)).ok();
+        match known {
+            Some(c) => c,
+            None => return Ok(vec![]), // not a hymnbook: a Bible book perhaps
+        }
+    };
+    let mut st = conn.prepare(
+        "SELECT n.song_id FROM song_number n JOIN hymnal h ON h.id = n.hymnal_id
+         WHERE h.code = ?1 AND upper(n.number) = upper(?2)
+         ORDER BY (SELECT count(DISTINCT lang) FROM song_lyric l WHERE l.song_id = n.song_id) DESC, n.song_id",
+    )?;
+    let ids: Vec<i64> = st.query_map(params![code, num], |r| r.get(0))?.filter_map(|r| r.ok()).collect();
+    hits(conn, ids)
+}
+
 fn hits(conn: &Connection, ids: Vec<i64>) -> Result<Vec<SongHit>> {
     let mut out = Vec::new();
     for id in ids {
@@ -165,3 +204,44 @@ pub fn lookup(conn: &Connection, typed: &str, version_codes: &[&str]) -> Result<
     };
     Ok(Passage { display: format!("{display_name} {span}"), reference: r, verses })
 }
+
+#[cfg(test)]
+mod quick_tests {
+    use super::*;
+
+    fn song(c: &Connection, title: &str, code: &str, num: &str, langs: &[&str]) {
+        let d = crate::songs::SongDoc {
+            id: None,
+            title: title.into(),
+            author: None,
+            copyright: None,
+            ccli: None,
+            numbers: vec![crate::songs::Number { hymnal: code.into(), number: num.into() }],
+            lyrics: langs.iter().map(|l| crate::songs::Lyric { lang: (*l).into(), body: "[V1]\nline".into() }).collect(),
+            sequence: String::new(),
+            lines_per_slide: None,
+            key: None,
+        };
+        crate::songs::save(c, &d).unwrap();
+    }
+
+    #[test]
+    fn hymn_numbers_in_the_quick_box() {
+        let c = crate::db::open_memory().unwrap();
+        song(&c, "MHB 555", "MHB", "555", &["en"]);
+        song(&c, "MHB 555, ENG&FANTE", "MHB", "555", &["en", "fat"]);
+        song(&c, "MHB 1", "MHB", "1", &["en"]);
+        song(&c, "NCAN 12", "NCAN", "12", &["en"]);
+        let t = |q: &str| quick_song(&c, q).unwrap().into_iter().map(|h| h.title).collect::<Vec<_>>();
+        assert_eq!(t("555"), vec!["MHB 555, ENG&FANTE", "MHB 555"], "bare number: the main hymnbook, bilingual first");
+        assert_eq!(t("MHB 555")[0], "MHB 555, ENG&FANTE");
+        assert_eq!(t("mhb555")[0], "MHB 555, ENG&FANTE");
+        assert_eq!(t("ncan 12"), vec!["NCAN 12"]);
+        assert!(t("John 3").is_empty(), "a Bible book is not a hymnbook");
+        assert!(t("Yohane 3:16").is_empty());
+        assert!(t("9999").is_empty());
+        c.execute("INSERT INTO setting (key, value) VALUES ('quick_hymnal', 'NCAN')", []).unwrap();
+        assert_eq!(t("12"), vec!["NCAN 12"], "the chosen main hymnbook");
+    }
+}
+

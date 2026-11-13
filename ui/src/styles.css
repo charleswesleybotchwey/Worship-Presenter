@@ -520,3 +520,29 @@ p { margin: 0; }
 .te__safe-title { inset: 10%; border-color: rgba(120, 200, 255, 0.6); }
 .te__issues { display: grid; gap: 4px; margin-top: 8px; }
 .te__issue { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 6px 10px; border-radius: 6px; background: rgba(255, 170, 0, 0.12); border: 1px solid rgba(255, 170, 0, 0.4); font-size: 13px; }
+/* the stage display shown in the Live monitor: fill the monitor, not the window */
+.wp-live-surface .stage-view { position: absolute; inset: 0; }
+.wp-live-surface .wp-monitor { position: relative; }
+.wp-live-surface .wp-monitor:has(> .stage-view) { aspect-ratio: 16 / 9; width: 100%; }
+
+/* printing (song sheets, chord charts, service order, usage report) */
+#print-root { display: none; }
+@media print {
+  body.is-printing > *:not(#print-root) { display: none !important; }
+  body.is-printing #print-root { display: block; color: #000; background: #fff; font: 11pt/1.4 "Noto Sans", "Segoe UI", sans-serif; padding: 0; }
+  #print-root h1 { font-size: 18pt; margin: 0 0 4pt; }
+  #print-root h2 { font-size: 12pt; margin: 0 0 6pt; color: #444; }
+  .pr-meta { color: #555; font-size: 9pt; margin: 0 0 10pt; }
+  .pr-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(0, 1fr)); gap: 18pt; }
+  .pr-sec { break-inside: avoid; margin: 0 0 10pt; }
+  .pr-label { font-weight: 700; font-size: 9pt; text-transform: uppercase; color: #666; margin-bottom: 2pt; }
+  #print-root p { margin: 0; }
+  .pr-chart { font-size: 13pt; }
+  .pr-chordline { display: flex; flex-wrap: wrap; align-items: flex-end; margin: 2pt 0 !important; }
+  .pr-piece { display: inline-flex; flex-direction: column; white-space: pre; }
+  .pr-piece b { font-size: 10pt; color: #000; }
+  .pr-order { font-size: 13pt; line-height: 1.8; }
+  .pr-kind { display: inline-block; width: 90pt; color: #666; font-size: 9pt; text-transform: uppercase; }
+  .pr-table { width: 100%; border-collapse: collapse; font-size: 10pt; }
+  .pr-table th, .pr-table td { border-bottom: 1px solid #bbb; padding: 3pt 6pt; text-align: left; }
+}

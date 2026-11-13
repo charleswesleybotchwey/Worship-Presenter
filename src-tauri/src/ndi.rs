@@ -183,6 +183,12 @@ pub mod capture {
 /// The built-in renderer feeding NDI: draws the lower third whenever what it shows
 /// changes (and each second for a clock), with exact transparency and no window.
 pub fn run_builtin(app: tauri::AppHandle, slot: Arc<Slot>, stats: Arc<Stats>, stop: Arc<AtomicBool>) {
+    run_builtin_as(app, slot, stats, stop, None, 1920, 1080)
+}
+
+/// The built-in renderer for an output sent as an NDI stream (EasyWorship's "NDI Stream"
+/// output monitor): `role` None is the lower third; Some("main") the full screen.
+pub fn run_builtin_as(app: tauri::AppHandle, slot: Arc<Slot>, stats: Arc<Stats>, stop: Arc<AtomicBool>, role: Option<String>, width: u32, height: u32) {
     use tauri::Manager;
     std::thread::Builder::new()
         .name("ndi-render".into())
@@ -192,11 +198,14 @@ pub fn run_builtin(app: tauri::AppHandle, slot: Arc<Slot>, stats: Arc<Stats>, st
             let mut last_at = Instant::now();
             while !stop.load(Ordering::Relaxed) {
                 let Some(st) = app.try_state::<crate::AppState>() else { break };
-                let (content, theme, sig, clock) = crate::ndi_content(&st);
+                let (content, theme, sig, clock) = match role.as_deref() {
+                    Some(r) => crate::full_content(&st, r),
+                    None => crate::ndi_content(&st),
+                };
                 if sig != last || (clock && last_at.elapsed().as_secs() >= 1) {
                     let t = Instant::now();
-                    let data = r.render(&theme, &content, 1920, 1080, &st.profile_dir().join("media"));
-                    slot.put(pump::Frame { width: 1920, height: 1080, data });
+                    let data = r.render(&theme, &content, width, height, &st.profile_dir().join("media"));
+                    slot.put(pump::Frame { width, height, data });
                     stats.captured.fetch_add(1, Ordering::Relaxed);
                     stats.process_us.store(t.elapsed().as_micros() as u64, Ordering::Relaxed);
                     last = sig;

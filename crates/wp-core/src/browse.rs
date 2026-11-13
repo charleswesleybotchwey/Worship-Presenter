@@ -250,6 +250,10 @@ pub struct VerseHit {
     pub chapter: u16,
     pub verse: u16,
     pub text: String,
+    /// The Bible the words were found in, when the verse is shown from another one (English
+    /// words typed while a Fante Bible is chosen: found in NKJV, shown in Fante).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub found_in: Option<String>,
 }
 
 /// Fills the word index for one Bible the first time it is searched (about a second).
@@ -303,7 +307,7 @@ pub fn search_bible(conn: &Connection, versions: &[String], query: &str, limit: 
         let rows = st.query_map(params![fts, vid, limit as i64], |r| {
             let (b, c, v): (u16, u16, u16) = (r.get(0)?, r.get(1)?, r.get(2)?);
             let name: String = r.get(4)?;
-            Ok(VerseHit { version: code.clone(), reference: format!("{name} {c}:{v}"), book_no: b, chapter: c, verse: v, text: r.get(3)? })
+            Ok(VerseHit { version: code.clone(), reference: format!("{name} {c}:{v}"), book_no: b, chapter: c, verse: v, text: r.get(3)?, found_in: None })
         })?;
         for h in rows {
             hits.push(h?);
@@ -311,6 +315,47 @@ pub fn search_bible(conn: &Connection, versions: &[String], query: &str, limit: 
     }
     hits.truncate(limit);
     Ok(hits)
+}
+
+/// Word search in the chosen Bible; when its own words don't match (English typed while a
+/// Fante or Twi Bible is chosen), the words are found in the other Bibles (English first)
+/// and the same verses are shown from the chosen Bible.
+pub fn search_bible_in(conn: &Connection, version: &str, query: &str, limit: usize) -> Result<Vec<VerseHit>> {
+    let own = search_bible(conn, &[version.to_string()], query, limit)?;
+    if !own.is_empty() {
+        return Ok(own);
+    }
+    let mut others: Vec<(String, Option<String>)> = conn
+        .prepare("SELECT code, lang FROM bible_version WHERE code <> ?1")?
+        .query_map([version], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<std::result::Result<_, _>>()?;
+    others.sort_by_key(|(_, l)| if l.as_deref().is_some_and(|l| l.starts_with("en")) { 0 } else { 1 });
+    let vid: i64 = conn.query_row("SELECT id FROM bible_version WHERE code = ?1", [version], |r| r.get(0))?;
+    let names: std::collections::HashMap<u16, String> = {
+        let mut st = conn.prepare("SELECT book_no, name FROM bible_book WHERE version_id = ?1")?;
+        let m = st.query_map([vid], |r| Ok((r.get::<_, u16>(0)?, r.get::<_, String>(1)?)))?.collect::<std::result::Result<_, _>>()?;
+        m
+    };
+    for (code, _) in others {
+        let hits = search_bible(conn, &[code.clone()], query, limit)?;
+        let mut out = vec![];
+        for h in hits {
+            let text: Option<String> = conn
+                .query_row(
+                    "SELECT text FROM bible_verse WHERE version_id = ?1 AND book_no = ?2 AND chapter = ?3 AND verse = ?4",
+                    params![vid, h.book_no, h.chapter, h.verse],
+                    |r| r.get(0),
+                )
+                .ok();
+            if let (Some(text), Some(name)) = (text, names.get(&h.book_no)) {
+                out.push(VerseHit { version: version.to_string(), reference: format!("{name} {}:{}", h.chapter, h.verse), book_no: h.book_no, chapter: h.chapter, verse: h.verse, text, found_in: Some(code.clone()) });
+            }
+        }
+        if !out.is_empty() {
+            return Ok(out);
+        }
+    }
+    Ok(vec![])
 }
 
 // ---------- maintenance ----------
@@ -354,6 +399,40 @@ mod tests {
             crate::songs::save(&c, &d).unwrap();
         }
         c
+    }
+
+    fn two_bibles() -> Connection {
+        let c = crate::db::open_memory().unwrap();
+        for (id, code, lang, book, text) in [
+            (1, "NKJV", "en", "John", "For God so loved the world that He gave His only begotten Son"),
+            (2, "FNK", "fat", "Yohane", "Na Nyankop\u{254}n d\u{254}\u{254} wiadze d\u{25b}m ma \u{254}dze no Ba kortee no mae"),
+        ] {
+            c.execute("INSERT INTO bible_version (id, code, name, lang) VALUES (?1, ?2, ?2, ?3)", params![id, code, lang]).unwrap();
+            c.execute("INSERT INTO bible_book (version_id, book_no, name, aliases, chapters) VALUES (?1, 43, ?2, ?2, 21)", params![id, book]).unwrap();
+            c.execute("INSERT INTO bible_verse (version_id, book_no, chapter, verse, text) VALUES (?1, 43, 3, 16, ?2)", params![id, text]).unwrap();
+        }
+        c
+    }
+
+    #[test]
+    fn english_reference_in_a_fante_bible() {
+        let c = two_bibles();
+        let v = browse_chapter(&c, "FNK", "John 3:16").unwrap();
+        assert_eq!((v.book.as_str(), v.chapter), ("Yohane", 3), "English book name, Fante Bible");
+        assert!(v.rows[0].text.starts_with("Na Nyankop"), "{}", v.rows[0].text);
+        assert!(browse_chapter(&c, "FNK", "Yohane 3:16").is_ok(), "the Fante name too");
+    }
+
+    #[test]
+    fn english_words_find_the_fante_verse() {
+        let c = two_bibles();
+        let hits = search_bible_in(&c, "FNK", "God so loved the world", 20).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].reference, "Yohane 3:16");
+        assert_eq!(hits[0].version, "FNK");
+        assert_eq!(hits[0].found_in.as_deref(), Some("NKJV"), "found through the English Bible");
+        let own = search_bible_in(&c, "FNK", "Nyankopon wiadze", 20).unwrap();
+        assert_eq!((own.len(), own[0].found_in.clone()), (1, None), "Fante words: found in Fante itself");
     }
 
     #[test]

@@ -181,7 +181,8 @@ fn book_names(aliases: &[Alias]) -> Vec<(Vec<String>, u16)> {
     v
 }
 
-fn book_display(no: u16) -> &'static str {
+/// The English name of a book ("1 Corinthians").
+pub fn book_display(no: u16) -> &'static str {
     BOOKS.iter().find(|b| b.no == no).map(|b| b.english[0]).unwrap_or("?")
 }
 
@@ -333,5 +334,225 @@ mod tests {
         assert!(refs("the first time I read it").is_empty());
         assert!(refs("Acts").is_empty());
         assert_eq!(refs("Job three one"), vec!["Job 3:1"]);
+    }
+}
+
+// ---------- following the preacher (context) ----------
+
+fn make(book: u16, chapter: u16, from: Option<u16>, to: Option<u16>, heard: &str) -> Option<Heard> {
+    let text_ref = match (from, to) {
+        (Some(f), Some(t)) if t > f => format!("{} {}:{}-{}", book_display(book), chapter, f, t),
+        (Some(f), _) => format!("{} {}:{}", book_display(book), chapter, f),
+        _ => format!("{} {}", book_display(book), chapter),
+    };
+    reference::parse(&text_ref, &reference::english_aliases()).ok()?;
+    Some(Heard { reference: text_ref, book_no: book, chapter, verse_from: from, verse_to: to.filter(|t| from.is_some_and(|f| *t > f)), heard: heard.to_string() })
+}
+
+/// Book names that are also ordinary words: alone (without a chapter) they don't count.
+const COMMON: [&str; 12] = ["job", "mark", "acts", "numbers", "james", "john", "ruth", "jude", "amos", "daniel", "kings", "judges"];
+
+/// Follows the preacher like an operator would: remembers the book, chapter and verse,
+/// so "verse seventeen", "verses sixteen to eighteen", "chapter four", "the next verse"
+/// and a reference spread over two sentences ("turn to the book of Romans" … "chapter
+/// eight verse one") all become suggestions.
+#[derive(Debug, Default, Clone)]
+pub struct Tracker {
+    book: Option<u16>,
+    chapter: Option<u16>,
+    verse: Option<u16>,
+    /// A book named on its own, waiting for its chapter (a few sentences at most).
+    pending: Option<(u16, u8)>,
+    /// The end of the previous sentence (a reference may straddle two).
+    tail: String,
+}
+
+impl Tracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Where the preacher is now ("John 3:16"), if known.
+    pub fn place(&self) -> Option<(u16, u16, Option<u16>)> {
+        Some((self.book?, self.chapter?, self.verse))
+    }
+
+    fn note(&mut self, h: &Heard) {
+        self.book = Some(h.book_no);
+        self.chapter = Some(h.chapter);
+        self.verse = h.verse_to.or(h.verse_from);
+        self.pending = None;
+    }
+
+    /// One more piece of transcribed speech; returns the references it adds.
+    pub fn feed(&mut self, text: &str, aliases: &[Alias]) -> Vec<Heard> {
+        let mut out: Vec<Heard> = vec![];
+        // 1. whole references, also across the end of the previous sentence
+        let joined = format!("{} {}", self.tail, text);
+        let tail_len = tokens(&self.tail).len();
+        let toks = tokens(&joined);
+        let in_text = find(text, aliases);
+        let in_tail = if self.tail.is_empty() { vec![] } else { find(&self.tail, aliases) };
+        let tail_l = fold(&self.tail);
+        let announced = tail_l.contains("book of") || tail_l.split_whitespace().rev().nth(1).is_some_and(|w| matches!(w, "to" | "in" | "from"));
+        let mut full: Vec<Heard> = vec![];
+        for h in find(&joined, aliases) {
+            if in_tail.iter().any(|e| e.reference == h.reference) && !in_text.iter().any(|e| e.reference == h.reference) {
+                continue; // it came from the previous sentence, already reported
+            }
+            let straddles = !in_text.iter().any(|e| e.reference == h.reference);
+            // across two sentences, a book that is also an ordinary word ("a good job" …
+            // "chapter two of my life") counts only when it was announced
+            let common = COMMON.contains(&book_display(h.book_no).to_lowercase().as_str());
+            if straddles && common && !announced {
+                continue;
+            }
+            full.push(h);
+        }
+        for h in &full {
+            if !out.iter().any(|o| o.reference == h.reference) {
+                out.push(h.clone());
+            }
+        }
+        if let Some(last) = full.last() {
+            self.note(last);
+        }
+        let words: Vec<String> = toks.iter().map(|(t, _)| match t { Tok::Word(w) => w.clone(), Tok::Num(n) => n.to_string() }).collect();
+        let num = |i: usize| -> Option<u32> { match toks.get(i) { Some((Tok::Num(n), _)) => Some(*n), _ => None } };
+        let word = |i: usize| -> &str { words.get(i).map(String::as_str).unwrap_or("") };
+        // 2. phrases that rely on where we are (only in the new words)
+        let names = book_names(aliases);
+        let mut i = tail_len;
+        while i < toks.len() {
+            // a book named on its own ("the book of Romans"), waiting for its chapter
+            if full.is_empty() {
+                for (ws, no) in &names {
+                    let n = ws.len();
+                    if n > 0 && i + n <= words.len() && words[i..i + n].iter().zip(ws).all(|(a, b)| a == b) {
+                        let led = i >= 2 && word(i - 2) == "book" && word(i - 1) == "of" || i >= 1 && matches!(word(i - 1), "to" | "in" | "from");
+                        if led || !(n == 1 && COMMON.contains(&ws[0].as_str())) {
+                            if num(i + n).is_none() && !(word(i + n) == "chapter" && num(i + n + 1).is_some()) {
+                                self.pending = Some((*no, 3));
+                            }
+                        }
+                    }
+                }
+            }
+            match word(i) {
+                // "chapter four (verse two)": in the pending or current book
+                "chapter" if num(i + 1).is_some() && !(i >= 1 && names.iter().any(|(ws, _)| ws.last().map(String::as_str) == Some(word(i - 1)))) => {
+                    let book = self.pending.map(|p| p.0).or(self.book);
+                    if let Some(book) = book {
+                        let ch = num(i + 1).unwrap() as u16;
+                        let (mut from, mut to) = (None, None);
+                        let mut k = i + 2;
+                        if word(k) == "and" {
+                            k += 1;
+                        }
+                        if matches!(word(k), "verse" | "verses" | ":") && num(k + 1).is_some() {
+                            from = num(k + 1).map(|v| v as u16);
+                            k += 2;
+                            if matches!(word(k), "to" | "through" | "till" | "until" | "-") && num(k + 1).is_some() {
+                                to = num(k + 1).map(|v| v as u16);
+                                k += 2;
+                            }
+                        }
+                        if let Some(h) = make(book, ch, from, to, &words[i..k.min(words.len())].join(" ")) {
+                            if !out.iter().any(|o| o.reference == h.reference) {
+                                self.note(&h);
+                                out.push(h);
+                            }
+                        }
+                        i = k;
+                        continue;
+                    }
+                }
+                // "verse seventeen", "verses sixteen to eighteen": in the current chapter
+                "verse" | "verses" if num(i + 1).is_some() && !(i >= 1 && num(i - 1).is_some()) => {
+                    if let (Some(book), Some(ch)) = (self.book, self.chapter) {
+                        let from = num(i + 1).map(|v| v as u16);
+                        let mut to = None;
+                        let mut k = i + 2;
+                        if matches!(word(k), "to" | "through" | "till" | "until" | "-" | "and") && num(k + 1).is_some() {
+                            to = num(k + 1).map(|v| v as u16);
+                            k += 2;
+                        }
+                        if let Some(h) = make(book, ch, from, to, &words[i..k.min(words.len())].join(" ")) {
+                            if !out.iter().any(|o| o.reference == h.reference) {
+                                self.note(&h);
+                                out.push(h);
+                            }
+                        }
+                        i = k;
+                        continue;
+                    }
+                }
+                // "the next verse", "the following verse", "the next chapter"
+                "next" | "following" if matches!(word(i + 1), "verse" | "chapter") => {
+                    if let (Some(book), Some(ch)) = (self.book, self.chapter) {
+                        let h = if word(i + 1) == "verse" { make(book, ch, Some(self.verse.unwrap_or(0) + 1), None, &format!("{} verse", word(i))) } else { make(book, ch + 1, Some(1), None, &format!("{} chapter", word(i))) };
+                        if let Some(h) = h {
+                            self.note(&h);
+                            out.push(h);
+                        }
+                    }
+                    i += 2;
+                    continue;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        // a vaguer suggestion gives way to a more precise one for the same chapter
+        let precise: Vec<(u16, u16)> = out.iter().filter(|h| h.verse_from.is_some()).map(|h| (h.book_no, h.chapter)).collect();
+        out.retain(|h| h.verse_from.is_some() || !precise.contains(&(h.book_no, h.chapter)));
+        // a pending book waits for a few sentences only
+        if let Some((b, n)) = self.pending {
+            self.pending = if n > 1 && out.is_empty() { Some((b, n - 1)) } else if out.is_empty() { None } else { self.pending.filter(|_| false) };
+            let _ = b;
+        }
+        let w: Vec<&str> = text.split_whitespace().collect();
+        self.tail = w[w.len().saturating_sub(6)..].join(" ");
+        out
+    }
+}
+
+#[cfg(test)]
+mod tracker_tests {
+    use super::*;
+
+    fn refs(t: &mut Tracker, s: &str) -> Vec<String> {
+        t.feed(s, &[]).into_iter().map(|h| h.reference).collect()
+    }
+
+    #[test]
+    fn follows_the_preacher() {
+        let mut t = Tracker::new();
+        assert_eq!(refs(&mut t, "please turn with me to John chapter three"), vec!["John 3"]);
+        assert_eq!(refs(&mut t, "and let us read from verse sixteen"), vec!["John 3:16"]);
+        assert_eq!(refs(&mut t, "the next verse says"), vec!["John 3:17"]);
+        assert_eq!(refs(&mut t, "now look at verses nineteen to twenty one"), vec!["John 3:19-21"]);
+        assert_eq!(refs(&mut t, "go to chapter four verse seven"), vec!["John 4:7"]);
+        assert_eq!(refs(&mut t, "the next chapter"), vec!["John 5:1"]);
+    }
+
+    #[test]
+    fn a_reference_over_two_sentences() {
+        let mut t = Tracker::new();
+        assert!(refs(&mut t, "open your Bibles to the book of Romans").is_empty(), "a book alone waits");
+        assert_eq!(refs(&mut t, "chapter eight and verse one"), vec!["Romans 8:1"]);
+        let mut t = Tracker::new();
+        assert_eq!(refs(&mut t, "we will be reading from first Corinthians"), Vec::<String>::new());
+        assert_eq!(refs(&mut t, "chapter thirteen verses four to seven"), vec!["1 Corinthians 13:4-7"]);
+    }
+
+    #[test]
+    fn ordinary_words_are_not_books() {
+        let mut t = Tracker::new();
+        assert!(refs(&mut t, "you have done a good job").is_empty());
+        assert!(refs(&mut t, "chapter two of my life was hard").is_empty(), "no book yet, so no chapter");
+        assert!(refs(&mut t, "verse one of the song").is_empty(), "no chapter yet, so no verse");
+        assert_eq!(refs(&mut t, "John three sixteen"), vec!["John 3:16"]);
+        assert_eq!(refs(&mut t, "John three sixteen"), vec!["John 3:16"], "said again: suggested again (the chip ignores repeats)");
     }
 }

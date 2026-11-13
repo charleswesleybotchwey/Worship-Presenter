@@ -96,10 +96,13 @@ export function OutputOptions({ views, mainLive }: { views: (role: string) => Ou
               <legend>Output monitor</legend>
               <select
                 className="wp-input"
-                value={draft.display_index ?? ""}
+                aria-label="Output monitor"
+                value={draft.ndi ? "ndi" : draft.display_index ?? ""}
                 onChange={(e) => {
+                  // EasyWorship's "NDI Stream": no monitor, the output goes out over NDI
+                  if (e.target.value === "ndi") return set({ ndi: draft.ndi ?? { width: 1920, height: 1080, fps: 30 } });
                   const i = e.target.value === "" ? null : Number(e.target.value);
-                  set({ display_index: i, display_name: i == null ? null : displays.find((d) => d.index === i)?.name ?? null });
+                  set({ ndi: null, display_index: i, display_name: i == null ? null : displays.find((d) => d.index === i)?.name ?? null });
                 }}
               >
                 <option value="">Window on this screen (for testing)</option>
@@ -108,8 +111,44 @@ export function OutputOptions({ views, mainLive }: { views: (role: string) => Ou
                     Monitor {d.index + 1}: {d.name} ({d.width}×{d.height}){d.primary ? ", this screen" : ""}
                   </option>
                 ))}
+                <option value="ndi">NDI Stream</option>
               </select>
-              {draft.display_name && !displays.some((d) => d.name === draft.display_name) && <p className="oo-warn">“{draft.display_name}” is not connected now. This output stays closed until it is.</p>}
+              {draft.ndi && (
+                <>
+                  <label className="oo-row">
+                    <span>Output format</span>
+                    <select
+                      className="wp-input"
+                      aria-label="NDI output format"
+                      value={`${draft.ndi.width}x${draft.ndi.height}@${draft.ndi.fps}`}
+                      onChange={(e) => {
+                        const [wh, fps] = e.target.value.split("@");
+                        const [width, height] = wh.split("x").map(Number);
+                        set({ ndi: { width, height, fps: Number(fps) } });
+                      }}
+                    >
+                      {[
+                        [1920, 1080],
+                        [1280, 720],
+                        [1024, 768],
+                        [3840, 2160],
+                      ].flatMap(([w, h]) =>
+                        [25, 30, 50, 60].map((f) => (
+                          <option key={`${w}x${h}@${f}`} value={`${w}x${h}@${f}`}>
+                            {w === 3840 ? "4K" : h === 1080 ? "HD" : h === 720 ? "HD" : "XGA"} {w} × {h} {f} Hz
+                          </option>
+                        )),
+                      )}
+                    </select>
+                  </label>
+                  <p className="oo-note">
+                    Sent over NDI as “{draft.role === "main" ? "Worship Presenter Main" : draft.role === "alternate" ? "Worship Presenter Alternate" : "Worship Presenter Foldback"}”, with no window
+                    on any monitor{draft.role === "alternate" ? " (the lower-third look, see-through for keying)" : ""}. In OBS add an NDI source (DistroAV plugin); vMix lists it under NDI. Videos
+                    are sent as their preview picture. Needs the NDI Runtime (Settings → Outputs → NDI).
+                  </p>
+                </>
+              )}
+              {!draft.ndi && draft.display_name && !displays.some((d) => d.name === draft.display_name) && <p className="oo-warn">“{draft.display_name}” is not connected now. This output stays closed until it is.</p>}
               <div className="oo-actions">
                 <button
                   className="wp-btn wp-btn--quiet"
@@ -131,7 +170,7 @@ export function OutputOptions({ views, mainLive }: { views: (role: string) => Ou
                 </button>
               </div>
             </fieldset>
-            <fieldset className="oo-set">
+            <fieldset className="oo-set" disabled={!!draft.ndi}>
               <legend>Output position</legend>
               <label className="wp-check">
                 <input type="radio" checked={!draft.custom} onChange={() => set({ custom: null })} /> Fill the whole monitor
@@ -148,7 +187,7 @@ export function OutputOptions({ views, mainLive }: { views: (role: string) => Ou
                 </div>
               )}
             </fieldset>
-            <fieldset className="oo-set">
+            <fieldset className="oo-set" disabled={!!draft.ndi}>
               <legend>Screen margins (pixels)</legend>
               <p className="wp-note wp-note--inline">Keeps words away from edges the projector cuts off, or clear of a pulpit or a TV frame.</p>
               <div className="oo-grid">
@@ -248,7 +287,7 @@ export function OutputOptions({ views, mainLive }: { views: (role: string) => Ou
             Save
           </button>
         </div>
-        <p className="wp-note">{ROLE_NAMES[role]}: a lost display is never moved onto your screen; one that comes back stays black until you resume it.</p>
+        <p className="wp-note">{ROLE_NAMES[role]}: a lost display is never moved onto your screen; one that comes back stays black until you choose Resume or Go live.</p>
       </div>
     </div>
   );

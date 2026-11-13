@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { pickThemeOpen, pickThemeSave, type ForeignDesign } from "../../api";
+import { pickThemeOpen, pickThemeSave, type ForeignDesign, type ItemCollection } from "../../api";
 import { ForeignThemeImport } from "../../theme/ForeignThemeImport";
 import { ThemeRules } from "../../theme/ThemeRules";
+import { BibleStore } from "../../BibleStore";
 import { Gallery } from "../../theme/Gallery";
 import { recolorToBrand } from "../../theme/brand";
 import { api, type ChapterView, type VerseHit, type MediaItem, type ProgramItem, type SongRow, type SongScope, type SongTree, type Version } from "../../api";
@@ -9,6 +10,7 @@ import { Icon } from "../../Icon";
 import { MediaLibrary } from "../../MediaLibrary";
 import { DRAG_TYPE, dragItem, useGoLive } from "../../dnd";
 import { PopupMenu, type MenuEntry } from "../../PopupMenu";
+import { printChordChart, printSongWords } from "../../print";
 import { AnnouncementList, ContextMenu } from "../service/panes";
 import { ThemeView } from "../../theme/ThemeView";
 import { KIND_NAMES, type ThemeKind, type ThemeRow } from "../../theme/types";
@@ -256,6 +258,8 @@ function SongsTab({
               },
               { label: "&Refresh", run: () => setBump((x) => x + 1) },
               "-",
+              { label: "Pri&nt", sub: [{ label: "&Words (every language)…", run: () => void printSongWords(row.id) }, { label: "&Chord chart…", run: () => void printChordChart(row.id) }] },
+              "-",
               { label: "&Preview", run: () => onPreview(item(row)) },
               { label: "&Go live", run: () => live(item(row)) },
               { label: "Add to &schedule", run: () => onAdd(item(row)) },
@@ -309,8 +313,9 @@ function ScripturesTab({ refInput, onPreview, onAdd }: { refInput: React.RefObje
   const [range, setRange] = useState<{ from: number; to: number } | null>(null);
   const anchor = useRef<number | null>(null);
 
+  const reloadVersions = () => api.versions().then((v) => (setVersions(v), setPrimary((p) => p || v[0]?.code || ""))).catch(() => {});
   useEffect(() => {
-    api.versions().then((v) => (setVersions(v), setPrimary((p) => p || v[0]?.code || ""))).catch(() => {});
+    void reloadVersions();
   }, []);
   // a reference opens its chapter; anything else is searched as words
   const [hits, setHits] = useState<VerseHit[] | null>(null);
@@ -320,14 +325,35 @@ function ScripturesTab({ refInput, onPreview, onAdd }: { refInput: React.RefObje
   const setCols = (c: { ver: boolean; ref: boolean }) => (setColsRaw(c), localStorage.setItem("wp-scripture-cols", JSON.stringify(c)));
   const [hitSort, setHitSort] = useState<"reference" | "translation" | null>(null);
   const [refreshN, setRefreshN] = useState(0);
+  // "My collections": Christmas readings and the like
+  const [colls, setColls] = useState<ItemCollection[]>([]);
+  const [store, setStore] = useState(false);
+  const [openColl, setOpenColl] = useState<number | null>(null);
+  const [collItems, setCollItems] = useState<ProgramItem[]>([]);
+  const loadColls = () => api.itemCollections("scripture").then(setColls).catch(() => {});
+  useEffect(() => void loadColls(), []);
+  useEffect(() => {
+    if (openColl == null) return setCollItems([]);
+    api.itemCollectionItems(openColl).then(setCollItems).catch(() => {});
+  }, [openColl, colls]);
+  const newColl = async (item?: ProgramItem) => {
+    const name = prompt("Name of the new collection (e.g. Christmas readings)");
+    if (!name?.trim()) return;
+    const id = await api.itemCollectionCreate("scripture", name);
+    if (item) await api.itemCollectionAdd(id, item);
+    void loadColls();
+  };
   const [everyBible, setEveryBible] = useState(false);
   useEffect(() => {
-    if (!primary || !typed.trim()) return setView(null), setHits(null);
+    if (!primary) return setView(null), setHits(null);
+    // nothing typed: the last chapter opened, or Genesis 1 (as EasyWorship opens)
+    const asked = typed.trim() || localStorage.getItem("wp-scripture-last") || "Genesis 1";
     const t = setTimeout(
       () =>
         api
-          .browseChapter(primary, typed)
+          .browseChapter(primary, asked)
           .then((v) => {
+            if (typed.trim()) localStorage.setItem("wp-scripture-last", typed.trim());
             setView(v);
             setHits(null);
             setProblem(null);
@@ -404,9 +430,54 @@ function ScripturesTab({ refInput, onPreview, onAdd }: { refInput: React.RefObje
               ))}
           </select>
         </label>
+        <button className="lt-node lt-node--add" onClick={() => setStore(true)} title="Free Bibles from eBible.org">
+          More available…
+        </button>
+        {store && <BibleStore onClose={() => setStore(false)} onAdded={(t) => (setStore(false), reloadVersions(), alert(`“${t}” is now in your Bibles.`))} />}
+        <div className="lt-group">My collections</div>
+        {colls.map((c) => (
+          <button
+            key={c.id}
+            className={`lt-node ${openColl === c.id ? "is-current" : ""}`}
+            onClick={() => setOpenColl(openColl === c.id ? null : c.id)}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              const n = prompt("Rename the collection (leave empty to delete it)", c.name);
+              if (n === null) return;
+              void (n.trim() ? api.itemCollectionRename(c.id, n) : confirm(`Delete “${c.name}”?`) ? api.itemCollectionDelete(c.id) : Promise.resolve()).then(() => (setOpenColl(null), loadColls()));
+            }}
+          >
+            <span>{c.name}</span> <span className="wp-num">{c.count}</span>
+          </button>
+        ))}
+        <button className="lt-node lt-node--add" onClick={() => void newColl()}>
+          + New collection
+        </button>
       </aside>
       <div className="lt-main">
-        <div className="lt-header lt-header--verses" role="row">
+        {openColl != null && (
+          <div className="lt-coll">
+            <div className="lt-coll__head">
+              {colls.find((c) => c.id === openColl)?.name} <button className="btn-quiet" onClick={() => setOpenColl(null)}>Back to the Bible</button>
+            </div>
+            {collItems.length === 0 && <p className="wp-note">Empty. Right-click a verse → Add to collection.</p>}
+            {collItems.map((it, i) => (
+              <div
+                key={i}
+                className="lt-row lt-row--coll"
+                draggable
+                onDragStart={(e) => dragItem(e, it)}
+                onClick={() => onPreview(it)}
+                onDoubleClick={() => live(it)}
+                onContextMenu={(e) => (e.preventDefault(), confirm("Remove this reading from the collection?") && void api.itemCollectionRemove(openColl, it).then(loadColls))}
+                title="Click to preview, double-click to go live, drag to the schedule; right-click to remove"
+              >
+                {it.kind === "scripture" ? `${it.reference} · ${it.versions.join(" + ")}` : "title" in it ? it.title : ""}
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="lt-header lt-header--verses" role="row" hidden={openColl != null}>
           <span className="lt-th">Trans.</span>
           <span className="lt-th">Reference</span>
           <span className="lt-th">Scripture</span>
@@ -424,7 +495,14 @@ function ScripturesTab({ refInput, onPreview, onAdd }: { refInput: React.RefObje
               title="Click to preview; drag to the schedule; right-click for more"
             >
               <span>{h.version}</span>
-              <span className="wp-num">{h.reference}</span>
+              <span className="wp-num">
+                {h.reference}
+                {h.found_in && (
+                  <em className="lt-via" title={`Your words were found in ${h.found_in}; the verse is shown from ${h.version}`}>
+                    {" "}via {h.found_in}
+                  </em>
+                )}
+              </span>
               <span className="lt-verse">{mark(h.text)}</span>
             </div>
           ))}
@@ -517,6 +595,14 @@ function ScripturesTab({ refInput, onPreview, onAdd }: { refInput: React.RefObje
             },
             { label: "&Refresh", run: () => setRefreshN((n) => n + 1) },
             "-",
+            {
+              label: "Add to co&llection",
+              sub: [
+                ...colls.map((c) => ({ label: c.name, run: () => void api.itemCollectionAdd(c.id, verseMenu.item).then(loadColls) })),
+                ...(colls.length ? ["-" as const] : []),
+                { label: "New collection…", run: () => void newColl(verseMenu.item) },
+              ],
+            },
             { label: "&Copy Scripture to Clipboard", run: () => void copyText(`${verseMenu.text}\n${(verseMenu.item as { reference: string }).reference} (${verseMenu.version})`) },
             "-",
             { label: "&Preview", run: () => onPreview(verseMenu.item) },

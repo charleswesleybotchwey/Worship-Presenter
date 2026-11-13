@@ -18,6 +18,10 @@ wp-remote = { path = "../crates/wp-remote" }
 wp-audio = { path = "../crates/wp-audio" }
 wp-render = { path = "../crates/wp-render" }
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
+# Whisper speech recognition (whisper.cpp, built from source; CPU)
+whisper-rs = "0.16"
+# MIDI pads and keyboards as buttons (Go live, Next, Blank…)
+midir = "=0.11.1"
 fontdb = { version = "=0.23.0", default-features = false, features = ["std", "fs", "memmap"] }
 ttf-parser = "0.25"
 cpal = "=0.18.2"

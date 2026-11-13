@@ -627,6 +627,124 @@ Works on every screen, Preview/Live, the stage display and the NDI renderer.
   lower thirds, bold announcements.
 The NDI renderer draws all of the above except transitions and videos.
 
+## Go live always works; NDI as an output monitor (12 Nov 2026)
+
+- Go live, double-click (Preview slide or schedule item) and clicking a Live slide always
+  work. Earlier, Blank, Logo, Clear, or the black start after a restart "held" the output
+  and Go live was refused until Resume (the screens stayed black). Now Go live shows the
+  new item and ends Blank/Logo; clicking a Live slide changes it behind Blank/Logo;
+  Resume returns without changing anything. Go live also releases outputs held after
+  being rebuilt.
+- As in EasyWorship: Settings → Outputs → Output monitor → "NDI Stream", with an output
+  format (1920×1080, 1280×720, 1024×768 or 4K at 25/30/50/60 Hz). That output opens no
+  window; the built-in renderer sends it as "Worship Presenter Main" (or Alternate, the
+  see-through lower-third look). Same theme choice as the window (item → output → rules →
+  default), Blank, Logo, Clear, pictures and presentation slides. Started again at every
+  launch.
+- Video over NDI, as FreeShow does it: FreeShow sends its real output page (rendered in a
+  hidden window that is never throttled, autoplay allowed) frame by frame. Worship
+  Presenter does the same with a real output window at the NDI size kept off the visible
+  desktop and captured (WebView2 has no off-screen painting): videos, animations,
+  transitions, camera and alerts all move. Every window now runs without background
+  throttling or occlusion pausing (FreeShow's backgroundThrottling: false), so covered
+  projectors keep playing too. The alternate (lower third) keeps the built-in renderer
+  for exact transparency; off Windows, or if capture fails, the built-in renderer sends
+  stills.
+
+## More Bibles and sync (13 Nov 2026)
+
+- More Bibles (Scriptures sidebar → More available…): eBible.org's freely shareable
+  translations, searchable by language or title, downloaded into the library (a backup
+  first). Verse-per-line format (text or XML); English book names, renameable.
+- Sync (Settings → Sync) through a shared folder (OneDrive, Google Drive, network folder,
+  USB drive): one computer shares its library (at start, every 30 minutes, Share now);
+  the others follow (at start, or Update now when nothing is live; a backup first).
+  Shared: songs, Bibles, themes, theme rules, media, presentations, services, collections.
+  Each computer keeps its own settings and outputs.
+
+## Buttons: Stream Deck, Companion and MIDI (13 Nov 2026)
+
+Settings → Buttons and MIDI.
+- Stream Deck through Bitfocus Companion (or any button box that can call a web address):
+  make a control key, then give each Companion button an address such as
+  http://PC:7300/api/v1/go-live?key=… (go-live, next, previous, next-item, previous-item,
+  blank, logo, clear, resume, item/3). Needs the phone remote on. A wrong key does
+  nothing and is logged; making a new key stops the old one.
+- MIDI pads, keyboards and mixers: choose the device, press Learn beside an action, press
+  a pad. Reconnects at every start.
+
+## Preparing and after the service (13 Nov 2026)
+
+- Sermon outline to slides (Presentations → New, or Ctrl+K): paste the outline; each line
+  becomes a point slide and every reference in it (Romans 8:28, 1 Cor. 13:4-7, Ps 23)
+  is followed by its passage from the chosen Bible. Checked, then saved as a presentation.
+- Sermon transcript (Settings → Scripture recognition): everything heard since Listen,
+  with times and the scriptures read, saved as a text file for notes or posts.
+- Printing through Windows' print dialog (or Save as PDF): song words (every language)
+  and chord charts (right-click a song → Print), the service order (Ctrl+P), and the
+  song usage report.
+- My collections for scripture and media (EasyWorship's sidebars): right-click a verse or
+  media item → Add to collection; open a collection to preview, go live or drag items.
+
+## Sunday helpers (13 Nov 2026)
+
+- Quick box: "555", "MHB 1", "ncan 12" or "Yohane 3:16". A number alone uses the main
+  hymnbook (Settings → Library); where a number has an English and a bilingual song, the
+  bilingual one comes first.
+- Pre-service loop (service bar → Pre-service): countdown to the start time, the
+  announcements turning by themselves, background music; on time the first schedule
+  item goes live (music fades as on any Go live), or the logo shows.
+- Offering slide (Presentations → New, or Ctrl+K): MoMo / bank numbers and an optional
+  QR code in the brand colours. The QR holds exactly what the church pastes (its GhQR
+  text or a payment link); no payment codes are invented.
+- Follow along on phones (Settings → Phone remote): a QR code opens the words on the
+  screens on the congregation's phones (English, Fante or both; large print), read-only,
+  no PIN, only while switched on. Phones see only the words on the screens.
+
+## Scriptures tab (13 Nov 2026)
+
+- Opens on a chapter straight away, as EasyWorship does: the last chapter you opened,
+  or Genesis 1, with nothing typed.
+- English works in every Bible: "John 3:16" with the Fante Bible chosen opens Yohane 3:16.
+  English words ("for God so loved the world") with a Fante or Twi Bible chosen are
+  found through your English Bibles and shown from the chosen Bible, marked "via NKJV";
+  words in the chosen Bible's own language are searched in it directly.
+
+## Live picture: switch outputs (13 Nov 2026)
+
+As EasyWorship's Live Output menu: above the Live picture, choose Live Output (main
+screen), Alternate Output (the lower third, see-through parts on the checkerboard,
+blank for announcements, media, Blank and Logo, as the real output) or Foldback Output
+(the stage display). Remembered between sessions.
+
+## Settings is the home for setup (12 Nov 2026)
+
+The title bar's Commands button is now Settings. Setup and management live there:
+Appearance (incl. Reset pane sizes), Brand kit, Import, Backups, Profiles, Keyboard,
+Projection, Outputs and NDI, Service intervals, Scripture recognition, Phone remote,
+Library, About. Live-service tools (Timer, Alert, Music, Rehearsal, service orders) stay on
+the service bar. Ctrl+K still searches everything; its setup entries open Settings pages.
+
+## Smarter scripture recognition (12 Nov 2026)
+
+- Whisper (OpenAI's model, run on this computer through whisper.cpp) is now the engine:
+  far better with accents and a live room than Vosk or Windows Speech. Settings →
+  Scripture recognition → Whisper → model Base (~150 MB) or Small (~490 MB, more
+  accurate) → Download once. It hears whole phrases (transcribed at each pause, or every
+  7 s), with Bible book names as a hint; its habitual "Thank you." on silence is dropped.
+  whisper.cpp is compiled into the app (CMake; ready-made bindings, see .cargo/config.toml).
+- It follows the preacher: "verse seventeen", "verses sixteen to eighteen", "chapter four
+  verse two", "the next verse", "the next chapter", and a reference spread over two
+  sentences ("turn to the book of Romans" … "chapter eight and verse one"). A lone book
+  name that is also a word ("a good job") never counts.
+- It recognises a verse read aloud without its reference: the last 15 s of speech are
+  matched against the Bibles (at least six words in the verse's order, a misheard word
+  allowed); everyday phrases ("the Lord is good") do not trigger it.
+- Test bench: Settings → Scripture recognition → Test with a recording: runs a sermon
+  recording through the same steps and lists every suggestion with its time, plus the
+  transcript.
+Suggestions still only appear above Live; the operator chooses Preview or Go live.
+
 ## Security
 
 See docs/security/audit-2026-11-11.md: findings, fixes and what remains. Before each release run `cargo audit` and `npm audit` (in ui/).
