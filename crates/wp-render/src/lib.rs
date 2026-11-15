@@ -219,7 +219,8 @@ impl Renderer {
                     }
                 }
                 "text" => {
-                    if c.hide_text {
+                    // Clear: every text goes, except a clock
+                    if c.hide_text && l["field"].as_str() != Some("clock") {
                         continue;
                     }
                     let lines: Vec<String> = match l["field"].as_str().unwrap_or("") {
@@ -347,10 +348,11 @@ impl Renderer {
         let outer = r;
         let Some(r) = Rect::from_xywh(r.left() + pad_x, r.top() + pad_y, (r.width() - 2.0 * pad_x).max(1.0), (r.height() - 2.0 * pad_y).max(1.0)) else { return };
         let mut size = s["size"].as_f64().unwrap_or(5.0) as f32;
-        let min = s["minSize"].as_f64().map(|m| m as f32).filter(|m| *m < size).unwrap_or(size * 0.6);
-        // shrink to fit, as the screens do
+        // shrink to fit, as the screens do: words are never cut off, so below the theme's
+        // smallest size too (down to a quarter) if they still would not fit
+        let min = size * 0.25;
         let mut buf = self.buffer(r.width(), text, s, size / 100.0 * h);
-        if s["autoFit"].as_bool() != Some(false) {
+        {
             while size > min {
                 let (ew, eh) = extent(&buf);
                 if eh <= r.height() + 1.0 && ew <= r.width() + 1.0 {

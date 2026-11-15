@@ -306,6 +306,41 @@ export function Settings({
                 <img className="wp-brand__light" src="/brand/wordmark-light.png" alt="Worship Presenter" />
               </div>
               <h2>About</h2>
+              <Row name="Updates" hint="New versions come from the church's GitHub releases; only installers signed with the church's key are accepted.">
+                <button
+                  className="wp-btn"
+                  onClick={async () => {
+                    try {
+                      const u = await api.updateCheck();
+                      if (!u) return setMsg({ text: "Worship Presenter is up to date." });
+                      if (confirm(`Worship Presenter ${u.version} is available.${u.notes ? "\n\n" + u.notes : ""}\n\nInstall it and restart now?`)) await api.updateInstall();
+                    } catch (e) {
+                      setMsg({ text: String(e instanceof Error ? e.message : e), bad: true });
+                    }
+                  }}
+                >
+                  Check for updates
+                </button>
+              </Row>
+              <Row name="When something goes wrong" hint="The app keeps a log of crashes and errors (no song words or notes). Send the report with a description of what happened.">
+                <button className="wp-btn" onClick={() => void api.openLogs().catch((e) => setMsg({ text: String(e), bad: true }))}>
+                  Open the logs folder
+                </button>
+                <button
+                  className="wp-btn"
+                  onClick={async () => {
+                    const r = await api.diagnosticReport();
+                    try {
+                      await navigator.clipboard.writeText(r);
+                      setMsg({ text: "The report is copied: paste it into your message." });
+                    } catch {
+                      setMsg({ text: r });
+                    }
+                  }}
+                >
+                  Copy a diagnostic report
+                </button>
+              </Row>
               <Row name="Worship Presenter" hint="Version 0.1.0">
                 <span />
               </Row>

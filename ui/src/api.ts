@@ -482,6 +482,15 @@ export const api = {
   syncSet: (folder: string | null, role: string | null) => call<void>("sync_set", { folder, role }),
   syncShareNow: () => call<number>("sync_share_now"),
   syncTakeNow: () => call<string>("sync_take_now"),
+  streamStatus: () => call<{ ffmpeg: boolean; running: boolean; seconds: number; file: string | null; destinations: string[]; report: string; installing: string | null }>("stream_status"),
+  streamInstallFfmpeg: () => call<void>("stream_install_ffmpeg"),
+  streamStart: (req: { record: boolean; folder: string | null; destinations: { kind: string; target: string }[] }) => call<string>("stream_start", { req }),
+  streamStop: () => call<string | null>("stream_stop"),
+  updateCheck: () => call<{ version: string; notes: string | null } | null>("update_check"),
+  updateInstall: () => call<void>("update_install"),
+  logError: (window: string, text: string) => call<void>("log_error", { window, text }),
+  openLogs: () => call<void>("open_logs"),
+  diagnosticReport: () => call<string>("diagnostic_report"),
   bibleCatalogue: () => call<{ id: string; language: string; title: string }[]>("bible_catalogue"),
   bibleDownload: (id: string, code: string, title: string, lang: string) => call<number>("bible_download", { id, code, title, lang }),
   itemCollections: (kind: "scripture" | "media") => call<ItemCollection[]>("item_collections", { kind }),
@@ -948,6 +957,7 @@ let mPulpit: PulpitNote[] = [];
 let mForeign: ForeignDesign[] = [];
 let mMidi: { port: string | null; learning: string | null; map: Record<string, string> } = { port: null, learning: null, map: {} };
 let mSync: { folder: string | null; role: "share" | "follow" | null; shared_ms: number | null; taken_ms: number | null; waiting: [string, number] | null } = { folder: null, role: null, shared_ms: null, taken_ms: null, waiting: ["MAIN-PC", Date.now() - 600000] };
+let mRec: number | null = null;
 let mColls: { id: number; kind: "scripture" | "media"; name: string; items: ProgramItem[] }[] = [];
 // browser preview: theme rules matched on the sample songs' titles ("MHB 1" is in MHB)
 let mRules: ThemeRule[] = [];
@@ -1585,6 +1595,25 @@ async function mock(cmd: string, a: Record<string, unknown>): Promise<unknown> {
       mSync.taken_ms = Date.now();
       mSync.waiting = null;
       return "MAIN-PC";
+    case "stream_status":
+      return { ffmpeg: true, running: mRec !== null, seconds: mRec ? Math.floor((Date.now() - mRec) / 1000) : 0, file: null, destinations: [], report: mRec ? "frame=  930 fps= 30 bitrate=4421.6kbits/s" : "", installing: null };
+    case "stream_install_ffmpeg":
+      return;
+    case "stream_start":
+      mRec = Date.now();
+      return "Recording to C:\\Users\\Media\\Videos\\Worship Presenter\\Service 2026-11-15 0930.mp4";
+    case "stream_stop":
+      mRec = null;
+      return "C:\\Users\\Media\\Videos\\Worship Presenter\\Service 2026-11-15 0930.mp4";
+    case "update_check":
+      return { version: "0.2.0", notes: "Recording, going live online, crash log." };
+    case "update_install":
+      return;
+    case "log_error":
+    case "open_logs":
+      return;
+    case "diagnostic_report":
+      return "Worship Presenter 0.1.0\nSystem: browser preview\n\nRecent log:\n(none)";
     case "bible_catalogue":
       return [
         { id: "engwebp", language: "English", title: "World English Bible" },

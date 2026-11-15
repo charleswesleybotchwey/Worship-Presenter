@@ -5,6 +5,8 @@ import { msUntil, PreServicePanel, type PreServicePlan } from "./PreService";
 import { OfferingSlide } from "./OfferingSlide";
 import { OutlineDialog } from "./OutlineDialog";
 import { printServiceOrder } from "./print";
+import { RecordPanel, type RecStatus } from "./RecordPanel";
+import { useMainAspect } from "./live/aspect";
 import { GoLiveContext } from "./dnd";
 import { api, isDesktop, type PulpitNote, type SpeechStatus, onLibraryRestored, onProfileChanged, onSettingsChanged, type LangMode, type LiveState, type MediaItem, type Mode, type ProgramItem, type Schedule, type Slide, type Timer } from "./api";
 import { SlideView } from "./SlideView";
@@ -133,7 +135,7 @@ export function Control() {
   const [, setSourceTab] = useState<"schedule" | "library">("schedule");
   const [, setCompactTask] = useState<"schedule" | "library" | "preview">("preview");
   const [notice, setNotice] = useState<{ text: string; bad?: boolean; action?: { label: string; run: () => void } } | null>(null);
-  const [layer, setLayer] = useState<null | "palette" | "outputs" | "import" | "backups" | "profiles" | "service" | "timer" | "alert" | "music" | "camera" | "preservice" | "offering" | "outline">(null);
+  const [layer, setLayer] = useState<null | "palette" | "outputs" | "import" | "backups" | "profiles" | "service" | "timer" | "alert" | "music" | "camera" | "preservice" | "offering" | "outline" | "record">(null);
   const music = useMusic();
   const [profile, setProfile] = useState({ slug: "default", name: "" });
   const [libraryVersion, setLibraryVersion] = useState(0);
@@ -505,6 +507,35 @@ export function Control() {
     window.addEventListener("wp-offering", open);
     window.addEventListener("wp-outline", outline);
     return () => (window.removeEventListener("wp-offering", open), window.removeEventListener("wp-outline", outline));
+  }, []);
+  // slides take the main output's shape (4:3 projector → 4:3 Preview, Live and editor)
+  useMainAspect();
+  // a newer version (checked quietly once a day; installed only when the operator says)
+  const [update, setUpdate] = useState<{ version: string; notes: string | null } | null>(null);
+  useEffect(() => {
+    const today = new Date().toDateString();
+    if (localStorage.getItem("wp-update-checked") === today) return;
+    const t = setTimeout(() => {
+      localStorage.setItem("wp-update-checked", today);
+      api.updateCheck().then((u) => u && setUpdate(u)).catch(() => {});
+    }, 8000);
+    return () => clearTimeout(t);
+  }, []);
+  // recording / streaming status (a red timer in the service bar while running)
+  const [rec, setRec] = useState<RecStatus | null>(null);
+  useEffect(() => {
+    let last = "";
+    const tick = () =>
+      api
+        .streamStatus()
+        .then((s) => {
+          const k = JSON.stringify(s);
+          if (k !== last) (last = k), setRec(s);
+        })
+        .catch(() => {});
+    tick();
+    const t = setInterval(tick, 1000);
+    return () => clearInterval(t);
   }, []);
   // the pre-service loop: on time, the first item goes live (or the logo shows)
   const [preService, setPreService] = useState<PreServicePlan | null>(null);
@@ -1271,6 +1302,9 @@ export function Control() {
           <button className={`wp-btn wp-btn--quiet wp-music-chip ${music?.status.playing ? "is-on" : ""}`} onClick={() => setLayer(layer === "music" ? null : "music")} title={music?.status.title ?? "Background music"}>
             <Icon name="music" /> {music?.status.playing ? (music.status.paused ? "Paused" : music.status.ducked ? "Music (quiet)" : music.status.title ?? "Music") : "Music"}
           </button>
+          <button className={`wp-btn wp-btn--quiet ${rec?.running ? "rec-on" : ""}`} onClick={() => setLayer(layer === "record" ? null : "record")} title="Record the service, or go live on YouTube, Facebook or StreamRelay">
+            {rec?.running ? <span className="rec__dot" aria-hidden="true" /> : <Icon name="video" />} {rec?.running ? `${Math.floor(rec.seconds / 60)}:${String(rec.seconds % 60).padStart(2, "0")}` : "Record"}
+          </button>
           <button className={`wp-btn wp-btn--quiet ${preService ? "is-on" : ""}`} onClick={() => setLayer(layer === "preservice" ? null : "preservice")} title="Countdown, announcements and music before the service; the first item goes live on time">
             <Icon name="timer" /> {preService ? `Pre-service · ${preService.startsAt}` : "Pre-service"}
           </button>
@@ -1306,6 +1340,17 @@ export function Control() {
         </header>
       )}
 
+      {update && (
+        <div className="wp-banner" role="status">
+          <span>Worship Presenter {update.version} is available.{update.notes ? ` ${update.notes}` : ""}</span>
+          <button className="wp-btn wp-btn--primary" onClick={() => void api.updateInstall().catch((e) => say(String(e instanceof Error ? e.message : e), true))}>
+            Install and restart
+          </button>
+          <button className="wp-btn wp-btn--quiet" onClick={() => setUpdate(null)}>
+            Later
+          </button>
+        </div>
+      )}
       {rehearsal && (
         <div className="wp-banner wp-banner--warn" role="status">
           <span>Rehearsal mode. Go live, Blank and the Live pane drive a simulator; nothing reaches the screens.</span>
@@ -1486,6 +1531,7 @@ export function Control() {
       {layer === "profiles" && <ProfilesDialog somethingLive={state?.mode === "live" && !!live?.item} onClose={() => (setLayer(null), api.currentProfile().then(setProfile).catch(() => {}))} />}
       {layer === "service" && <ServiceMenu current={service?.id ?? null} onOpen={openService} onClose={() => setLayer(null)} />}
       {layer === "timer" && <TimerPanel state={state} onClose={() => setLayer(null)} />}
+      {layer === "record" && <RecordPanel status={rec} onClose={() => setLayer(null)} refresh={() => void api.streamStatus().then(setRec).catch(() => {})} />}
       {layer === "outline" && <OutlineDialog onClose={() => setLayer(null)} onMade={(t) => (setLayer(null), setLibraryVersion((v) => v + 1), say(`“${t}” is in Presentations.`))} />}
       {layer === "offering" && (
         <OfferingSlide onClose={() => setLayer(null)} onMade={(t) => (setLayer(null), setLibraryVersion((v) => v + 1), say(`“${t}” is in Presentations.`))} />

@@ -59,7 +59,7 @@ impl Slot {
     pub fn put(&self, f: Frame) {
         *self.frame.lock().unwrap() = Some(Arc::new(f));
     }
-    fn latest(&self) -> Option<Arc<Frame>> {
+    pub fn latest(&self) -> Option<Arc<Frame>> {
         self.frame.lock().unwrap().clone()
     }
 }

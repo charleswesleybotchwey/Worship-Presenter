@@ -28,6 +28,17 @@ import { installNativeGuard } from "./nativeGuard";
 
 installNativeGuard();
 
+// errors in any window go to the app's log (Settings → About → Open the logs folder)
+{
+  const where = location.hash.replace(/^#\//, "") || "control";
+  let sent = 0;
+  const report = (text: string) => {
+    if (sent++ < 50) void import("./api").then(({ api }) => api.logError(where, text).catch(() => {}));
+  };
+  window.addEventListener("error", (e) => report(`${e.message} (${e.filename?.split("/").pop()}:${e.lineno})`));
+  window.addEventListener("unhandledrejection", (e) => report(`unhandled: ${e.reason instanceof Error ? e.reason.message : String(e.reason)}`));
+}
+
 // #/output/<role> renders an output window; anything else is the control window.
 const m = location.hash.match(/^#\/output\/([a-z_]+)/);
 // Operator appearance applies to the control window only; outputs never read it.

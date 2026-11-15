@@ -651,6 +651,51 @@ The NDI renderer draws all of the above except transitions and videos.
   for exact transparency; off Windows, or if capture fails, the built-in renderer sends
   stills.
 
+## Screen shapes and Clear (15 Nov 2026)
+
+- Themes take the shape of the screen: an output fills its own monitor (a 4:3 projector
+  gets a 4:3 slide, not a letterboxed 16:9); layers keep their places in percentages and
+  text fits the new shape. Preview, Live, the theme editor and thumbnails use the main
+  output's shape (its monitor, custom size or NDI format), so what you design is what
+  the projector shows.
+- Clear hides every text (words, verse labels, reference, title, copyright) and keeps the
+  background, shapes and pictures; a clock stays. The same over NDI.
+- Words are never cut off: text shrinks to the theme's smallest size, and below it (to
+  a quarter) only if it still would not fit; themes with auto-fit off keep their size
+  whenever the words fit. (Fixed: the size chosen was sometimes not applied, leaving
+  text at a size that was too big.) The same over NDI.
+
+## Automatic updates (15 Nov 2026)
+
+Installed copies check the latest GitHub release once a day and offer "Install and
+restart" (never while something is live); Settings → About → Check for updates does it
+on demand. Only installers signed with the church's private key are accepted.
+
+One-time setup (until then builds work as before and simply cannot update themselves):
+1. On your computer, in the project folder: `npx tauri signer generate -w worship-presenter.key`
+   Choose a password. It prints a PUBLIC key and writes the PRIVATE key to the file.
+   Keep the private key file and password safe and private (not in the repository):
+   anyone with them could publish updates to every church computer.
+2. GitHub → the repository → Settings → Secrets and variables → Actions:
+   - Secret `TAURI_SIGNING_PRIVATE_KEY`: the whole content of worship-presenter.key
+   - Secret `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: the password
+   - Variable (Variables tab) `TAURI_UPDATER_PUBKEY`: the public key printed in step 1
+3. Release as usual by pushing a tag (v0.2.0). The workflow signs the installer, writes
+   latest.json and attaches both to the release. Copies installed from a signed build
+   update themselves from then on (the first signed version is installed by hand once).
+
+## Recording, going live online, crash log (15 Nov 2026)
+
+- Record (service bar): the main output exactly as the projector shows it, and this
+  computer's sound (Windows), to a video file and/or YouTube, Facebook, StreamRelay or any
+  RTMP/SRT address, all at once. FFmpeg is downloaded once (BtbN builds on GitHub) and
+  checked against the published checksums. H.264 + AAC at YouTube's recommended settings;
+  the file is written in fragments (playable after a power cut); one failing stream does
+  not stop the others. A red timer shows in the service bar while running.
+- Crash log: one file a day in the data folder's Logs (30 days kept): crashes with where
+  they happened, errors from any window, every failure reported. No song words or notes.
+  Settings → About: Open the logs folder, Copy a diagnostic report.
+
 ## More Bibles and sync (13 Nov 2026)
 
 - More Bibles (Scriptures sidebar → More available…): eBible.org's freely shareable

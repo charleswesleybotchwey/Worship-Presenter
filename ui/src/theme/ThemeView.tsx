@@ -85,20 +85,30 @@ function FitText({ lines, style, valign }: { lines: string[]; style: TextStyle; 
     const t = inner.current;
     if (!b || !t) return;
     const fit = () => {
-      if (!style.autoFit) return setSize(style.size);
-      // a smallest size that is not smaller than the size (an old built-in theme
-      // had this) would stop text shrinking at all; allow down to 60 % then
-      let lo = style.minSize < style.size ? style.minSize : style.size * 0.6;
-      let hi = style.size;
-      t.style.fontSize = `${hi}cqh`;
-      if (t.scrollHeight <= b.clientHeight + 1 && t.scrollWidth <= b.clientWidth + 1) return setSize(hi);
-      for (let i = 0; i < 8; i++) {
-        const mid = (lo + hi) / 2;
-        t.style.fontSize = `${mid}cqh`;
-        if (t.scrollHeight <= b.clientHeight + 1 && t.scrollWidth <= b.clientWidth + 1) lo = mid;
-        else hi = mid;
-      }
-      setSize(lo);
+      const fits = (sz: number) => {
+        t.style.fontSize = `${sz}cqh`;
+        return t.scrollHeight <= b.clientHeight + 1 && t.scrollWidth <= b.clientWidth + 1;
+      };
+      const done = (sz: number) => {
+        // always leave the text at the size chosen (a same-size state change draws nothing)
+        t.style.fontSize = `${sz}cqh`;
+        setSize(sz);
+      };
+      if (fits(style.size)) return done(style.size);
+      // words are never cut off: shrink to the theme's smallest size, and below it
+      // (down to a quarter) only if they still would not fit; with auto-fit off, the
+      // theme's size is kept whenever the words fit at it
+      const floor = style.minSize > 0 && style.minSize < style.size ? style.minSize : style.size * 0.6;
+      const search = (lo: number, hi: number) => {
+        for (let i = 0; i < 10; i++) {
+          const mid = (lo + hi) / 2;
+          if (fits(mid)) lo = mid;
+          else hi = mid;
+        }
+        return lo;
+      };
+      if (fits(floor)) return done(search(floor, style.size));
+      done(search(style.size * 0.25, floor));
     };
     fit();
     // re-measure when the box changes, when the text's own size changes, and when
@@ -299,7 +309,9 @@ export function ThemeView({
           const lines = contentFor(l, data, clock);
           if (l.solo && secondEmpty && l.field !== "second") rect = l.solo;
           const isSlideText = l.field === "lyrics" || l.field === "second" || l.field === "reference";
-          if (!editor && (lines.length === 0 || (hideText && isSlideText))) return null;
+          // Clear: every text goes (words, verse labels, reference, title, copyright),
+          // only the background, shapes and pictures stay; a clock is not slide text
+          if (!editor && (lines.length === 0 || (hideText && l.field !== "clock"))) return null;
           inner = (
             <>
               {l.style.box?.mode === "block" && lines.length > 0 && <GrowBox box={l.style.box} />}

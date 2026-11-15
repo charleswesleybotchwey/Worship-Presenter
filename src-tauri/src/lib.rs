@@ -14,7 +14,9 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 mod ndi;
+mod applog;
 mod midi;
+mod stream;
 mod remote;
 mod music;
 mod fonts;
@@ -97,6 +99,7 @@ pub struct AppState {
     caption_now: Mutex<(String, Option<Instant>)>,
     ndi_inputs: ndi::Inputs,
     midi: midi::Midi,
+    stream: stream::Stream,
     /// Output windows being built now (one build at a time per output).
     building: Mutex<std::collections::HashSet<String>>,
     /// When each output window was (re)built: the watchdog waits 15 s for it to load.
@@ -189,7 +192,10 @@ fn refresh_live(app: &AppHandle, st: &AppState) {
 
 type Res<T> = Result<T, String>;
 fn err<E: std::fmt::Display>(e: E) -> String {
-    e.to_string()
+    // every failure the app reports is also written to the log
+    let text = e.to_string();
+    applog::write("FAIL", &text);
+    text
 }
 
 fn build_slides(conn: &Connection, item: &ProgramItem, live: &LiveState) -> Res<(Vec<Slide>, Option<String>)> {
@@ -987,6 +993,74 @@ async fn sync_take_now(app: AppHandle) -> Res<String> {
     })
     .await
     .map_err(err)?
+}
+
+#[derive(Serialize)]
+struct UpdateInfo {
+    version: String,
+    notes: Option<String>,
+}
+
+/// Is a newer Worship Presenter published? (None: up to date.)
+#[tauri::command]
+async fn update_check(app: AppHandle) -> Res<Option<UpdateInfo>> {
+    use tauri_plugin_updater::UpdaterExt;
+    let updater = app.updater().map_err(|_| "Automatic updates are not set up in this build.".to_string())?;
+    let u = updater.check().await.map_err(|e| format!("Could not check for updates ({e})."))?;
+    Ok(u.map(|u| UpdateInfo { version: u.version.clone(), notes: u.body.clone() }))
+}
+
+/// Downloads the update, checks its signature, installs it and restarts.
+#[tauri::command]
+async fn update_install(app: AppHandle, st: State<'_, AppState>) -> Res<()> {
+    use tauri_plugin_updater::UpdaterExt;
+    if st.item.lock().unwrap().is_some() && st.live.lock().unwrap().mode == Mode::Live {
+        return Err("Something is live: install the update after the service.".into());
+    }
+    let u = app.updater().map_err(err)?.check().await.map_err(err)?.ok_or("Already up to date.")?;
+    applog::write("UPDATE", &format!("installing {}", u.version));
+    u.download_and_install(|_, _| {}, || {}).await.map_err(|e| format!("The update could not be installed ({e})."))?;
+    app.restart();
+}
+
+/// An error from a window (the interface), for the log.
+#[tauri::command(async)]
+fn log_error(window: String, text: String) {
+    applog::write("ERROR", &format!("[{window}] {text}"));
+}
+
+/// Opens the folder with the log files.
+#[tauri::command(async)]
+fn open_logs() -> Res<()> {
+    let dir = applog::dir().ok_or("No log folder yet.")?;
+    let r = if cfg!(windows) {
+        std::process::Command::new("explorer").arg(&dir).spawn()
+    } else if cfg!(target_os = "macos") {
+        std::process::Command::new("open").arg(&dir).spawn()
+    } else {
+        std::process::Command::new("xdg-open").arg(&dir).spawn()
+    };
+    r.map(drop).map_err(|e| format!("The folder could not be opened ({e})."))
+}
+
+/// A report to paste into a message: version, system, outputs and the recent log.
+#[tauri::command(async)]
+fn diagnostic_report(app: AppHandle, st: State<'_, AppState>) -> String {
+    let outputs: Vec<String> = wp_core::options::outputs(&st.db.lock().unwrap())
+        .unwrap_or_default()
+        .iter()
+        .map(|c| format!("{}: {}", c.role, if c.ndi.is_some() { "NDI stream".to_string() } else { c.display_name.clone().unwrap_or_else(|| "no monitor".into()) }))
+        .collect();
+    let monitors = app.available_monitors().map(|m| m.len()).unwrap_or(0);
+    format!(
+        "Worship Presenter {}\nSystem: {} {}\nMonitors: {monitors}\nOutputs: {}\nNDI: {}\n\nRecent log:\n{}",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        outputs.join("; "),
+        st.ndi.jobs.lock().unwrap().keys().cloned().collect::<Vec<_>>().join(", "),
+        applog::recent(150)
+    )
 }
 
 /// eBible.org's freely shareable Bibles (needs internet).
@@ -2536,6 +2610,13 @@ pub fn run() {
                     }
                 });
             }
+            // automatic updates, when the build carries the church's public key
+            let has_key = app.config().plugins.0.get("updater").and_then(|u| u.get("pubkey")).and_then(|k| k.as_str()).is_some_and(|k| !k.trim().is_empty());
+            if has_key {
+                app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
+            }
+            // the app's own log (crashes, errors, important events)
+            applog::init(app.path().app_data_dir()?.join("Logs"));
             let root = app.path().app_data_dir()?.join("profiles");
             std::fs::create_dir_all(&root)?;
             let slug = wp_core::profiles::ensure_default(&root)?;
@@ -2574,6 +2655,7 @@ pub fn run() {
                 caption_now: Mutex::new((String::new(), None)),
                 ndi_inputs: ndi::Inputs::default(),
                 midi: midi::Midi::default(),
+                stream: stream::Stream::default(),
                 building: Mutex::new(Default::default()),
                 born: Mutex::new(HashMap::new()),
                 seen: Mutex::new(Default::default()),
@@ -2857,6 +2939,15 @@ pub fn run() {
             outline_deck,
             item_collections,
             bible_catalogue,
+            log_error,
+            update_check,
+            update_install,
+            stream::stream_install_ffmpeg,
+            stream::stream_start,
+            stream::stream_stop,
+            stream::stream_status,
+            open_logs,
+            diagnostic_report,
             sync_status,
             sync_set,
             sync_share_now,
