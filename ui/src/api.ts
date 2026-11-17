@@ -294,6 +294,15 @@ export interface SpeechStatus {
   installing: string | null;
   windows_speech: boolean;
   whisper_models?: string[];
+  /** Loading a model or connecting. */
+  starting?: boolean;
+  /** Microphone level as the engine hears it, 0–1. */
+  level?: number;
+  /** This session's transcript: [time, words, confidence 0–1 or null]. */
+  lines?: [string, string, number | null][];
+  warning?: string | null;
+  idle_paused?: boolean;
+  gain?: number;
 }
 
 export interface FontFamily {
@@ -546,6 +555,10 @@ export const api = {
   speechStop: () => call<void>("speech_stop"),
   speechDismiss: (reference: string | null) => call<void>("speech_dismiss", { reference }),
   speechMics: () => call<string[]>("speech_mics"),
+  speechSetGain: (percent: number) => call<void>("speech_set_gain", { percent }),
+  speechHistory: () => call<{ name: string; bytes: number }[]>("speech_history"),
+  speechHistoryRead: (name: string) => call<string>("speech_history_read", { name }),
+  speechHistoryDelete: (name: string) => call<void>("speech_history_delete", { name }),
   speechInstallVosk: () => call<void>("speech_install_vosk"),
   speechInstallWhisper: (model: string) => call<void>("speech_install_whisper", { model }),
   speechSaveNotes: (path: string) => call<number>("speech_save_notes", { path }),
@@ -958,6 +971,7 @@ let mForeign: ForeignDesign[] = [];
 let mMidi: { port: string | null; learning: string | null; map: Record<string, string> } = { port: null, learning: null, map: {} };
 let mSync: { folder: string | null; role: "share" | "follow" | null; shared_ms: number | null; taken_ms: number | null; waiting: [string, number] | null } = { folder: null, role: null, shared_ms: null, taken_ms: null, waiting: ["MAIN-PC", Date.now() - 600000] };
 let mRec: number | null = null;
+let mGain = 50;
 let mColls: { id: number; kind: "scripture" | "media"; name: string; items: ProgramItem[] }[] = [];
 // browser preview: theme rules matched on the sample songs' titles ("MHB 1" is in MHB)
 let mRules: ThemeRule[] = [];
@@ -1388,7 +1402,30 @@ async function mock(cmd: string, a: Record<string, unknown>): Promise<unknown> {
       mPulpit = a.id == null ? [] : mPulpit.filter((n) => n.id !== a.id);
       return;
     case "speech_status":
-      return { listening: mSpeech.on, caption: mSpeech.caption, recent: mSpeech.recent, problem: null, vosk_ready: mSpeech.ready, installing: null, windows_speech: true };
+      return {
+        listening: mSpeech.on,
+        caption: mSpeech.caption,
+        recent: mSpeech.recent,
+        problem: null,
+        vosk_ready: mSpeech.ready,
+        installing: null,
+        windows_speech: true,
+        starting: false,
+        level: mSpeech.on ? 0.35 + 0.3 * Math.abs(Math.sin(Date.now() / 300)) : 0,
+        lines: mSpeech.on ? [["10:31:02", "please turn with me to the book of John", 0.93], ["10:31:06", "chapter three and verse sixteen", 0.71], ["10:31:11", "for God so loved the world", 0.52]] : [],
+        warning: null,
+        idle_paused: false,
+        gain: mGain,
+      };
+    case "speech_set_gain":
+      mGain = Number(a.percent);
+      return;
+    case "speech_history":
+      return [{ name: "2026-11-15 1030", bytes: 4210 }];
+    case "speech_history_read":
+      return "Sermon transcript, 15 11 2026\n\nScriptures\n  10:31:06  John 3:16\n\nWhat was said\n[10:31:02] please turn with me to the book of John";
+    case "speech_history_delete":
+      return;
     case "speech_start": {
       if (a.engine === "vosk" && !mSpeech.ready) throw new Error("The Vosk engine is not downloaded yet. Settings → Scripture recognition → Download.");
       mSpeech.on = a.engine === "vosk" ? "Vosk" : "Windows Speech";

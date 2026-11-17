@@ -7,6 +7,7 @@ import { OutlineDialog } from "./OutlineDialog";
 import { printServiceOrder } from "./print";
 import { RecordPanel, type RecStatus } from "./RecordPanel";
 import { useMainAspect } from "./live/aspect";
+import { TranscriptPanel } from "./TranscriptPanel";
 import { GoLiveContext } from "./dnd";
 import { api, isDesktop, type PulpitNote, type SpeechStatus, onLibraryRestored, onProfileChanged, onSettingsChanged, type LangMode, type LiveState, type MediaItem, type Mode, type ProgramItem, type Schedule, type Slide, type Timer } from "./api";
 import { SlideView } from "./SlideView";
@@ -145,6 +146,14 @@ export function Control() {
   // ---------- scripture recognition (experimental; never goes live on its own) ----------
   const [speech, setSpeech] = useState<SpeechStatus | null>(null);
   const [speechCfg, setSpeechCfg] = useState({ engine: "vosk", mic: "", refsOnly: true });
+  const [transcriptOpen, setTranscriptOpen] = useState(false);
+  // short messages from other parts (Settings switching the speech engine)
+  useEffect(() => {
+    const f = (e: Event) => say(String((e as CustomEvent).detail));
+    window.addEventListener("wp-toast", f);
+    return () => window.removeEventListener("wp-toast", f);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const pendingLive = useRef<{ item: ProgramItem; idx: number } | null>(null);
   const [notes, setNotes] = useState<PulpitNote[]>([]);
   useEffect(() => {
@@ -762,8 +771,13 @@ export function Control() {
   const toggleListening = async () => {
     if (speech?.listening) return void api.speechStop();
     try {
-      await api.speechStart(speechCfg.engine, speechCfg.mic || null, speechCfg.refsOnly);
-      say(`Listening for Bible references (${speechCfg.engine === "vosk" ? "Vosk" : "Windows Speech"}). Suggestions appear above Live; nothing goes live by itself.`);
+      // the choices as they are now (Settings may have changed them)
+      const x = await api.getSettings().catch(() => ({}) as Record<string, string>);
+      const cfg = { engine: x.speech_engine || speechCfg.engine, mic: x.speech_mic ?? speechCfg.mic, refsOnly: x.speech_refs_only !== "false" };
+      setSpeechCfg(cfg);
+      await api.speechStart(cfg.engine, cfg.mic || null, cfg.refsOnly);
+      const names: Record<string, string> = { whisper: "Whisper", deepgram: "Deepgram", vosk: "Vosk", windows: "Windows Speech" };
+      say(`Listening for Bible references (${names[cfg.engine] ?? cfg.engine}). Suggestions appear above Live; nothing goes live by itself.`);
     } catch (e) {
       say(String(e instanceof Error ? e.message : e), true);
     }
@@ -1270,7 +1284,10 @@ export function Control() {
             <input type="checkbox" checked={rehearsal} onChange={(e) => (setRehearsal(e.target.checked), setReh(null))} /> Rehearsal
           </label>
           <button className={`wp-btn wp-btn--quiet wp-listen ${speech?.listening ? "is-on" : ""}`} onClick={toggleListening} title={speech?.listening ? "Stop listening for Bible references" : "Listen to the preacher's microphone for Bible references (experimental)"} aria-pressed={!!speech?.listening}>
-            <Icon name="mic" /> {speech?.listening ? "Listening" : "Listen"}
+            <Icon name="mic" /> {speech?.starting ? "Starting…" : speech?.listening ? "Listening" : "Listen"}
+          </button>
+          <button className={`wp-btn wp-btn--quiet ${transcriptOpen ? "is-on" : ""} ${speech?.warning ? "is-warn" : ""}`} onClick={() => setTranscriptOpen((x) => !x)} title="The live transcript, the microphone level and the scriptures detected">
+            Transcript{speech?.warning ? " ⚠" : ""}
           </button>
           <button className={`wp-btn wp-btn--quiet wp-cam ${state?.camera ? "is-on" : ""}`} onClick={() => setLayer(layer === "camera" ? null : "camera")} title="A camera on the main screen">
             <Icon name="video" /> {state?.camera ? "Camera on" : "Camera"}
@@ -1531,6 +1548,16 @@ export function Control() {
       {layer === "profiles" && <ProfilesDialog somethingLive={state?.mode === "live" && !!live?.item} onClose={() => (setLayer(null), api.currentProfile().then(setProfile).catch(() => {}))} />}
       {layer === "service" && <ServiceMenu current={service?.id ?? null} onOpen={openService} onClose={() => setLayer(null)} />}
       {layer === "timer" && <TimerPanel state={state} onClose={() => setLayer(null)} />}
+      {transcriptOpen && (
+        <TranscriptPanel
+          speech={speech}
+          onStart={() => void (speech?.listening ? undefined : toggleListening())}
+          onStop={() => void api.speechStop()}
+          onPreview={(r) => heardPreview(r)}
+          onLive={(r) => heardLive(r)}
+          onClose={() => setTranscriptOpen(false)}
+        />
+      )}
       {layer === "record" && <RecordPanel status={rec} onClose={() => setLayer(null)} refresh={() => void api.streamStatus().then(setRec).catch(() => {})} />}
       {layer === "outline" && <OutlineDialog onClose={() => setLayer(null)} onMade={(t) => (setLayer(null), setLibraryVersion((v) => v + 1), say(`“${t}” is in Presentations.`))} />}
       {layer === "offering" && (

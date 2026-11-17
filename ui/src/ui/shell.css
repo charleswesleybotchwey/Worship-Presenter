@@ -506,7 +506,7 @@ button.lt-th:hover { color: var(--wp-ink); }
 .gal-card { cursor: default; } .gal-actions { display: flex; gap: 6px; padding-left: 0; }
 .oo-note { font-size: 12px; color: var(--wp-muted); margin: 6px 0 0; line-height: 1.4; }
 .speech-test { margin: 8px 0 12px; padding: 10px 12px; border: 1px solid var(--wp-line); border-radius: 6px; } .speech-test__found { list-style: none; margin: 6px 0; padding: 0; display: grid; gap: 4px; } .speech-test__line { margin: 2px 0; font-size: 13px; }
-.ew-out__which { display: flex; align-items: center; padding: 2px 6px; } .ew-out__which select { font-size: 12px; padding: 2px 6px; border-radius: 4px; background: var(--wp-surface); color: var(--wp-ink); border: 1px solid var(--wp-line); }
+.ew-out__which { display: flex; align-items: center; padding: 2px 6px; } .ew-out__which select { font-size: 12px; padding: 2px 6px; border-radius: 4px; background: var(--wp-canvas); color: var(--wp-ink); border: 1px solid var(--wp-line); }
 .lt-via { font-style: normal; font-size: 11px; color: var(--wp-muted); }
 .ps { width: min(560px, calc(100vw - 32px)); } .ps__body { display: grid; gap: 10px; padding: 14px 16px; } .ps__row { display: grid; grid-template-columns: 150px 1fr auto; gap: 8px; align-items: center; } .ps__foot { display: flex; justify-content: flex-end; }
 .off { width: min(1180px, calc(100vw - 32px)); } .off__body { display: grid; grid-template-columns: 1fr 1.1fr; gap: 16px; padding: 14px 16px; align-items: start; } .off__form { display: grid; gap: 10px; } .off__line { display: grid; grid-template-columns: 150px 1fr 1fr auto; gap: 6px; } .off__preview { width: 100%; aspect-ratio: 16/9; border-radius: 6px; border: 1px solid var(--wp-line); }
@@ -532,3 +532,44 @@ button.lt-th:hover { color: var(--wp-ink); }
 :root[data-depth="3d"] .wp-btn.wp-mode.is-on--logo { background: linear-gradient(#d18a1a, #9c5c00); }
 :root[data-depth="3d"] .wp-btn.wp-mode.is-on--clear { background: linear-gradient(#3a7be0, #1a50a8); }
 .rec { width: min(620px, calc(100vw - 32px)); } .rec__dest { display: grid; gap: 4px; } .rec__live { display: flex; gap: 8px; align-items: center; padding: 8px 10px; border-radius: 6px; background: rgba(198,40,40,.15); } .rec__dot { width: 10px; height: 10px; border-radius: 50%; background: #e53935; animation: wp-mode-pulse 1s ease-in-out infinite; display: inline-block; } .wp-btn.rec-on { color: #ff6b6b; font-weight: 700; }
+
+/* Live Transcript panel */
+.trp { color: var(--wp-ink); position: fixed; top: 78px; right: 10px; bottom: 34px; width: min(460px, 42vw); z-index: 60; display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; background: var(--wp-overlay); border: 1px solid var(--wp-line); border-radius: 8px; box-shadow: 0 12px 40px rgba(0,0,0,.45); }
+.trp__head, .trp__controls, .trp__mic, .trp__hist-head, .trp__hist-row { display: flex; align-items: center; gap: 8px; }
+.trp__controls .wp-btn { white-space: nowrap; }
+.trp__stop { color: #ff6b6b; }
+.trp__spin { width: 12px; height: 12px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; display: inline-block; animation: trp-spin .8s linear infinite; }
+@keyframes trp-spin { to { transform: rotate(360deg); } }
+.trp__meter { flex: 1; height: 10px; border-radius: 5px; background: rgba(127,127,127,.2); overflow: hidden; }
+.trp__meter-fill { height: 100%; background: #2fbf4a; transition: width .12s linear; }
+.trp__meter-fill.is-yellow { background: linear-gradient(90deg, #2fbf4a, #e3c21a); }
+.trp__meter-fill.is-red { background: linear-gradient(90deg, #2fbf4a, #e3c21a 60%, #e53935); }
+.trp__wave { display: flex; gap: 3px; align-items: center; height: 22px; width: 34px; }
+.trp__wave span { flex: 1; height: 100%; border-radius: 2px; background: var(--wp-muted); transform-origin: center; transition: transform .15s ease; }
+.trp__wave.is-on span { background: #2fbf4a; }
+.trp__mic select { flex: 1; min-width: 0; }
+.trp__gain { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--wp-muted); }
+.trp__gain input { width: 110px; }
+.trp__warn { padding: 6px 10px; border-radius: 6px; background: rgba(229,57,53,.15); color: #ff8a80; font-size: 13px; display: flex; align-items: center; gap: 8px; justify-content: space-between; }
+.trp__warn--info { background: rgba(33,150,243,.14); color: inherit; }
+.trp__tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--wp-line); }
+.trp__tabs button { background: none; border: 0; padding: 6px 10px; color: var(--wp-muted); cursor: pointer; border-bottom: 2px solid transparent; }
+.trp__tabs button.is-on { color: inherit; border-bottom-color: currentColor; }
+.trp__body { flex: 1; min-height: 0; display: grid; grid-template-rows: 1fr auto; gap: 8px; }
+.trp__body--col { display: flex; flex-direction: column; overflow: auto; }
+.trp__lines { overflow: auto; font-size: 14px; line-height: 1.45; padding-right: 4px; }
+.trp__line { margin: 2px 0; }
+.trp__line--now { opacity: .8; }
+.trp__dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; background: rgba(127,127,127,.5); }
+.trp__dot.is-high { background: #2fbf4a; } .trp__dot.is-mid { background: #e3c21a; } .trp__dot.is-low { background: #e53935; }
+.trp__time { color: var(--wp-muted); font-size: 11px; margin-right: 4px; }
+.trp__cursor { display: inline-block; width: 2px; height: 1em; margin-left: 2px; background: currentColor; vertical-align: text-bottom; animation: wp-mode-pulse 1s ease-in-out infinite; }
+.trp__cursor--alone { margin-left: 22px; }
+.trp__det { max-height: 34%; overflow: auto; border-top: 1px solid var(--wp-line); padding-top: 6px; }
+.trp__det-head { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--wp-muted); margin-bottom: 4px; }
+.trp__det-row { display: grid; grid-template-columns: 1fr auto auto; gap: 6px; align-items: center; padding: 4px 0; }
+.trp__det-row small { display: block; color: var(--wp-muted); }
+.trp__hist-row { justify-content: space-between; padding: 4px 0; }
+.trp__hist-text { white-space: pre-wrap; font-size: 13px; margin: 0; }
+.wp-btn.is-warn { color: #ff8a80; }
+@media (prefers-reduced-motion: reduce) { .trp__spin, .trp__cursor { animation: none; } }

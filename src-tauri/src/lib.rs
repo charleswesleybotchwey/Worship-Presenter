@@ -17,6 +17,8 @@ mod ndi;
 mod applog;
 mod midi;
 mod stream;
+mod whisper_worker;
+mod deepgram;
 mod remote;
 mod music;
 mod fonts;
@@ -1273,7 +1275,7 @@ fn identify_output(app: AppHandle, role: String) {
 }
 
 /// Settings the core uses; only these keys can be written.
-const SETTINGS: &[&str] = &["project_on_restart", "low_spec_mode", "lines_per_slide", "advance_after_go_live", "font_fallback", "speech_engine", "speech_mic", "speech_refs_only", "speech_whisper_model", "quick_hymnal", "logo_media_id", "brand_colors", "brand_font", "brand_heading_font"];
+const SETTINGS: &[&str] = &["project_on_restart", "low_spec_mode", "lines_per_slide", "advance_after_go_live", "font_fallback", "speech_engine", "speech_mic", "speech_refs_only", "speech_whisper_model", "deepgram_key", "deepgram_model", "quick_hymnal", "logo_media_id", "brand_colors", "brand_font", "brand_heading_font"];
 
 #[tauri::command(async)]
 fn get_settings(st: State<'_, AppState>) -> Res<std::collections::HashMap<String, String>> {
@@ -2588,6 +2590,11 @@ fn switch_profile(app: AppHandle, st: State<'_, AppState>, slug: String) -> Res<
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// The Whisper helper process's entry (see whisper_worker.rs).
+pub fn whisper_worker(model: &str) -> ! {
+    whisper_worker::worker_main(model, speech::WHISPER_PROMPT)
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -2877,6 +2884,11 @@ pub fn run() {
             speech::speech_install_whisper,
             speech::speech_test_recording,
             speech::speech_save_notes,
+            speech::speech_set_gain,
+            speech::speech_default_mic,
+            speech::speech_history,
+            speech::speech_history_read,
+            speech::speech_history_delete,
             presentation_import,
             presentation_page,
             presentation_finish,

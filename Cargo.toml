@@ -4,7 +4,7 @@ members = ["crates/wp-core", "crates/wp-remote", "crates/wp-audio", "crates/wp-r
 default-members = ["crates/wp-core", "crates/wp-remote", "crates/wp-audio", "crates/wp-render"]
 
 [workspace.package]
-version = "0.1.0"
+version = "2.1.0"
 edition = "2021"
 license = "Proprietary"
 

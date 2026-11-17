@@ -715,6 +715,7 @@ function SpeechPanel({ core, setCoreKey }: { core: Record<string, string>; setCo
   };
   const engines: [string, string, string, boolean][] = [
     ["whisper", "Whisper (recommended)", "OpenAI's Whisper, run on this computer: by far the best with accents and a live room. Downloaded once; then works without internet.", true],
+    ["deepgram", "Deepgram (online)", "Fast and accurate with accents, streamed live. Needs internet and a Deepgram account (paid per minute of audio); Whisper takes over if the internet drops.", true],
     ["vosk", "Vosk", "Light and offline (about 60 MB). Struggles with accents and noisy rooms.", true],
     ["windows", "Windows Speech", "Built into Windows; nothing to download. Least accurate in a church.", !!st?.windows_speech],
     ["cloud", "A cloud service with your own key", "Not available yet.", false],
@@ -730,7 +731,24 @@ function SpeechPanel({ core, setCoreKey }: { core: Record<string, string>; setCo
         <div className="speech-engines" role="radiogroup" aria-label="Speech engine">
           {engines.map(([id, name, hint, ok]) => (
             <label key={id} className={`speech-engine ${ok ? "" : "is-off"}`}>
-              <input type="radio" name="engine" disabled={!ok} checked={engine === id} onChange={() => void setCoreKey("speech_engine", id)} />
+              <input
+                type="radio"
+                name="engine"
+                disabled={!ok}
+                checked={engine === id}
+                onChange={async () => {
+                  await setCoreKey("speech_engine", id);
+                  // already listening: switch at once (same session, microphone and gain)
+                  if (st?.listening) {
+                    try {
+                      await api.speechStart(id, core.speech_mic || null, refsOnly);
+                      window.dispatchEvent(new CustomEvent("wp-toast", { detail: `Switched to ${name}.` }));
+                    } catch (e) {
+                      window.dispatchEvent(new CustomEvent("wp-toast", { detail: String(e instanceof Error ? e.message : e) }));
+                    }
+                  }
+                }}
+              />
               <span>
                 <strong>{name}</strong>
                 <small>{hint}</small>
@@ -760,6 +778,28 @@ function SpeechPanel({ core, setCoreKey }: { core: Record<string, string>; setCo
             </button>
           )}
         </Row>
+      )}
+      {engine === "deepgram" && (
+        <>
+          <Row name="Deepgram API key" hint="From your account at deepgram.com (API Keys). Kept on this computer only, never synced or written to the log.">
+            <input
+              className="wp-input"
+              type="password"
+              autoComplete="off"
+              placeholder="Paste the API key"
+              defaultValue={core.deepgram_key ?? ""}
+              onBlur={(e) => e.target.value !== (core.deepgram_key ?? "") && void setCoreKey("deepgram_key", e.target.value.trim())}
+              aria-label="Deepgram API key"
+            />
+          </Row>
+          <Row name="Deepgram model" hint="Nova-3 is the most accurate; Nova-2 is the older model.">
+            <select className="wp-input" value={core.deepgram_model || "nova-3"} onChange={(e) => void setCoreKey("deepgram_model", e.target.value)} aria-label="Deepgram model">
+              <option value="nova-3">Nova-3 (recommended)</option>
+              <option value="nova-2">Nova-2</option>
+            </select>
+          </Row>
+          <p className="wp-note">The preacher's microphone is sent to Deepgram over the internet while listening. Check Deepgram's pricing for your account.</p>
+        </>
       )}
       {engine === "vosk" && (
         <Row name="Vosk engine and English model" hint={st?.vosk_ready ? "Downloaded and ready." : "Needs internet once, about 60 MB."}>
@@ -827,7 +867,7 @@ function SpeechPanel({ core, setCoreKey }: { core: Record<string, string>; setCo
         </div>
       )}
       {testProblem && <p className="form-error">{testProblem}</p>}
-      {(engine === "vosk" || engine === "whisper") && (
+      {(engine === "vosk" || engine === "whisper" || engine === "deepgram") && (
         <Row name="Microphone" hint="The preacher's microphone, usually through the mixer's line or USB output.">
           <select className="wp-input" value={core.speech_mic ?? ""} onChange={(e) => void setCoreKey("speech_mic", e.target.value)}>
             <option value="">Windows' default microphone</option>

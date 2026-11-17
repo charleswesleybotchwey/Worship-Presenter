@@ -12,7 +12,7 @@ use crate::{err, AppState, Res};
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager, State};
@@ -39,20 +39,36 @@ pub struct Speech {
     /// What was said in the last ~15 seconds (for recognising a verse read aloud).
     said: Mutex<VecDeque<(std::time::Instant, String)>>,
     last_quote_check: Mutex<Option<std::time::Instant>>,
-    /// Everything heard since Listen was pressed (time, words), for the sermon notes.
-    log: Mutex<Vec<(String, String)>>,
+    /// Everything heard this session (time, words, confidence 0–1 if the engine gives it).
+    log: Mutex<Vec<(String, String, Option<f32>)>>,
+    /// Starting up (loading a model, connecting): the panel shows a spinner.
+    starting: AtomicBool,
+    /// Paused after 10 minutes without speech.
+    idle_paused: AtomicBool,
+    /// When words last came back from the engine (ms), 0 before the first.
+    last_text_ms: AtomicU64,
     /// Every scripture suggested since then (time, reference).
     log_refs: Mutex<Vec<(String, String)>>,
 }
 
 impl Speech {
+    fn ready(&self) {
+        self.starting.store(false, Ordering::Relaxed);
+    }
+
     fn heard(&self, app: &AppHandle, text: &str, aliases: &[wp_core::reference::Alias]) {
+        self.heard_with(app, text, None, aliases)
+    }
+
+    fn heard_with(&self, app: &AppHandle, text: &str, conf: Option<f32>, aliases: &[wp_core::reference::Alias]) {
+        self.last_text_ms.store(now_ms(), Ordering::Relaxed);
+        VOICED_SINCE_TEXT_MS.store(0, Ordering::Relaxed);
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         let clock = app.state::<AppState>().db.lock().unwrap().query_row("SELECT strftime('%H:%M:%S', 'now', 'localtime')", [], |r| r.get::<_, String>(0)).unwrap_or_default();
         {
             let mut log = self.log.lock().unwrap();
             if log.len() < 20_000 {
-                log.push((clock.clone(), text.trim().to_string()));
+                log.push((clock.clone(), text.trim().to_string(), conf));
             }
         }
         // references, following the preacher ("verse seventeen", "the next verse", a
@@ -153,6 +169,17 @@ pub struct SpeechStatus {
     windows_speech: bool,
     /// Whisper models downloaded ("base.en", "small.en").
     whisper_models: Vec<String>,
+    /// Loading a model or connecting.
+    starting: bool,
+    /// The microphone level as the engine hears it (0–1, after the gain).
+    level: f32,
+    /// This session's transcript (time, words, confidence 0–1), the last 300 lines.
+    lines: Vec<(String, String, Option<f32>)>,
+    /// Speech is coming in but no words come back (a slow connection, a stuck engine).
+    warning: Option<String>,
+    /// Paused after 10 minutes without speech.
+    idle_paused: bool,
+    gain: u32,
 }
 
 #[tauri::command(async)]
@@ -167,6 +194,24 @@ pub fn speech_status(st: State<'_, AppState>) -> SpeechStatus {
         installing: s.install.lock().unwrap().clone(),
         windows_speech: cfg!(windows),
         whisper_models: WHISPER_MODELS.iter().filter(|(m, _, _)| whisper_path(&speech_dir(&st), m).exists()).map(|(m, _, _)| m.to_string()).collect(),
+        starting: s.starting.load(Ordering::Relaxed) && s.engine.lock().unwrap().is_some(),
+        level: if s.engine.lock().unwrap().is_some() { f32::from_bits(LEVEL.load(Ordering::Relaxed)) } else { 0.0 },
+        lines: {
+            let l = s.log.lock().unwrap();
+            l[l.len().saturating_sub(300)..].to_vec()
+        },
+        warning: {
+            // after words had been coming: 30 s of speech and nothing back for 45 s
+            let last = s.last_text_ms.load(Ordering::Relaxed);
+            let engine = s.engine.lock().unwrap().clone();
+            if engine.is_some() && last > 0 && now_ms().saturating_sub(last) > 45_000 && VOICED_SINCE_TEXT_MS.load(Ordering::Relaxed) > 30_000 {
+                Some(if engine.as_deref() == Some("Deepgram") { "Connection seems unstable: transcription may be delayed.".into() } else { "Speech is coming in but no words are being recognised: check the microphone and the engine.".into() })
+            } else {
+                None
+            }
+        },
+        idle_paused: s.idle_paused.load(Ordering::Relaxed),
+        gain: st.db.lock().unwrap().query_row("SELECT value FROM setting WHERE key = 'speech_gain'", [], |r| r.get::<_, String>(0)).ok().and_then(|v| v.parse().ok()).unwrap_or(50),
     }
 }
 
@@ -185,35 +230,92 @@ pub async fn speech_mics() -> Vec<String> {
     tauri::async_runtime::spawn_blocking(|| {
         use cpal::traits::{DeviceTrait, HostTrait};
         let host = cpal::default_host();
-        host.input_devices().map(|d| d.filter_map(|x| x.description().ok().map(|d| d.name().to_string())).collect()).unwrap_or_default()
+        let mut v: Vec<String> = host.input_devices().map(|d| d.filter_map(|x| x.description().ok().map(|d| d.name().to_string())).collect()).unwrap_or_default();
+        // the system's default first
+        if let Some(def) = host.default_input_device().and_then(|d| d.description().ok().map(|d| d.name().to_string())) {
+            v.retain(|n| *n != def);
+            v.insert(0, def);
+        }
+        v
     })
     .await
     .unwrap_or_default()
 }
 
 #[tauri::command(async)]
-pub fn speech_stop(st: State<'_, AppState>) {
+pub fn speech_stop(app: AppHandle, st: State<'_, AppState>) {
+    stop_listening(&st);
+    save_session(&app, &st);
+}
+
+fn stop_listening(st: &AppState) {
     if let Some(s) = st.speech.stop.lock().unwrap().take() {
         s.store(true, Ordering::Relaxed);
     }
     *st.speech.engine.lock().unwrap() = None;
     st.speech.caption.lock().unwrap().clear();
+    st.speech.starting.store(false, Ordering::Relaxed);
+}
+
+fn history_dir(app: &AppHandle) -> PathBuf {
+    app.path().app_data_dir().unwrap_or_default().join("Transcripts")
+}
+
+/// The session's transcript into the history (Transcripts folder), then a fresh start.
+fn save_session(app: &AppHandle, st: &AppState) {
+    let log = std::mem::take(&mut *st.speech.log.lock().unwrap());
+    let refs = std::mem::take(&mut *st.speech.log_refs.lock().unwrap());
+    if log.is_empty() {
+        return;
+    }
+    let (date, stamp) = st.db.lock().unwrap().query_row("SELECT strftime('%d %m %Y', 'now', 'localtime'), strftime('%Y-%m-%d %H%M', 'now', 'localtime')", [], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).unwrap_or_default();
+    let dir = history_dir(app);
+    let _ = std::fs::create_dir_all(&dir);
+    let mut path = dir.join(format!("{stamp}.txt"));
+    let mut n = 2;
+    while path.exists() {
+        path = dir.join(format!("{stamp} ({n}).txt"));
+        n += 1;
+    }
+    let _ = std::fs::write(&path, notes_text(&date, &log, &refs).as_bytes());
+}
+
+fn notes_text(date: &str, log: &[(String, String, Option<f32>)], refs: &[(String, String)]) -> String {
+    let mut out = format!("Sermon transcript, {date}\r\n\r\n");
+    if !refs.is_empty() {
+        out.push_str("Scriptures\r\n");
+        let mut seen: Vec<&str> = vec![];
+        for (t, r) in refs {
+            if !seen.contains(&r.as_str()) {
+                seen.push(r);
+                out.push_str(&format!("  {t}  {r}\r\n"));
+            }
+        }
+        out.push_str("\r\n");
+    }
+    out.push_str("What was said\r\n");
+    for (t, line, _) in log {
+        out.push_str(&format!("[{t}] {line}\r\n"));
+    }
+    out
 }
 
 #[tauri::command]
 pub async fn speech_start(app: AppHandle, engine: String, mic: Option<String>, references_only: bool) -> Res<()> {
     let st = app.state::<AppState>();
-    speech_stop(st.clone());
+    stop_listening(&st);
     *st.speech.problem.lock().unwrap() = None;
+    st.speech.starting.store(true, Ordering::Relaxed);
+    st.speech.idle_paused.store(false, Ordering::Relaxed);
+    st.speech.last_text_ms.store(0, Ordering::Relaxed);
+    LAST_VOICE_MS.store(now_ms(), Ordering::Relaxed);
+    VOICED_SINCE_TEXT_MS.store(0, Ordering::Relaxed);
+    let pct: u32 = st.db.lock().unwrap().query_row("SELECT value FROM setting WHERE key = 'speech_gain'", [], |r| r.get::<_, String>(0)).ok().and_then(|v| v.parse().ok()).unwrap_or(50);
+    GAIN.store(gain_factor(pct).to_bits(), Ordering::Relaxed);
     let aliases = wp_core::library::aliases(&st.db.lock().unwrap()).map_err(err)?;
     let stop = Arc::new(AtomicBool::new(false));
+    let watch_stop = stop.clone(); // for the idle watcher
     *st.speech.stop.lock().unwrap() = Some(stop.clone());
-    // a sermon at a time: listening again more than an hour later starts a new transcript
-    let stale = st.speech.log.lock().unwrap().is_empty() || st.speech.last_quote_check.lock().unwrap().map_or(true, |t| t.elapsed().as_secs() > 3600);
-    if stale {
-        st.speech.log.lock().unwrap().clear();
-        st.speech.log_refs.lock().unwrap().clear();
-    }
     let label = match engine.as_str() {
         "vosk" => {
             let dir = speech_dir(&st).join("vosk");
@@ -268,10 +370,50 @@ pub async fn speech_start(app: AppHandle, engine: String, mic: Option<String>, r
                 .map_err(err)?;
             "Whisper"
         }
-        "cloud" => return Err("That engine is not available yet.".into()),
+        // Deepgram (online): needs internet and the church's Deepgram API key
+        "deepgram" | "cloud" => {
+            let get = |k: &str| st.db.lock().unwrap().query_row("SELECT value FROM setting WHERE key = ?1", [k], |r| r.get::<_, String>(0)).ok().filter(|v| !v.trim().is_empty());
+            let key = get("deepgram_key").ok_or("Paste your Deepgram API key first: Settings → Scripture recognition → Deepgram.")?;
+            let model = get("deepgram_model").unwrap_or_else(|| "nova-3".into());
+            // Whisper takes over if the internet goes, when it is downloaded
+            let dir = speech_dir(&st);
+            let fallback = ["small.en", "base.en"].iter().map(|m| whisper_path(&dir, m)).find(|p| p.exists());
+            let h = app.clone();
+            std::thread::Builder::new()
+                .name("speech-deepgram".into())
+                .spawn(move || {
+                    if let Err(e) = run_deepgram(&h, &key, &model, mic.as_deref(), &aliases, &stop, fallback) {
+                        h.state::<AppState>().speech.fail(e);
+                    }
+                })
+                .map_err(err)?;
+            "Deepgram"
+        }
         other => return Err(format!("Unknown speech engine {other}.")),
     };
     *st.speech.engine.lock().unwrap() = Some(label.into());
+    if label != "Whisper" && label != "Deepgram" {
+        st.speech.ready(); // these start at once; Whisper loads a model, Deepgram connects
+    }
+    // pause after 10 minutes without speech (saves the transcript, offers Resume)
+    {
+        let h = app.clone();
+        let stop2 = watch_stop.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(Duration::from_secs(2));
+            if stop2.load(Ordering::Relaxed) {
+                break;
+            }
+            if now_ms().saturating_sub(LAST_VOICE_MS.load(Ordering::Relaxed)) > 10 * 60 * 1000 {
+                let st = h.state::<AppState>();
+                stop_listening(&st);
+                save_session(&h, &st);
+                st.speech.idle_paused.store(true, Ordering::Relaxed);
+                crate::applog::write("SPEECH", "paused after 10 minutes without speech");
+                break;
+            }
+        });
+    }
     Ok(())
 }
 
@@ -490,6 +632,24 @@ const VOSK_VERSION: &str = "0.3.45";
 /// loaded into Worship Presenter, so a download that does not match is refused.
 
 /// The microphone (chosen by name, or Windows' default) as 16 kHz mono samples.
+// The microphone as every engine hears it: input gain (Settings, live), the level meter
+// (Live Transcript panel) and when speech was last heard (idle pause, connection health).
+static GAIN: AtomicU32 = AtomicU32::new(0x3F80_0000); // 1.0
+static LEVEL: AtomicU32 = AtomicU32::new(0);
+static LAST_VOICE_MS: AtomicU64 = AtomicU64::new(0);
+/// Milliseconds of speech heard since the last words came back from the engine.
+static VOICED_SINCE_TEXT_MS: AtomicU64 = AtomicU64::new(0);
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+/// 0–100 % on the slider: 50 % leaves the sound as it is, 100 % is four times louder.
+pub fn gain_factor(percent: u32) -> f32 {
+    let p = percent.min(100) as f32;
+    if p <= 50.0 { p / 50.0 } else { 1.0 + (p - 50.0) / 50.0 * 3.0 }
+}
+
 fn open_mic(mic: Option<&str>) -> Result<(cpal::Stream, std::sync::mpsc::Receiver<Vec<i16>>), String> {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     let host = cpal::default_host();
@@ -505,11 +665,22 @@ fn open_mic(mic: Option<&str>) -> Result<(cpal::Stream, std::sync::mpsc::Receive
     // downmix to mono and resample to 16 kHz
     let mut pos = 0.0f64;
     let step = rate / 16000.0;
+    let mut smooth = 0.0f32;
     let mut convert = move |mono: &mut dyn Iterator<Item = f32>| -> Vec<i16> {
-        let frames: Vec<f32> = mono.collect();
+        let g = f32::from_bits(GAIN.load(Ordering::Relaxed));
+        let frames: Vec<f32> = mono.map(|x| (x * g).clamp(-1.0, 1.0)).collect();
+        // the meter: the loudest moment, falling back smoothly
+        let peak = frames.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+        smooth = if peak > smooth { peak } else { smooth * 0.85 + peak * 0.15 };
+        LEVEL.store(smooth.to_bits(), Ordering::Relaxed);
+        let rms = (frames.iter().map(|x| x * x).sum::<f32>() / frames.len().max(1) as f32).sqrt();
+        if rms > 0.02 {
+            LAST_VOICE_MS.store(now_ms(), Ordering::Relaxed);
+            VOICED_SINCE_TEXT_MS.fetch_add((frames.len() as f64 / rate * 1000.0) as u64, Ordering::Relaxed);
+        }
         let mut out = Vec::with_capacity((frames.len() as f64 / step) as usize + 1);
         while (pos as usize) < frames.len() {
-            out.push((frames[pos as usize].clamp(-1.0, 1.0) * 32767.0) as i16);
+            out.push((frames[pos as usize] * 32767.0) as i16);
             pos += step;
         }
         pos -= frames.len() as f64;
@@ -698,7 +869,7 @@ fn whisper_path(dir: &Path, model: &str) -> PathBuf {
 }
 
 /// Bible book names, so Whisper expects them ("First Corinthians", "Habakkuk").
-const WHISPER_PROMPT: &str = "Sermon with Bible readings: Genesis, Exodus, Leviticus, Deuteronomy, Joshua, Judges, Ruth, Samuel, Kings, Chronicles, Nehemiah, Esther, Job, Psalms, Proverbs, Ecclesiastes, Isaiah, Jeremiah, Lamentations, Ezekiel, Daniel, Hosea, Habakkuk, Zechariah, Malachi, Matthew, Mark, Luke, John, Acts, Romans, First Corinthians, Galatians, Ephesians, Philippians, Colossians, Thessalonians, Timothy, Hebrews, James, Peter, Jude, Revelation. John chapter three verse sixteen.";
+pub(crate) const WHISPER_PROMPT: &str = "Sermon with Bible readings: Genesis, Exodus, Leviticus, Deuteronomy, Joshua, Judges, Ruth, Samuel, Kings, Chronicles, Nehemiah, Esther, Job, Psalms, Proverbs, Ecclesiastes, Isaiah, Jeremiah, Lamentations, Ezekiel, Daniel, Hosea, Habakkuk, Zechariah, Malachi, Matthew, Mark, Luke, John, Acts, Romans, First Corinthians, Galatians, Ephesians, Philippians, Colossians, Thessalonians, Timothy, Hebrews, James, Peter, Jude, Revelation. John chapter three verse sixteen.";
 
 /// Whisper's habit on silence or music: invented phrases. These are thrown away.
 fn whisper_junk(t: &str) -> bool {
@@ -707,14 +878,14 @@ fn whisper_junk(t: &str) -> bool {
 }
 
 fn run_whisper(app: &AppHandle, model: &Path, mic: Option<&str>, aliases: &[wp_core::reference::Alias], stop: &AtomicBool) -> Result<(), String> {
-    use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
     let speech = &app.state::<AppState>().speech;
     speech.caption("Loading the Whisper model…");
-    let ctx = WhisperContext::new_with_params(model, WhisperContextParameters::default()).map_err(|e| format!("The Whisper model could not be loaded ({e}). Download it again in Settings."))?;
-    let mut state = ctx.create_state().map_err(|e| format!("Whisper could not start ({e})."))?;
+    // Whisper runs in its own process: a crash there never closes the presentation
+    let mut worker = crate::whisper_worker::Worker::start(model)?;
+    let mut restarts = 0u32;
     let (_stream, rx) = open_mic(mic)?;
-    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, 8) as i32;
     speech.caption("Listening…");
+    speech.ready();
     let mut buf: Vec<f32> = Vec::new();
     let mut voiced = 0usize; // samples of speech in buf
     let mut quiet = 0usize; // samples of silence since the last speech
@@ -743,37 +914,77 @@ fn run_whisper(app: &AppHandle, model: &Path, mic: Option<&str>, aliases: &[wp_c
         }
         let audio = std::mem::take(&mut buf);
         voiced = 0;
-        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-        params.set_language(Some("en"));
-        params.set_n_threads(threads);
-        params.set_no_context(true);
-        params.set_single_segment(true);
-        params.set_suppress_blank(true);
-        params.set_print_special(false);
-        params.set_print_progress(false);
-        params.set_print_realtime(false);
-        params.set_print_timestamps(false);
-        params.set_initial_prompt(WHISPER_PROMPT);
-        if state.full(params, &audio).is_err() {
-            continue;
-        }
-        let mut text = String::new();
-        for i in 0..state.full_n_segments() {
-            if let Some(seg) = state.get_segment(i) {
-                if let Ok(t) = seg.to_str_lossy() {
-                    text.push_str(&t);
+        let (text, conf) = match worker.transcribe(&audio) {
+            Ok(t) => t,
+            Err(e) => {
+                // the helper ended (a crash in Whisper): the app carries on; start it again
+                restarts += 1;
+                crate::applog::write("CRASH", &format!("Whisper helper ended ({e}); restart {restarts}"));
+                if restarts > 3 {
+                    return Err("Whisper keeps stopping on this computer, so listening has stopped. The log has the details (Settings → About); Vosk may work better here.".into());
                 }
+                speech.caption("Whisper stopped; starting it again…");
+                worker = crate::whisper_worker::Worker::start(model)?;
+                speech.caption("Listening…");
+                continue;
             }
-        }
-        let text = text.trim().to_string();
+        };
         if whisper_junk(&text) {
             continue;
         }
         speech.caption(&text);
         Speech::subtitle(app, &text, true);
-        speech.heard(app, &text, aliases);
+        speech.heard_with(app, &text, conf, aliases);
     }
     Ok(())
+}
+
+/// Deepgram, live over the internet: interim words as the caption, finished phrases to
+/// the scripture finding. Reconnects if the line drops; after repeated failures Whisper
+/// takes over (if downloaded).
+fn run_deepgram(app: &AppHandle, key: &str, model: &str, mic: Option<&str>, aliases: &[wp_core::reference::Alias], stop: &AtomicBool, fallback: Option<PathBuf>) -> Result<(), String> {
+    use crate::deepgram::{listen_url, session, End};
+    let speech = &app.state::<AppState>().speech;
+    let (stream, rx) = open_mic(mic)?;
+    let url = listen_url("wss://api.deepgram.com", model);
+    let mut fails = 0u32;
+    speech.caption("Connecting to Deepgram…");
+    loop {
+        let began = std::time::Instant::now();
+        let end = session(&url, key, &rx, stop, || speech.ready(), |text, done, conf| {
+            speech.caption(text);
+            Speech::subtitle(app, text, done);
+            if done {
+                speech.heard_with(app, text, conf, aliases);
+            }
+        });
+        match end {
+            End::Stopped => return Ok(()),
+            End::BadKey(m) => return Err(m),
+            End::Lost(e) => {
+                if began.elapsed() > Duration::from_secs(60) {
+                    fails = 0; // it had been working
+                }
+                fails += 1;
+                crate::applog::write("SPEECH", &format!("Deepgram connection lost ({e}); attempt {fails}"));
+                if fails >= 3 {
+                    if let Some(m) = &fallback {
+                        drop(stream);
+                        speech.caption("No connection to Deepgram: Whisper is listening instead.");
+                        return run_whisper(app, m, mic, aliases, stop);
+                    }
+                }
+                speech.caption("Deepgram connection lost; reconnecting…");
+                while rx.try_recv().is_ok() {} // old sound is no use now
+                for _ in 0..20 {
+                    if stop.load(Ordering::Relaxed) {
+                        return Ok(());
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+        }
+    }
 }
 
 /// Downloads a Whisper model from the official whisper.cpp models (Hugging Face).
@@ -824,16 +1035,14 @@ pub struct RecordingTest {
 #[tauri::command]
 pub async fn speech_test_recording(app: AppHandle, path: String) -> Res<RecordingTest> {
     tauri::async_runtime::spawn_blocking(move || {
-        use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
         let st = app.state::<AppState>();
         let dir = speech_dir(&st);
         let (model_name, model) = ["small.en", "base.en"].iter().map(|m| (m.to_string(), whisper_path(&dir, m))).find(|(_, p)| p.exists()).ok_or("Download a Whisper model first (Settings → Scripture recognition).")?;
         let audio = wp_audio::decode_mono_16k(std::path::Path::new(&path))?;
         let started = std::time::Instant::now();
-        let ctx = WhisperContext::new_with_params(&model, WhisperContextParameters::default()).map_err(|e| format!("The Whisper model could not be loaded ({e})."))?;
-        let mut state = ctx.create_state().map_err(|e| format!("Whisper could not start ({e})."))?;
+        // in its own process, as when listening live
+        let mut worker = crate::whisper_worker::Worker::start(&model)?;
         let aliases = wp_core::library::aliases(&st.db.lock().unwrap()).map_err(err)?;
-        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, 8) as i32;
         // phrases: split at pauses, as when listening live (at most 7 s each)
         let mut phrases: Vec<(usize, usize)> = vec![];
         let (mut start, mut quiet, mut floor) = (0usize, 0usize, 0.004f32);
@@ -859,26 +1068,7 @@ pub async fn speech_test_recording(app: AppHandle, path: String) -> Res<Recordin
         let (mut transcript, mut found) = (vec![], vec![]);
         for (k, (a, b)) in phrases.iter().enumerate() {
             *st.speech.install.lock().unwrap() = Some(format!("Testing the recording… {}%", k * 100 / phrases.len().max(1)));
-            let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-            params.set_language(Some("en"));
-            params.set_n_threads(threads);
-            params.set_no_context(true);
-            params.set_single_segment(true);
-            params.set_print_special(false);
-            params.set_print_progress(false);
-            params.set_print_realtime(false);
-            params.set_print_timestamps(false);
-            params.set_initial_prompt(WHISPER_PROMPT);
-            if state.full(params, &audio[*a..*b]).is_err() {
-                continue;
-            }
-            let mut text = String::new();
-            for i in 0..state.full_n_segments() {
-                if let Some(seg) = state.get_segment(i) {
-                    text.push_str(&seg.to_str_lossy().unwrap_or_default());
-                }
-            }
-            let text = text.trim().to_string();
+            let (text, _) = worker.transcribe(&audio[*a..*b]).map_err(|e| format!("{e} (the log has the details: Settings → About)"))?;
             if whisper_junk(&text) {
                 continue;
             }
@@ -919,22 +1109,74 @@ pub fn speech_save_notes(st: State<'_, AppState>, path: String) -> Res<usize> {
     }
     let refs = st.speech.log_refs.lock().unwrap().clone();
     let date = st.db.lock().unwrap().query_row("SELECT strftime('%d %m %Y', 'now', 'localtime')", [], |r| r.get::<_, String>(0)).unwrap_or_default();
-    let mut out = format!("Sermon transcript, {date}\r\n\r\n");
-    if !refs.is_empty() {
-        out.push_str("Scriptures\r\n");
-        let mut seen: Vec<&str> = vec![];
-        for (t, r) in &refs {
-            if !seen.contains(&r.as_str()) {
-                seen.push(r);
-                out.push_str(&format!("  {t}  {r}\r\n"));
-            }
-        }
-        out.push_str("\r\n");
-    }
-    out.push_str("What was said\r\n");
-    for (t, line) in &log {
-        out.push_str(&format!("[{t}] {line}\r\n"));
-    }
+    let out = notes_text(&date, &log, &refs);
     std::fs::write(&path, out.as_bytes()).map_err(|e| format!("The file could not be saved ({e})."))?;
     Ok(log.len())
+}
+
+/// The microphone level as the engines hear it: 0–100 %, 50 % leaves it as it is.
+/// Takes effect at once, even while listening.
+#[tauri::command(async)]
+pub fn speech_set_gain(st: State<'_, AppState>, percent: u32) -> Res<()> {
+    let p = percent.min(100);
+    GAIN.store(gain_factor(p).to_bits(), Ordering::Relaxed);
+    st.db.lock().unwrap().execute("INSERT OR REPLACE INTO setting (key, value) VALUES ('speech_gain', ?1)", [p.to_string()]).map_err(err)?;
+    Ok(())
+}
+
+/// The system's default microphone (marked in the list).
+#[tauri::command]
+pub async fn speech_default_mic() -> Option<String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        use cpal::traits::{DeviceTrait, HostTrait};
+        cpal::default_host().default_input_device().and_then(|d| d.description().ok().map(|d| d.name().to_string()))
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+#[derive(Serialize)]
+pub struct PastSession {
+    name: String,
+    bytes: u64,
+}
+
+/// Saved sermon transcripts, newest first.
+#[tauri::command(async)]
+pub fn speech_history(app: AppHandle) -> Vec<PastSession> {
+    let mut v: Vec<PastSession> = std::fs::read_dir(history_dir(&app))
+        .map(|rd| rd.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "txt")).map(|e| PastSession { name: e.file_name().to_string_lossy().trim_end_matches(".txt").to_string(), bytes: e.metadata().map(|m| m.len()).unwrap_or(0) }).collect())
+        .unwrap_or_default();
+    v.sort_by(|a, b| b.name.cmp(&a.name));
+    v
+}
+
+fn history_file(app: &AppHandle, name: &str) -> Res<PathBuf> {
+    if name.contains(['/', '\\']) || name.contains("..") {
+        return Err("Unknown transcript.".into());
+    }
+    Ok(history_dir(app).join(format!("{name}.txt")))
+}
+
+#[tauri::command(async)]
+pub fn speech_history_read(app: AppHandle, name: String) -> Res<String> {
+    std::fs::read_to_string(history_file(&app, &name)?).map_err(|_| "That transcript is no longer there.".into())
+}
+
+#[tauri::command(async)]
+pub fn speech_history_delete(app: AppHandle, name: String) -> Res<()> {
+    std::fs::remove_file(history_file(&app, &name)?).map_err(err)
+}
+
+#[cfg(test)]
+mod gain_tests {
+    #[test]
+    fn the_gain_slider() {
+        assert_eq!(super::gain_factor(50), 1.0, "50 % leaves the sound as it is");
+        assert_eq!(super::gain_factor(0), 0.0);
+        assert_eq!(super::gain_factor(25), 0.5);
+        assert_eq!(super::gain_factor(100), 4.0, "100 % is four times louder");
+        assert_eq!(super::gain_factor(250), 4.0, "never more");
+    }
 }

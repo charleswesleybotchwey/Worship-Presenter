@@ -5298,8 +5298,11 @@ dependencies = [
  "httparse",
  "log",
  "rand 0.9.5",
+ "rustls",
+ "rustls-pki-types",
  "sha1",
  "thiserror 2.0.21",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -6106,7 +6109,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "worship-presenter"
-version = "0.1.0"
+version = "2.1.0"
 dependencies = [
  "cpal",
  "fontdb",
@@ -6123,6 +6126,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tokio",
  "ttf-parser",
+ "tungstenite",
  "ureq",
  "whisper-rs",
  "windows-capture",
@@ -6135,7 +6139,7 @@ dependencies = [
 
 [[package]]
 name = "wp-audio"
-version = "0.1.0"
+version = "2.1.0"
 dependencies = [
  "rodio",
  "serde",
@@ -6143,7 +6147,7 @@ dependencies = [
 
 [[package]]
 name = "wp-core"
-version = "0.1.0"
+version = "2.1.0"
 dependencies = [
  "base64 0.22.1",
  "flate2",
@@ -6159,7 +6163,7 @@ dependencies = [
 
 [[package]]
 name = "wp-remote"
-version = "0.1.0"
+version = "2.1.0"
 dependencies = [
  "axum",
  "http-body-util",
@@ -6173,7 +6177,7 @@ dependencies = [
 
 [[package]]
 name = "wp-render"
-version = "0.1.0"
+version = "2.1.0"
 dependencies = [
  "cosmic-text",
  "image",
