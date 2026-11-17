@@ -104,8 +104,18 @@ Then, in GitHub → Settings → Secrets and variables → Actions, add:
 - Secret `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: its password.
 - Variable `TAURI_UPDATER_PUBKEY`: the contents of the `.pub` file.
 
-Keep the key and password safe: anyone with them could publish updates. The repository
-must be public for computers to download updates.
+Keep the key and password safe: anyone with them could publish updates.
+
+**Where updates come from.** Computers download updates without logging in to GitHub, so
+the releases must be public. Either make this repository public, or keep it private and
+publish to a separate public repository:
+
+1. Create a public repository, e.g. `Worship-Presenter-Releases`, with a README so it has
+   a `main` branch.
+2. Create a fine-grained token with "Contents: read and write" on that repository only.
+3. Here, under Settings → Secrets and variables → Actions, add the secret
+   `RELEASES_TOKEN` (the token) and the variable `RELEASES_REPO`
+   (e.g. `charleswesleybotchwey/Worship-Presenter-Releases`).
 
 **Building locally** (Node 22, Rust, and LLVM/CMake for Whisper): `npm run setup`, then
 `npm run dev`. Tests: `cargo test -p wp-core -p wp-remote -p wp-audio -p wp-render`.

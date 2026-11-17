@@ -483,11 +483,15 @@ async fn list_displays(app: AppHandle) -> Res<Vec<Display>> {
 /// it opens in a normal window on the control screen, so there is always a picture.
 #[tauri::command]
 async fn open_output(app: AppHandle, st: State<'_, AppState>, role: String, display_index: Option<usize>) -> Res<()> {
-    if let Some(f) = wp_core::options::output(&st.db.lock().unwrap(), &role).ok().and_then(|c| c.ndi) {
+    // read the settings in their own statements: inside an `if let`, the database would
+    // stay locked for the whole block (and saving below would wait for it forever)
+    let ndi = wp_core::options::output(&st.db.lock().unwrap(), &role).ok().and_then(|c| c.ndi);
+    if let Some(f) = ndi {
         return start_ndi_output(&app, &role, f);
     }
     // remember the monitor by index and name, so it is found again next time
-    if let Ok(mut c) = wp_core::options::output(&st.db.lock().unwrap(), &role) {
+    let cfg = wp_core::options::output(&st.db.lock().unwrap(), &role);
+    if let Ok(mut c) = cfg {
         let name = display_index.and_then(|i| app.available_monitors().ok().and_then(|m| m.get(i).and_then(|m| m.name().cloned())));
         c.display_index = display_index;
         c.display_name = name;

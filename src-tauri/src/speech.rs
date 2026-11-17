@@ -185,33 +185,61 @@ pub struct SpeechStatus {
 #[tauri::command(async)]
 pub fn speech_status(st: State<'_, AppState>) -> SpeechStatus {
     let s = &st.speech;
+    // each lock in its own statement: a lock taken inside one big expression is held to
+    // its end, and taking it again there waits forever (this froze the app at start-up)
+    let live = live_fields(s);
+    let caption = s.caption.lock().unwrap().clone();
+    let recent: Vec<Detection> = s.recent.lock().unwrap().iter().cloned().collect();
+    let problem = s.problem.lock().unwrap().clone();
+    let installing = s.install.lock().unwrap().clone();
+    let dir = speech_dir(&st);
+    let gain = st.db.lock().unwrap().query_row("SELECT value FROM setting WHERE key = 'speech_gain'", [], |r| r.get::<_, String>(0)).ok().and_then(|v| v.parse().ok()).unwrap_or(50);
     SpeechStatus {
-        listening: s.engine.lock().unwrap().clone(),
-        caption: s.caption.lock().unwrap().clone(),
-        recent: s.recent.lock().unwrap().iter().cloned().collect(),
-        problem: s.problem.lock().unwrap().clone(),
-        vosk_ready: vosk_ready(&speech_dir(&st)),
-        installing: s.install.lock().unwrap().clone(),
+        listening: live.engine,
+        caption,
+        recent,
+        problem,
+        vosk_ready: vosk_ready(&dir),
+        installing,
         windows_speech: cfg!(windows),
-        whisper_models: WHISPER_MODELS.iter().filter(|(m, _, _)| whisper_path(&speech_dir(&st), m).exists()).map(|(m, _, _)| m.to_string()).collect(),
-        starting: s.starting.load(Ordering::Relaxed) && s.engine.lock().unwrap().is_some(),
-        level: if s.engine.lock().unwrap().is_some() { f32::from_bits(LEVEL.load(Ordering::Relaxed)) } else { 0.0 },
-        lines: {
-            let l = s.log.lock().unwrap();
-            l[l.len().saturating_sub(300)..].to_vec()
-        },
-        warning: {
-            // after words had been coming: 30 s of speech and nothing back for 45 s
-            let last = s.last_text_ms.load(Ordering::Relaxed);
-            let engine = s.engine.lock().unwrap().clone();
-            if engine.is_some() && last > 0 && now_ms().saturating_sub(last) > 45_000 && VOICED_SINCE_TEXT_MS.load(Ordering::Relaxed) > 30_000 {
-                Some(if engine.as_deref() == Some("Deepgram") { "Connection seems unstable: transcription may be delayed.".into() } else { "Speech is coming in but no words are being recognised: check the microphone and the engine.".into() })
-            } else {
-                None
-            }
-        },
+        whisper_models: WHISPER_MODELS.iter().filter(|(m, _, _)| whisper_path(&dir, m).exists()).map(|(m, _, _)| m.to_string()).collect(),
+        starting: live.starting,
+        level: live.level,
+        lines: live.lines,
+        warning: live.warning,
         idle_paused: s.idle_paused.load(Ordering::Relaxed),
-        gain: st.db.lock().unwrap().query_row("SELECT value FROM setting WHERE key = 'speech_gain'", [], |r| r.get::<_, String>(0)).ok().and_then(|v| v.parse().ok()).unwrap_or(50),
+        gain,
+    }
+}
+
+pub(crate) struct LiveFields {
+    engine: Option<String>,
+    starting: bool,
+    level: f32,
+    lines: Vec<(String, String, Option<f32>)>,
+    warning: Option<String>,
+}
+
+/// The listening state, each lock taken and released on its own.
+pub(crate) fn live_fields(s: &Speech) -> LiveFields {
+    let engine = s.engine.lock().unwrap().clone();
+    let lines = {
+        let l = s.log.lock().unwrap();
+        l[l.len().saturating_sub(300)..].to_vec()
+    };
+    // after words had been coming: 30 s of speech and nothing back for 45 s
+    let last = s.last_text_ms.load(Ordering::Relaxed);
+    let warning = if engine.is_some() && last > 0 && now_ms().saturating_sub(last) > 45_000 && VOICED_SINCE_TEXT_MS.load(Ordering::Relaxed) > 30_000 {
+        Some(if engine.as_deref() == Some("Deepgram") { "Connection seems unstable: transcription may be delayed.".into() } else { "Speech is coming in but no words are being recognised: check the microphone and the engine.".into() })
+    } else {
+        None
+    };
+    LiveFields {
+        starting: s.starting.load(Ordering::Relaxed) && engine.is_some(),
+        level: if engine.is_some() { f32::from_bits(LEVEL.load(Ordering::Relaxed)) } else { 0.0 },
+        engine,
+        lines,
+        warning,
     }
 }
 
@@ -1178,5 +1206,23 @@ mod gain_tests {
         assert_eq!(super::gain_factor(25), 0.5);
         assert_eq!(super::gain_factor(100), 4.0, "100 % is four times louder");
         assert_eq!(super::gain_factor(250), 4.0, "never more");
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    /// The status is asked for every second from start-up: it must never wait on itself.
+    #[test]
+    fn the_status_never_freezes() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let s = super::Speech::default();
+            *s.engine.lock().unwrap() = Some("Whisper".into());
+            s.log.lock().unwrap().push(("10:00:00".into(), "turn to John".into(), Some(0.9)));
+            let f = super::live_fields(&s);
+            let _ = tx.send((f.engine, f.lines.len()));
+        });
+        let got = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("the status froze (a lock taken twice)");
+        assert_eq!(got, (Some("Whisper".to_string()), 1));
     }
 }
