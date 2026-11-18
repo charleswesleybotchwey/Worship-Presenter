@@ -14,6 +14,7 @@ pub mod import;
 pub mod jet;
 pub mod item_collections;
 pub mod library;
+pub mod lyrics_online;
 pub mod media;
 pub mod ndi;
 pub mod options;

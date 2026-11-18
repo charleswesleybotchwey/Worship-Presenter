@@ -300,6 +300,7 @@ export interface SpeechStatus {
   level?: number;
   /** This session's transcript: [time, words, confidence 0–1 or null]. */
   lines?: [string, string, number | null][];
+  lines_total?: number;
   warning?: string | null;
   idle_paused?: boolean;
   gain?: number;
@@ -500,6 +501,9 @@ export const api = {
   logError: (window: string, text: string) => call<void>("log_error", { window, text }),
   openLogs: () => call<void>("open_logs"),
   diagnosticReport: () => call<string>("diagnostic_report"),
+  lyricsSearch: (title: string, artist: string) => call<{ source: string; key: string; title: string; author: string; words: string | null }[]>("lyrics_search", { title, artist }),
+  lyricsWords: (source: string, key: string) => call<string>("lyrics_words", { source, key }),
+  lyricsAdd: (title: string, author: string, words: string, source: string) => call<number>("lyrics_add", { title, author, words, source }),
   bibleCatalogue: () => call<{ id: string; language: string; title: string }[]>("bible_catalogue"),
   bibleDownload: (id: string, code: string, title: string, lang: string) => call<number>("bible_download", { id, code, title, lang }),
   itemCollections: (kind: "scripture" | "media") => call<ItemCollection[]>("item_collections", { kind }),
@@ -550,7 +554,13 @@ export const api = {
   setSubtitles: (target: "stream" | "screens" | "both" | null) => call<LiveState>("set_subtitles", { target }),
   pulpitNotes: () => call<PulpitNote[]>("pulpit_notes"),
   pulpitDismiss: (id: number | null) => call<void>("pulpit_dismiss", { id }),
-  speechStatus: () => call<SpeechStatus>("speech_status"),
+  // the transcript is only sent when it has grown; the window keeps its own copy
+  speechStatus: async (): Promise<SpeechStatus> => {
+    const st = await call<SpeechStatus>("speech_status", { knownLines: speechLines.total });
+    if (st.lines_total != null && st.lines_total === speechLines.total && (st.lines ?? []).length === 0 && speechLines.total > 0) st.lines = speechLines.lines;
+    else if (st.lines_total != null) speechLines = { total: st.lines_total, lines: st.lines ?? [] };
+    return st;
+  },
   speechStart: (engine: string, mic: string | null, referencesOnly: boolean) => call<void>("speech_start", { engine, mic, referencesOnly }),
   speechStop: () => call<void>("speech_stop"),
   speechDismiss: (reference: string | null) => call<void>("speech_dismiss", { reference }),
@@ -972,6 +982,7 @@ let mMidi: { port: string | null; learning: string | null; map: Record<string, s
 let mSync: { folder: string | null; role: "share" | "follow" | null; shared_ms: number | null; taken_ms: number | null; waiting: [string, number] | null } = { folder: null, role: null, shared_ms: null, taken_ms: null, waiting: ["MAIN-PC", Date.now() - 600000] };
 let mRec: number | null = null;
 let mGain = 50;
+let speechLines: { total: number; lines: [string, string, number | null][] } = { total: -1, lines: [] };
 let mColls: { id: number; kind: "scripture" | "media"; name: string; items: ProgramItem[] }[] = [];
 // browser preview: theme rules matched on the sample songs' titles ("MHB 1" is in MHB)
 let mRules: ThemeRule[] = [];
@@ -1651,6 +1662,15 @@ async function mock(cmd: string, a: Record<string, unknown>): Promise<unknown> {
       return;
     case "diagnostic_report":
       return "Worship Presenter 0.1.0\nSystem: browser preview\n\nRecent log:\n(none)";
+    case "lyrics_search":
+      return [
+        { source: "Hymnary", key: "amazing_grace_how_sweet_the_sound", title: "Amazing grace! (how sweet the sound)", author: "John Newton", words: null },
+        { source: "LRCLIB", key: "123", title: "Way Maker", author: "Sinach", words: "You are here, moving in our midst\nI worship You\n\nWay maker, miracle worker\nPromise keeper\nLight in the darkness" },
+      ];
+    case "lyrics_words":
+      return "Amazing grace! how sweet the sound\nthat saved a wretch like me!\n\n'Twas grace that taught my heart to fear,\nand grace my fears relieved;";
+    case "lyrics_add":
+      return 99;
     case "bible_catalogue":
       return [
         { id: "engwebp", language: "English", title: "World English Bible" },

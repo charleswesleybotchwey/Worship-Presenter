@@ -87,11 +87,13 @@ impl Speech {
                 let window = said.iter().map(|(_, s)| s.as_str()).collect::<Vec<_>>().join(" ");
                 drop(said);
                 let st = app.state::<AppState>();
-                // the Bibles of the reading on the screens, else every Bible
-                let versions: Vec<String> = match &*st.item.lock().unwrap() {
-                    Some(crate::ProgramItem::Scripture { versions, .. }) => versions.clone(),
-                    _ => vec![],
+                // the Bibles of the reading on the screens, else one Bible (checking every
+                // Bible took over a second each time with 20 Bibles, holding the library)
+                let live: Option<Vec<String>> = match &*st.item.lock().unwrap() {
+                    Some(crate::ProgramItem::Scripture { versions, .. }) => Some(versions.clone()),
+                    _ => None,
                 };
+                let versions = live.unwrap_or_else(|| recognition_bible(&st.db.lock().unwrap()).into_iter().collect());
                 let quote = wp_core::speech_quote::find(&st.db.lock().unwrap(), &versions, &window).ok().flatten();
                 if let Some(q) = quote {
                     let reference = format!("{} {}:{}", speech_ref::book_display(q.book_no), q.chapter, q.verse);
@@ -173,8 +175,10 @@ pub struct SpeechStatus {
     starting: bool,
     /// The microphone level as the engine hears it (0–1, after the gain).
     level: f32,
-    /// This session's transcript (time, words, confidence 0–1), the last 300 lines.
+    /// This session's transcript (time, words, confidence 0–1), the last 300 lines; empty
+    /// when the window already has them all (`known_lines` = `lines_total`).
     lines: Vec<(String, String, Option<f32>)>,
+    lines_total: usize,
     /// Speech is coming in but no words come back (a slow connection, a stuck engine).
     warning: Option<String>,
     /// Paused after 10 minutes without speech.
@@ -183,11 +187,11 @@ pub struct SpeechStatus {
 }
 
 #[tauri::command(async)]
-pub fn speech_status(st: State<'_, AppState>) -> SpeechStatus {
+pub fn speech_status(st: State<'_, AppState>, known_lines: Option<usize>) -> SpeechStatus {
     let s = &st.speech;
     // each lock in its own statement: a lock taken inside one big expression is held to
     // its end, and taking it again there waits forever (this froze the app at start-up)
-    let live = live_fields(s);
+    let live = live_fields(s, known_lines);
     let caption = s.caption.lock().unwrap().clone();
     let recent: Vec<Detection> = s.recent.lock().unwrap().iter().cloned().collect();
     let problem = s.problem.lock().unwrap().clone();
@@ -206,6 +210,7 @@ pub fn speech_status(st: State<'_, AppState>) -> SpeechStatus {
         starting: live.starting,
         level: live.level,
         lines: live.lines,
+        lines_total: live.lines_total,
         warning: live.warning,
         idle_paused: s.idle_paused.load(Ordering::Relaxed),
         gain,
@@ -213,6 +218,7 @@ pub fn speech_status(st: State<'_, AppState>) -> SpeechStatus {
 }
 
 pub(crate) struct LiveFields {
+    lines_total: usize,
     engine: Option<String>,
     starting: bool,
     level: f32,
@@ -221,11 +227,12 @@ pub(crate) struct LiveFields {
 }
 
 /// The listening state, each lock taken and released on its own.
-pub(crate) fn live_fields(s: &Speech) -> LiveFields {
+pub(crate) fn live_fields(s: &Speech, known: Option<usize>) -> LiveFields {
     let engine = s.engine.lock().unwrap().clone();
-    let lines = {
+    let (lines, lines_total) = {
         let l = s.log.lock().unwrap();
-        l[l.len().saturating_sub(300)..].to_vec()
+        // nothing new since the window last asked: do not send the lines again
+        if known == Some(l.len()) { (vec![], l.len()) } else { (l[l.len().saturating_sub(300)..].to_vec(), l.len()) }
     };
     // after words had been coming: 30 s of speech and nothing back for 45 s
     let last = s.last_text_ms.load(Ordering::Relaxed);
@@ -239,6 +246,7 @@ pub(crate) fn live_fields(s: &Speech) -> LiveFields {
         level: if engine.is_some() { f32::from_bits(LEVEL.load(Ordering::Relaxed)) } else { 0.0 },
         engine,
         lines,
+        lines_total,
         warning,
     }
 }
@@ -422,6 +430,17 @@ pub async fn speech_start(app: AppHandle, engine: String, mic: Option<String>, r
     *st.speech.engine.lock().unwrap() = Some(label.into());
     if label != "Whisper" && label != "Deepgram" {
         st.speech.ready(); // these start at once; Whisper loads a model, Deepgram connects
+    }
+    // prepare the recognition Bible's word index now, not in the middle of the sermon
+    {
+        let h = app.clone();
+        std::thread::spawn(move || {
+            let st = h.state::<AppState>();
+            let code = recognition_bible(&st.db.lock().unwrap());
+            if let Some(code) = code {
+                let _ = wp_core::browse::search_bible(&st.db.lock().unwrap(), &[code], "lord", 1);
+            }
+        });
     }
     // pause after 10 minutes without speech (saves the transcript, offers Resume)
     {
@@ -1219,10 +1238,17 @@ mod status_tests {
             let s = super::Speech::default();
             *s.engine.lock().unwrap() = Some("Whisper".into());
             s.log.lock().unwrap().push(("10:00:00".into(), "turn to John".into(), Some(0.9)));
-            let f = super::live_fields(&s);
-            let _ = tx.send((f.engine, f.lines.len()));
+            let f = super::live_fields(&s, None);
+            let again = super::live_fields(&s, Some(1));
+            let _ = tx.send((f.engine, f.lines.len() + again.lines.len() * 10));
         });
         let got = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("the status froze (a lock taken twice)");
         assert_eq!(got, (Some("Whisper".to_string()), 1));
     }
+}
+
+/// The Bible used to recognise a verse read aloud when no reading is on the screens: the
+/// first English Bible, else the first Bible.
+pub(crate) fn recognition_bible(conn: &rusqlite::Connection) -> Option<String> {
+    conn.query_row("SELECT code FROM bible_version ORDER BY (lang LIKE 'en%') DESC, id LIMIT 1", [], |r| r.get(0)).ok()
 }

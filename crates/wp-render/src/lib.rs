@@ -409,9 +409,29 @@ impl Renderer {
                 }
             }
         }
-        // glyph coverage into a mask the size of the frame
+        // glyph coverage into a mask covering only the words and room around them for the
+        // shadow, its blur and the outline (not the whole frame: several times faster)
         let (fw, fh) = (px.width() as i32, px.height() as i32);
-        let mut mask = vec![0u8; (fw * fh) as usize];
+        let unit = h / 100.0;
+        let sh = &s["shadow"];
+        let ol = &s["outline"];
+        let mut margin = 8.0f32;
+        if sh["on"].as_bool() == Some(true) {
+            margin += (sh["x"].as_f64().unwrap_or(0.0).abs() + sh["y"].as_f64().unwrap_or(0.0).abs()) as f32 * unit + 3.0 * (sh["blur"].as_f64().unwrap_or(0.5) as f32 * unit / 2.0) + 2.0;
+        }
+        if ol["on"].as_bool() == Some(true) {
+            margin += ol["width"].as_f64().unwrap_or(0.15) as f32 * unit + 2.0;
+        }
+        let x0 = ((r.left() - margin).floor() as i32).clamp(0, fw);
+        let x1 = ((r.right() + margin).ceil() as i32).clamp(0, fw);
+        let y0 = ((top.min(r.top()) - margin).floor() as i32).clamp(0, fh);
+        let y1 = (((top + eh).max(r.bottom()) + margin).ceil() as i32).clamp(0, fh);
+        let (rw, rh) = ((x1 - x0).max(0), (y1 - y0).max(0));
+        if rw == 0 || rh == 0 {
+            return;
+        }
+        let area = Area { x: x0 as usize, y: y0 as usize, w: rw as usize };
+        let mut mask = vec![0u8; (rw * rh) as usize];
         let (ox, oy) = (r.left().round() as i32, top.round() as i32);
         buf.draw(&mut self.fonts, &mut self.cache, Color::rgba(255, 255, 255, 255), |x, y, w, hh, col| {
             let a = col.a();
@@ -420,38 +440,35 @@ impl Renderer {
             }
             for yy in 0..hh as i32 {
                 for xx in 0..w as i32 {
-                    let (gx, gy) = (ox + x + xx, oy + y + yy);
-                    if gx >= 0 && gy >= 0 && gx < fw && gy < fh {
-                        let i = (gy * fw + gx) as usize;
+                    let (gx, gy) = (ox + x + xx - x0, oy + y + yy - y0);
+                    if gx >= 0 && gy >= 0 && gx < rw && gy < rh {
+                        let i = (gy * rw + gx) as usize;
                         mask[i] = mask[i].max(a);
                     }
                 }
             }
         });
-        let unit = h / 100.0;
-        let sh = &s["shadow"];
         if sh["on"].as_bool() == Some(true) {
             if let Some(col) = parse_color(sh["color"].as_str().unwrap_or("#000000cc")) {
                 let dx = (sh["x"].as_f64().unwrap_or(0.0) as f32 * unit).round() as i32;
                 let dy = (sh["y"].as_f64().unwrap_or(0.0) as f32 * unit).round() as i32;
                 let blur = (sh["blur"].as_f64().unwrap_or(0.5) as f32 * unit / 2.0).round().max(0.0) as usize;
-                let shadow = blurred(&shifted(&mask, fw as usize, fh as usize, dx, dy), fw as usize, fh as usize, blur);
-                paint_mask(px, &shadow, with_alpha(col, opacity));
+                let shadow = blurred(&shifted(&mask, rw as usize, rh as usize, dx, dy), rw as usize, rh as usize, blur);
+                paint_mask(px, &shadow, area, with_alpha(col, opacity));
             }
         }
-        let ol = &s["outline"];
         if ol["on"].as_bool() == Some(true) {
             if let Some(col) = parse_color(ol["color"].as_str().unwrap_or("#000000")) {
                 let rad = (ol["width"].as_f64().unwrap_or(0.15) as f32 * unit).round().max(1.0) as usize;
-                paint_mask(px, &dilated(&mask, fw as usize, fh as usize, rad), with_alpha(col, opacity));
+                paint_mask(px, &dilated(&mask, rw as usize, rh as usize, rad), area, with_alpha(col, opacity));
             }
         }
         let g = &s["gradient"];
         match (parse_color(g["from"].as_str().unwrap_or("")), parse_color(g["to"].as_str().unwrap_or(""))) {
-            (Some(a), Some(b)) if g.is_object() => paint_mask_gradient(px, &mask, outer, a, b, g["angle"].as_f64().unwrap_or(180.0) as f32, opacity),
+            (Some(a), Some(b)) if g.is_object() => paint_mask_gradient(px, &mask, area, outer, a, b, g["angle"].as_f64().unwrap_or(180.0) as f32, opacity),
             _ => {
                 if let Some(col) = parse_color(s["color"].as_str().unwrap_or("#ffffff")) {
-                    paint_mask(px, &mask, with_alpha(col, opacity));
+                    paint_mask(px, &mask, area, with_alpha(col, opacity));
                 }
             }
         }
@@ -555,15 +572,24 @@ fn draw_image(px: &mut Pixmap, img: &Pixmap, r: Rect, cover: bool, opacity: f32)
     px.draw_pixmap(0, 0, img.as_ref(), &paint, Transform::from_row(scale, 0.0, 0.0, scale, tx, ty), Some(&clip));
 }
 
-fn paint_mask(px: &mut Pixmap, mask: &[u8], col: tiny_skia::Color) {
+/// Where a mask sits in the frame (its top-left corner and width).
+#[derive(Clone, Copy)]
+struct Area {
+    x: usize,
+    y: usize,
+    w: usize,
+}
+
+fn paint_mask(px: &mut Pixmap, mask: &[u8], at: Area, col: tiny_skia::Color) {
     let c = col.premultiply().to_color_u8();
+    let fw = px.width() as usize;
     let data = px.data_mut();
     for (i, &m) in mask.iter().enumerate() {
         if m == 0 {
             continue;
         }
         let a = m as u32 * c.alpha() as u32 / 255;
-        let o = i * 4;
+        let o = ((at.y + i / at.w) * fw + at.x + i % at.w) * 4;
         let inv = 255 - a;
         let src = [c.red() as u32 * m as u32 / 255, c.green() as u32 * m as u32 / 255, c.blue() as u32 * m as u32 / 255, a];
         for k in 0..4 {
@@ -601,7 +627,7 @@ fn fill_rect_shader(px: &mut Pixmap, r: Rect, shader: tiny_skia::Shader<'static>
 }
 
 /// Words filled with a gradient across their layer.
-fn paint_mask_gradient(px: &mut Pixmap, mask: &[u8], r: Rect, from: tiny_skia::Color, to: tiny_skia::Color, angle: f32, opacity: f32) {
+fn paint_mask_gradient(px: &mut Pixmap, mask: &[u8], at: Area, r: Rect, from: tiny_skia::Color, to: tiny_skia::Color, angle: f32, opacity: f32) {
     let w = px.width() as usize;
     let (a, b) = gradient_line(r, angle);
     let (vx, vy) = (b.x - a.x, b.y - a.y);
@@ -612,12 +638,12 @@ fn paint_mask_gradient(px: &mut Pixmap, mask: &[u8], r: Rect, from: tiny_skia::C
         if m == 0 {
             continue;
         }
-        let (x, y) = ((i % w) as f32, (i / w) as f32);
+        let (x, y) = ((at.x + i % at.w) as f32, (at.y + i / at.w) as f32);
         let k = (((x - a.x) * vx + (y - a.y) * vy) / len2).clamp(0.0, 1.0);
         let mix = |p: u8, q: u8| p as f32 + (q as f32 - p as f32) * k;
         let alpha = mix(f.alpha(), t.alpha()) / 255.0 * opacity * m as f32 / 255.0;
         let src = [mix(f.red(), t.red()) * alpha, mix(f.green(), t.green()) * alpha, mix(f.blue(), t.blue()) * alpha, alpha * 255.0];
-        let o = i * 4;
+        let o = ((at.y + i / at.w) * w + at.x + i % at.w) * 4;
         for c in 0..4 {
             data[o + c] = (src[c] + data[o + c] as f32 * (1.0 - alpha)).round().clamp(0.0, 255.0) as u8;
         }

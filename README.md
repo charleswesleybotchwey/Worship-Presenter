@@ -7,7 +7,8 @@ Works like EasyWorship, with extras such as automatic scripture recognition.
 ## What it does
 
 - **Songs** with two languages on one slide (e.g. English and Fante), chords for the band,
-  and quick hymn numbers ("555", "MHB 1").
+  and quick hymn numbers ("555", "MHB 1"). Find a song's words online by title and artist
+  (Songs → right-click → Find lyrics online): Hymnary.org for hymns, LRCLIB for others.
 - **Scriptures** from any Bible you add, including free downloads (Scriptures → More
   available…). English references work in every Bible.
 - **Scripture recognition**: listens to the preacher and suggests the verse being
@@ -93,9 +94,11 @@ what happened. The app keeps a log of errors; it records no song words or notes.
 **Builds.** Every push builds the installers on GitHub (**Actions** → "Windows installer"
 → Artifacts). Test that build before releasing it.
 
-**Releasing.** Create a release with a new tag, e.g. `v2.2`; the workflow builds it and
-attaches the installers. Use a higher number each time (`v2.2.1` for fixes, `v2.3` for
-new features). Church computers then update themselves.
+**Releasing.** Actions → **Windows installer** → **Run workflow** → type the new version
+(e.g. `2.2`) → Run. That run builds, signs and publishes the release (pushing a tag such
+as `v2.2` does the same). Use a higher number each time (`2.2.1` for fixes, `2.3` for new
+features). Church computers then update themselves. Ordinary pushes only make test builds
+(Artifacts) and skip the release step.
 
 **Update signing (one time).** Run `npx tauri signer generate -w worship-presenter.key`.
 Then, in GitHub → Settings → Secrets and variables → Actions, add:
@@ -122,7 +125,7 @@ publish to a separate public repository:
 A GitHub Codespace has everything installed; `npm run preview` shows the interface in a
 browser.
 
-**More detail**: the design brief and the security audit are in `docs/`.
+**More detail**: the design brief, the security audit and the performance audit are in `docs/`.
 
 **Third-party parts**: Noto Sans fonts (SIL Open Font License). Downloaded by the app when
 first needed: FFmpeg (recording), the Whisper and Vosk speech models, and Bibles from

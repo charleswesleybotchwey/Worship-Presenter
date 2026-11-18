@@ -8,6 +8,7 @@ import { printServiceOrder } from "./print";
 import { RecordPanel, type RecStatus } from "./RecordPanel";
 import { useMainAspect } from "./live/aspect";
 import { TranscriptPanel } from "./TranscriptPanel";
+import { LyricsFinder } from "./LyricsFinder";
 import { GoLiveContext } from "./dnd";
 import { api, isDesktop, type PulpitNote, type SpeechStatus, onLibraryRestored, onProfileChanged, onSettingsChanged, type LangMode, type LiveState, type MediaItem, type Mode, type ProgramItem, type Schedule, type Slide, type Timer } from "./api";
 import { SlideView } from "./SlideView";
@@ -136,7 +137,7 @@ export function Control() {
   const [, setSourceTab] = useState<"schedule" | "library">("schedule");
   const [, setCompactTask] = useState<"schedule" | "library" | "preview">("preview");
   const [notice, setNotice] = useState<{ text: string; bad?: boolean; action?: { label: string; run: () => void } } | null>(null);
-  const [layer, setLayer] = useState<null | "palette" | "outputs" | "import" | "backups" | "profiles" | "service" | "timer" | "alert" | "music" | "camera" | "preservice" | "offering" | "outline" | "record">(null);
+  const [layer, setLayer] = useState<null | "palette" | "outputs" | "import" | "backups" | "profiles" | "service" | "timer" | "alert" | "music" | "camera" | "preservice" | "offering" | "outline" | "record" | "lyrics">(null);
   const music = useMusic();
   const [profile, setProfile] = useState({ slug: "default", name: "" });
   const [libraryVersion, setLibraryVersion] = useState(0);
@@ -513,9 +514,11 @@ export function Control() {
   useEffect(() => {
     const open = () => setLayer("offering");
     const outline = () => setLayer("outline");
+    const lyrics = () => setLayer("lyrics");
+    window.addEventListener("wp-lyrics", lyrics);
     window.addEventListener("wp-offering", open);
     window.addEventListener("wp-outline", outline);
-    return () => (window.removeEventListener("wp-offering", open), window.removeEventListener("wp-outline", outline));
+    return () => (window.removeEventListener("wp-offering", open), window.removeEventListener("wp-outline", outline), window.removeEventListener("wp-lyrics", lyrics));
   }, []);
   // slides take the main output's shape (4:3 projector → 4:3 Preview, Live and editor)
   useMainAspect();
@@ -681,6 +684,7 @@ export function Control() {
       { id: "song-search", group: "Library", label: "Search songs", hint: "Ctrl+F", run: () => (setActiveTab("service"), setLibTab("songs"), setSourceTab("library"), setTimeout(() => songSearch.current?.focus())) },
       { id: "quick", group: "Library", label: "Quick scripture", hint: "Ctrl+G", run: () => (setActiveTab("service"), setTimeout(() => quickInput.current?.focus())) },
       { id: "new-song", group: "Library", label: "New song", run: () => openTab({ id: "song", songId: null }) },
+      { id: "lyrics", group: "Library", label: "Find lyrics online…", run: () => setLayer("lyrics") },
       { id: "ann", group: "Library", label: "Announcements (offering, birthdays, welcome loop)", keywords: "notices slides momo tithe", run: () => (setActiveTab("service"), setLibTab("presentations"), setSourceTab("library")) },
       { id: "media", group: "Library", label: "Media library", run: () => (setActiveTab("service"), setLibTab("media"), setSourceTab("library")) },
       { id: "import", group: "Settings", label: "Import songs, Bibles and presentations", run: () => (setSettingsPage("import"), openTab({ id: "settings" })) },
@@ -1556,6 +1560,12 @@ export function Control() {
           onPreview={(r) => heardPreview(r)}
           onLive={(r) => heardLive(r)}
           onClose={() => setTranscriptOpen(false)}
+        />
+      )}
+      {layer === "lyrics" && (
+        <LyricsFinder
+          onClose={() => setLayer(null)}
+          onAdded={(id, t) => (setLayer(null), setLibraryVersion((v) => v + 1), openTab({ id: "song", songId: id }), say(`“${t}” is in your songs: check the verses and chorus, then save.`))}
         />
       )}
       {layer === "record" && <RecordPanel status={rec} onClose={() => setLayer(null)} refresh={() => void api.streamStatus().then(setRec).catch(() => {})} />}

@@ -1001,6 +1001,10 @@ async fn sync_take_now(app: AppHandle) -> Res<String> {
     .map_err(err)?
 }
 
+/// Set when this build carries the update key (the updater is switched on); without it,
+/// asking the updater crashes, so the update commands check this first.
+static UPDATER_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 #[derive(Serialize)]
 struct UpdateInfo {
     version: String,
@@ -1011,6 +1015,9 @@ struct UpdateInfo {
 #[tauri::command]
 async fn update_check(app: AppHandle) -> Res<Option<UpdateInfo>> {
     use tauri_plugin_updater::UpdaterExt;
+    if !UPDATER_ON.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err("Automatic updates are not set up in this build.".into());
+    }
     let updater = app.updater().map_err(|_| "Automatic updates are not set up in this build.".to_string())?;
     let u = updater.check().await.map_err(|e| format!("Could not check for updates ({e})."))?;
     Ok(u.map(|u| UpdateInfo { version: u.version.clone(), notes: u.body.clone() }))
@@ -1020,6 +1027,9 @@ async fn update_check(app: AppHandle) -> Res<Option<UpdateInfo>> {
 #[tauri::command]
 async fn update_install(app: AppHandle, st: State<'_, AppState>) -> Res<()> {
     use tauri_plugin_updater::UpdaterExt;
+    if !UPDATER_ON.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err("Automatic updates are not set up in this build.".into());
+    }
     if st.item.lock().unwrap().is_some() && st.live.lock().unwrap().mode == Mode::Live {
         return Err("Something is live: install the update after the service.".into());
     }
@@ -1067,6 +1077,92 @@ fn diagnostic_report(app: AppHandle, st: State<'_, AppState>) -> String {
         st.ndi.jobs.lock().unwrap().keys().cloned().collect::<Vec<_>>().join(", "),
         applog::recent(150)
     )
+}
+
+// ---------- finding lyrics online (Hymnary.org, LRCLIB) ----------
+
+fn web_text(url: &str) -> Result<String, String> {
+    let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(12)).user_agent(concat!("Worship Presenter/", env!("CARGO_PKG_VERSION"), " (github.com/charleswesleybotchwey/Worship-Presenter)")).build();
+    let r = agent.get(url).call().map_err(|e| format!("No answer from the website ({e}). Check the internet connection."))?;
+    r.into_string().map_err(err)
+}
+
+fn enc(s: &str) -> String {
+    s.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
+}
+
+/// Songs matching a title (and artist) on Hymnary.org and LRCLIB, hymns first.
+#[tauri::command]
+async fn lyrics_search(title: String, artist: String) -> Res<Vec<wp_core::lyrics_online::Found>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if title.trim().is_empty() {
+            return Err("Type the song's title.".into());
+        }
+        let hymns = web_text(&format!("https://hymnary.org/search?qu=%20tuneTitle%3A{}%20media%3Atext%20in%3Atexts&export=csv", enc(title.trim())))
+            .map(|csv| wp_core::lyrics_online::hymnary_results(&csv))
+            .unwrap_or_default();
+        let mut url = format!("https://lrclib.net/api/search?track_name={}", enc(title.trim()));
+        if !artist.trim().is_empty() {
+            url.push_str(&format!("&artist_name={}", enc(artist.trim())));
+        }
+        let songs = web_text(&url).map(|j| wp_core::lyrics_online::lrclib_results(&j));
+        if hymns.is_empty() {
+            if let Err(e) = &songs {
+                return Err(e.clone());
+            }
+        }
+        let mut all = hymns;
+        all.extend(songs.unwrap_or_default());
+        Ok(all)
+    })
+    .await
+    .map_err(err)?
+}
+
+/// The words of one result (Hymnary gives them on the hymn's page).
+#[tauri::command]
+async fn lyrics_words(source: String, key: String) -> Res<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+            return Err("Unknown song.".into());
+        }
+        match source.as_str() {
+            "Hymnary" => {
+                let html = web_text(&format!("https://hymnary.org/text/{key}"))?;
+                wp_core::lyrics_online::hymnary_words(&html).ok_or_else(|| "Hymnary does not show the full words of this hymn (it may still be under copyright).".into())
+            }
+            "LRCLIB" => {
+                let json = web_text(&format!("https://lrclib.net/api/get/{key}"))?;
+                let v: serde_json::Value = serde_json::from_str(&json).map_err(err)?;
+                v["plainLyrics"].as_str().map(str::to_string).ok_or_else(|| "No words for this song.".into())
+            }
+            _ => Err("Unknown source.".into()),
+        }
+    })
+    .await
+    .map_err(err)?
+}
+
+/// Adds the words as a new song (verses and chorus marked), ready to check in the editor.
+#[tauri::command(async)]
+fn lyrics_add(st: State<'_, AppState>, title: String, author: String, words: String, source: String) -> Res<i64> {
+    let body = wp_core::lyrics_online::to_song_body(&words);
+    if body.is_empty() {
+        return Err("There are no words to add.".into());
+    }
+    let doc = wp_core::songs::SongDoc {
+        id: None,
+        title: title.trim().to_string(),
+        author: Some(author.trim().to_string()).filter(|a| !a.is_empty()),
+        copyright: Some(format!("Words from {source}")),
+        ccli: None,
+        numbers: vec![],
+        lyrics: vec![wp_core::songs::Lyric { lang: "en".into(), body }],
+        sequence: String::new(),
+        lines_per_slide: None,
+        key: None,
+    };
+    wp_core::songs::save(&st.db.lock().unwrap(), &doc).map_err(err)
 }
 
 /// eBible.org's freely shareable Bibles (needs internet).
@@ -2214,6 +2310,7 @@ fn set_window_look(app: AppHandle, dark: bool) {
 /// The control window starts hidden and appears once its first frame is drawn.
 #[tauri::command(async)]
 fn show_main_window(app: AppHandle) {
+    applog::write("START", "the service window is drawn: showing it");
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
         let _ = w.set_focus();
@@ -2625,9 +2722,48 @@ pub fn run() {
             let has_key = app.config().plugins.0.get("updater").and_then(|u| u.get("pubkey")).and_then(|k| k.as_str()).is_some_and(|k| !k.trim().is_empty());
             if has_key {
                 app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
+                UPDATER_ON.store(true, std::sync::atomic::Ordering::Relaxed);
             }
             // the app's own log (crashes, errors, important events)
             applog::init(app.path().app_data_dir()?.join("Logs"));
+            // the main thread must keep answering: if it is stuck for 5 s, say so in the log
+            {
+                let h = app.handle().clone();
+                std::thread::spawn(move || {
+                    let beat = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+                    let mut stuck_since: Option<Instant> = None;
+                    let mut n = 0u64;
+                    loop {
+                        n += 1;
+                        let b = beat.clone();
+                        let _ = h.run_on_main_thread(move || b.store(n, std::sync::atomic::Ordering::Relaxed));
+                        std::thread::sleep(Duration::from_secs(2));
+                        if beat.load(std::sync::atomic::Ordering::Relaxed) < n {
+                            let since = *stuck_since.get_or_insert_with(Instant::now);
+                            if since.elapsed() >= Duration::from_secs(4) {
+                                applog::write("STUCK", &format!("the main thread has not answered for {} s", since.elapsed().as_secs() + 2));
+                            }
+                        } else if let Some(since) = stuck_since.take() {
+                            applog::write("STUCK", &format!("the main thread answers again after {} s", since.elapsed().as_secs() + 2));
+                        }
+                    }
+                });
+            }
+            applog::write("START", "setting up");
+            // the window stays hidden until the interface has drawn; if that never comes,
+            // show it anyway after 15 s (and say so in the log) rather than look dead
+            {
+                let h = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_secs(15));
+                    if let Some(w) = h.get_webview_window("main") {
+                        if !w.is_visible().unwrap_or(true) {
+                            applog::write("STUCK", "the interface did not finish loading in 15 s: showing the window anyway");
+                            let _ = w.show();
+                        }
+                    }
+                });
+            }
             let root = app.path().app_data_dir()?.join("profiles");
             std::fs::create_dir_all(&root)?;
             let slug = wp_core::profiles::ensure_default(&root)?;
@@ -2790,6 +2926,7 @@ pub fn run() {
                 }
                 std::thread::sleep(Duration::from_millis(1000));
             });
+            applog::write("START", "setup finished");
             Ok(())
         })
         // closing the control window ends Worship Presenter: outputs, music, the phone
@@ -2955,6 +3092,9 @@ pub fn run() {
             outline_deck,
             item_collections,
             bible_catalogue,
+            lyrics_search,
+            lyrics_words,
+            lyrics_add,
             log_error,
             update_check,
             update_install,

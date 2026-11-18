@@ -240,6 +240,7 @@ function SongsTab({
             const by = (col: Sort["col"], label: string): MenuEntry => ({ label, checked: sort?.col === col, run: () => setSort({ col, dir: 1 }) });
             return [
               { label: "&New Song...", run: onNew },
+              { label: "Find lyrics &online...", run: () => window.dispatchEvent(new CustomEvent("wp-lyrics")) },
               { label: "&Edit Song...", run: () => onEdit(row.id) },
               "-",
               {
