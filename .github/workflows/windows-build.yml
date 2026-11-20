@@ -29,7 +29,10 @@ permissions:
 # Actions are pinned to exact commits (a tag like v4 can be moved by whoever controls it).
 jobs:
   build:
-    runs-on: windows-latest
+    # pinned: GitHub's newer Windows image (Visual Studio 2026) points CMake at an assembler
+    # that is not installed, so whisper.cpp cannot be configured ("CMAKE_ASM_COMPILER ...
+    # is not a full path to an existing compiler tool"). Move on once that image is fixed.
+    runs-on: windows-2022
     timeout-minutes: 90
     outputs:
       tag: ${{ steps.ver.outputs.tag }}
