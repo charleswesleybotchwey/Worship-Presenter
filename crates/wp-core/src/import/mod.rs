@@ -2,6 +2,7 @@
 //! the library inside a single transaction and returns a report with counts.
 //! Nothing is truncated or dropped without a line in `import_log`.
 
+pub mod ews;
 pub mod bibleshow;
 pub mod ew_songs;
 pub mod ewb;

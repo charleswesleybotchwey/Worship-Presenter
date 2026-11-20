@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { pickThemeOpen, pickThemeSave, type ForeignDesign, type ItemCollection } from "../../api";
+import { pickFolder, pickThemeOpen, pickThemeSave, type ForeignDesign, type ItemCollection } from "../../api";
 import { ForeignThemeImport } from "../../theme/ForeignThemeImport";
 import { ThemeRules } from "../../theme/ThemeRules";
 import { BibleStore } from "../../BibleStore";
+import { SmartCollection } from "./SmartCollection";
 import { Gallery } from "../../theme/Gallery";
 import { recolorToBrand } from "../../theme/brand";
 import { api, type ChapterView, type VerseHit, type MediaItem, type ProgramItem, type SongRow, type SongScope, type SongTree, type Version } from "../../api";
@@ -70,7 +71,7 @@ function SongsTab({
 }: {
   searchRef: React.RefObject<HTMLInputElement>;
   version: number;
-  onPreview: (i: ProgramItem) => void;
+  onPreview: (i: ProgramItem, start?: string) => void;
   onAdd: (i: ProgramItem) => void;
   onEdit: (id: number) => void;
   onNew: () => void;
@@ -83,7 +84,11 @@ function SongsTab({
   const [rows, setRows] = useState<SongRow[]>([]);
   const [sort, setSort] = useState<Sort | null>(null);
   const [sel, setSel] = useState<number | null>(null);
-  const [menu, setMenu] = useState<{ x: number; y: number; row?: SongRow; folder?: { id: number; name: string } } | null>(null);
+  // several songs at once: Ctrl+click adds or removes one, Shift+click takes a range
+  const [multi, setMulti] = useState<Set<number>>(new Set());
+  const anchorIdx = useRef<number | null>(null);
+  const picked = (id: number) => multi.has(id) || (multi.size === 0 && sel === id);
+  const [menu, setMenu] = useState<{ x: number; y: number; row?: SongRow; folder?: { id: number; name: string; smart?: boolean } } | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [bump, setBump] = useState(0);
 
@@ -104,7 +109,10 @@ function SongsTab({
 
   const item = (r: SongRow): ProgramItem => ({ kind: "song", song_id: r.id, title: r.title });
   const scopeKey = scope.kind === "all" ? "all" : scope.kind === "hymnal" ? `hymnal:${scope.code}` : `mine:${scope.id}`;
-  const pick = (key: string) => setScope(key === "all" ? { kind: "all" } : key.startsWith("hymnal:") ? { kind: "hymnal", code: key.slice(7) } : { kind: "mine", id: Number(key.slice(5)) });
+  // "mine:3", or "mine:3:smart" for a collection kept by rules
+  const mineId = (key: string) => parseInt(key.slice(5), 10);
+  const pick = (key: string) => setScope(key === "all" ? { kind: "all" } : key.startsWith("hymnal:") ? { kind: "hymnal", code: key.slice(7) } : { kind: "mine", id: mineId(key) });
+  const [smartEdit, setSmartEdit] = useState<{ id: number | null; name: string } | null>(null);
   const head = (col: Sort["col"], label: string) => (
     <button className="lt-th" onClick={() => setSort(sort?.col === col ? (sort.dir === 1 ? { col, dir: -1 } : null) : { col, dir: 1 })} aria-sort={sort?.col === col ? (sort.dir === 1 ? "ascending" : "descending") : "none"}>
       {label} {sort?.col === col ? (sort.dir === 1 ? "▲" : "▼") : ""}
@@ -157,16 +165,20 @@ function SongsTab({
             {tree?.mine.map((f) => (
               <button
                 key={f.key}
-                className={`lt-node lt-node--sub ${scopeKey === f.key ? "is-selected" : ""}`}
+                className={`lt-node lt-node--sub ${scopeKey === `mine:${mineId(f.key)}` ? "is-selected" : ""}`}
                 onClick={() => pick(f.key)}
-                onContextMenu={(e) => (e.preventDefault(), setMenu({ x: e.clientX, y: e.clientY, folder: { id: Number(f.key.slice(5)), name: f.name } }))}
+                onContextMenu={(e) => (e.preventDefault(), setMenu({ x: e.clientX, y: e.clientY, folder: { id: mineId(f.key), name: f.name, smart: f.key.endsWith(":smart") } }))}
                 onDragOver={(e) => e.preventDefault()}
                 onDrop={(e) => {
+                  if (f.key.endsWith(":smart")) return void act(async () => undefined, `“${f.name}” fills itself from its rules: right-click it → Edit rules.`);
                   const raw = e.dataTransfer.getData(DRAG_TYPE);
-                  const it = raw ? (JSON.parse(raw) as ProgramItem) : null;
-                  if (it?.kind === "song") void act(() => api.collectionAdd(Number(f.key.slice(5)), [it.song_id]), `Added to “${f.name}”.`);
+                  const v = raw ? (JSON.parse(raw) as ProgramItem | ProgramItem[]) : null;
+                  const ids = (Array.isArray(v) ? v : v ? [v] : []).flatMap((it) => (it.kind === "song" ? [it.song_id] : []));
+                  if (ids.length) void act(() => api.collectionAdd(mineId(f.key), ids), `Added to “${f.name}”.`);
                 }}
+                title={f.key.endsWith(":smart") ? "A smart collection: the songs matching its rules" : undefined}
               >
+                {f.key.endsWith(":smart") && <span aria-hidden="true">⚙ </span>}
                 {f.name} <span className="lt-count">{f.count}</span>
               </button>
             ))}
@@ -179,6 +191,17 @@ function SongsTab({
             >
               + New collection
             </button>
+            <button className="lt-node lt-node--sub lt-node--add" onClick={() => setSmartEdit({ id: null, name: "Wesley hymns" })} title="A collection that fills itself: songs matching rules you set">
+              + New smart collection
+            </button>
+            {smartEdit && (
+              <SmartCollection
+                id={smartEdit.id}
+                name={smartEdit.name}
+                onClose={() => setSmartEdit(null)}
+                onSaved={() => (setSmartEdit(null), void act(async () => undefined, "Collection saved."))}
+              />
+            )}
           </>
         )}
       </aside>
@@ -197,14 +220,31 @@ function SongsTab({
               <div
                 key={r.id}
                 role="row"
-                aria-selected={sel === r.id}
-                className={`lt-row lt-row--songs ${sel === r.id ? "is-selected" : ""}`}
+                aria-selected={picked(r.id)}
+                className={`lt-row lt-row--songs ${picked(r.id) ? "is-selected" : ""}`}
                 style={{ top: (win.range.from + k) * ROW_H }}
                 draggable
-                onDragStart={(e) => dragItem(e, item(r))}
-                onClick={() => (setSel(r.id), onPreview(item(r)))}
+                onDragStart={(e) => dragItem(e, multi.size > 1 && multi.has(r.id) ? sorted.filter((x) => multi.has(x.id)).map(item) : item(r))}
+                onClick={(e) => {
+                  const idx = win.range.from + k;
+                  if (e.ctrlKey || e.metaKey) {
+                    const m = new Set(multi.size ? multi : sel != null ? [sel] : []);
+                    if (m.has(r.id)) m.delete(r.id);
+                    else m.add(r.id);
+                    anchorIdx.current = idx;
+                    return setMulti(m);
+                  }
+                  if (e.shiftKey && anchorIdx.current != null) {
+                    const [a, b] = [Math.min(anchorIdx.current, idx), Math.max(anchorIdx.current, idx)];
+                    return setMulti(new Set(sorted.slice(a, b + 1).map((x) => x.id)));
+                  }
+                  anchorIdx.current = idx;
+                  setMulti(new Set());
+                  setSel(r.id);
+                  onPreview(item(r));
+                }}
                 onDoubleClick={() => onPreview(item(r))}
-                onContextMenu={(e) => (e.preventDefault(), setSel(r.id), setMenu({ x: e.clientX, y: e.clientY, row: r }))}
+                onContextMenu={(e) => (e.preventDefault(), multi.has(r.id) || (setMulti(new Set()), setSel(r.id)), setMenu({ x: e.clientX, y: e.clientY, row: r }))}
                 title={r.first_line ?? r.title}
               >
                 <span className="wp-num">{r.number ?? ""}</span>
@@ -238,9 +278,14 @@ function SongsTab({
           entries={(() => {
             const row = menu.row!;
             const by = (col: Sort["col"], label: string): MenuEntry => ({ label, checked: sort?.col === col, run: () => setSort({ col, dir: 1 }) });
+            const several = multi.size > 1 && multi.has(row.id) ? sorted.filter((x) => multi.has(x.id)) : [];
             return [
+              ...(several.length
+                ? ([{ label: `&Add ${several.length} songs to the schedule`, run: () => several.forEach((x) => onAdd(item(x))) }, "-"] as MenuEntry[])
+                : []),
               { label: "&New Song...", run: onNew },
               { label: "Find lyrics &online...", run: () => window.dispatchEvent(new CustomEvent("wp-lyrics")) },
+              { label: "Find and &replace in songs...", run: () => window.dispatchEvent(new CustomEvent("wp-replace")) },
               { label: "&Edit Song...", run: () => onEdit(row.id) },
               "-",
               {
@@ -276,6 +321,9 @@ function SongsTab({
       )}
       {menu?.folder && (
         <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)}>
+          <button role="menuitem" onClick={() => (setMenu(null), setSmartEdit({ id: menu.folder!.id, name: menu.folder!.name }))}>
+            {menu.folder.smart ? "Edit rules…" : "Make smart (rules)…"}
+          </button>
           <button
             role="menuitem"
             onClick={() => {
@@ -304,7 +352,7 @@ function SongsTab({
 
 // ---------- Scriptures ----------
 
-function ScripturesTab({ refInput, onPreview, onAdd }: { refInput: React.RefObject<HTMLInputElement>; onPreview: (i: ProgramItem) => void; onAdd: (i: ProgramItem) => void }) {
+function ScripturesTab({ refInput, onPreview, onAdd }: { refInput: React.RefObject<HTMLInputElement>; onPreview: (i: ProgramItem, start?: string) => void; onAdd: (i: ProgramItem) => void }) {
   const [versions, setVersions] = useState<Version[]>([]);
   const [primary, setPrimary] = useState<string>("");
   const [second, setSecond] = useState<string>("");
@@ -320,7 +368,11 @@ function ScripturesTab({ refInput, onPreview, onAdd }: { refInput: React.RefObje
   }, []);
   // a reference opens its chapter; anything else is searched as words
   const [hits, setHits] = useState<VerseHit[] | null>(null);
-  const [verseMenu, setVerseMenu] = useState<{ x: number; y: number; item: ProgramItem; text: string; version: string } | null>(null);
+  const [verseMenu, setVerseMenu] = useState<{ x: number; y: number; item: ProgramItem; text: string; version: string; several?: ProgramItem[] } | null>(null);
+  // word-search results chosen together
+  const [hitSel, setHitSel] = useState<Set<number>>(new Set());
+  const hitAnchor = useRef<number | null>(null);
+  const hitItem = (h: { reference: string; version: string }): ProgramItem => ({ kind: "scripture", reference: h.reference, versions: second && second !== h.version ? [h.version, second] : [h.version] });
   // EasyWorship's View and Sort by for the verse table (remembered)
   const [cols, setColsRaw] = useState<{ ver: boolean; ref: boolean }>(() => JSON.parse(localStorage.getItem("wp-scripture-cols") || '{"ver":true,"ref":true}'));
   const setCols = (c: { ver: boolean; ref: boolean }) => (setColsRaw(c), localStorage.setItem("wp-scripture-cols", JSON.stringify(c)));
@@ -382,11 +434,24 @@ function ScripturesTab({ refInput, onPreview, onAdd }: { refInput: React.RefObje
   };
 
   const live = useGoLive();
+  const shownHits = hitSort && hits ? [...hits].sort((x, y) => (hitSort === "translation" ? x.version.localeCompare(y.version) : 0) || 0) : hits;
+  useEffect(() => setHitSel(new Set()), [hits]);
   const vers = second && second !== primary ? [primary, second] : [primary];
   const refFor = (from: number, to: number) => (view ? `${view.book} ${view.chapter}:${from}${to > from ? "-" + to : ""}` : "");
   const show = (from: number, to: number) => {
     setRange({ from, to });
     onPreview({ kind: "scripture", reference: refFor(from, to), versions: vers });
+  };
+  // one verse chosen: the whole chapter goes to Preview, on that verse (as EasyWorship)
+  const chapterItem = (): ProgramItem | null => {
+    if (!view?.rows.length) return null;
+    const last = view.rows[view.rows.length - 1].verse;
+    return { kind: "scripture", reference: `${view.book} ${view.chapter}:${view.rows[0].verse}-${last}`, versions: vers };
+  };
+  const showChapter = (verse: number) => {
+    const it = chapterItem();
+    setRange({ from: verse, to: verse });
+    if (it) onPreview(it, `${view!.chapter}:${verse}`);
   };
   const goChapter = (d: number) => view && setTyped(`${view.book} ${Math.max(1, Math.min(view.chapters, view.chapter + d))}`);
 
@@ -484,15 +549,37 @@ function ScripturesTab({ refInput, onPreview, onAdd }: { refInput: React.RefObje
           <span className="lt-th">Scripture</span>
         </div>
         <div className="lt-body" role="grid">
-          {(hitSort && hits ? [...hits].sort((x, y) => (hitSort === "translation" ? x.version.localeCompare(y.version) : 0) || 0) : hits)?.map((h) => (
+          {shownHits?.map((h, hi) => (
             <div
               key={h.version + h.reference}
               role="row"
-              className="lt-row lt-row--verses lt-row--flow"
+              aria-selected={hitSel.has(hi)}
+              className={`lt-row lt-row--verses lt-row--flow ${hitSel.has(hi) ? "is-selected" : ""}`}
               draggable
-              onDragStart={(e) => dragItem(e, { kind: "scripture", reference: h.reference, versions: second && second !== h.version ? [h.version, second] : [h.version] })}
-              onClick={() => onPreview({ kind: "scripture", reference: h.reference, versions: second && second !== h.version ? [h.version, second] : [h.version] })}
-              onContextMenu={(e) => (e.preventDefault(), setVerseMenu({ x: e.clientX, y: e.clientY, text: h.text, version: h.version, item: { kind: "scripture", reference: h.reference, versions: second && second !== h.version ? [h.version, second] : [h.version] } }))}
+              onDragStart={(e) => dragItem(e, hitSel.size > 1 && hitSel.has(hi) ? [...hitSel].sort((a, b) => a - b).map((k) => hitItem(shownHits![k])) : hitItem(h))}
+              onClick={(e) => {
+                // several results at once: Ctrl+click adds or removes one, Shift+click a range
+                if (e.ctrlKey || e.metaKey) {
+                  const m = new Set(hitSel);
+                  if (m.has(hi)) m.delete(hi);
+                  else m.add(hi);
+                  hitAnchor.current = hi;
+                  return setHitSel(m);
+                }
+                if (e.shiftKey && hitAnchor.current != null) {
+                  const [a, b] = [Math.min(hitAnchor.current, hi), Math.max(hitAnchor.current, hi)];
+                  return setHitSel(new Set(Array.from({ length: b - a + 1 }, (_, k) => a + k)));
+                }
+                hitAnchor.current = hi;
+                setHitSel(new Set([hi]));
+                onPreview(hitItem(h));
+              }}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                const several = hitSel.size > 1 && hitSel.has(hi) ? [...hitSel].sort((a, b) => a - b).map((k) => hitItem(shownHits![k])) : [];
+                if (!several.length) setHitSel(new Set([hi]));
+                setVerseMenu({ x: e.clientX, y: e.clientY, text: h.text, version: h.version, item: hitItem(h), several });
+              }}
               title="Click to preview; drag to the schedule; right-click for more"
             >
               <span>{h.version}</span>
@@ -518,7 +605,11 @@ function ScripturesTab({ refInput, onPreview, onAdd }: { refInput: React.RefObje
                 onDragStart={(e) => dragItem(e, { kind: "scripture", reference: refFor(r.verse, r.verse), versions: vers })}
                 onClick={(e) => {
                   if (e.shiftKey && anchor.current != null) show(Math.min(anchor.current, r.verse), Math.max(anchor.current, r.verse));
-                  else (anchor.current = r.verse), show(r.verse, r.verse);
+                  else (anchor.current = r.verse), showChapter(r.verse);
+                }}
+                onDoubleClick={() => {
+                  const it = chapterItem();
+                  if (it) live(it, `${view.chapter}:${r.verse}`);
                 }}
                 onContextMenu={(e) => {
                   e.preventDefault();
@@ -579,6 +670,13 @@ function ScripturesTab({ refInput, onPreview, onAdd }: { refInput: React.RefObje
           y={verseMenu.y}
           onClose={() => setVerseMenu(null)}
           entries={[
+            ...(verseMenu.several?.length
+              ? ([
+                  { label: `&Add ${verseMenu.several.length} readings to the schedule`, run: () => verseMenu.several!.forEach((it) => onAdd(it)) },
+                  { label: "Select none", run: () => setHitSel(new Set()) },
+                  "-",
+                ] as MenuEntry[])
+              : []),
             {
               label: "&View",
               sub: [
@@ -627,6 +725,9 @@ function ThemesTab({ version, previewKind, onUseForItem, onEdit }: { version: nu
   const [rows, setRows] = useState<ThemeRow[]>([]);
   const [kind, setKind] = useState<ThemeKind>("song");
   const [sel, setSel] = useState<number | null>(null);
+  // several themes at once (Ctrl+click, Shift+click): delete, move, copy, export, re-colour
+  const [multi, setMulti] = useState<Set<number>>(new Set());
+  const anchor = useRef<number | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; row: ThemeRow | null } | null>(null);
   const [foreign, setForeign] = useState<{ path: string; designs: ForeignDesign[] } | null>(null);
@@ -640,7 +741,47 @@ function ThemesTab({ version, previewKind, onUseForItem, onEdit }: { version: nu
   const list = rows.filter((r) => r.kind === kind).sort((x, y) => (order === "newest" ? y.id - x.id : x.name.localeCompare(y.name, undefined, { numeric: true })));
   // EasyWorship's wording: "New Song Theme...", "Set As Default Presentation Theme"
   const kindName = ({ song: "Song", scripture: "Scripture", lower_third: "Lower Third", announcement: "Presentation" } as Record<string, string>)[kind] ?? KIND_NAMES[kind] ?? kind;
-  const menuEntries = (r: ThemeRow | null): MenuEntry[] => [
+  const chosenMany = (r: ThemeRow | null) => (r && multi.size > 1 && multi.has(r.id) ? list.filter((x) => multi.has(x.id)) : []);
+  // the same action on every chosen theme; reports what was done and what was skipped
+  const batch = async (rs: ThemeRow[], verb: string, f: (r: ThemeRow) => Promise<unknown>, skip?: (r: ThemeRow) => string | null) => {
+    let done = 0;
+    const skipped: string[] = [];
+    for (const r of rs) {
+      const why = skip?.(r);
+      if (why) {
+        skipped.push(`“${r.name}” (${why})`);
+        continue;
+      }
+      try {
+        await f(r);
+        done++;
+      } catch (e) {
+        skipped.push(`“${r.name}” (${String(e instanceof Error ? e.message : e)})`);
+      }
+    }
+    setMulti(new Set());
+    setNote(`${verb} ${done} theme${done === 1 ? "" : "s"}.${skipped.length ? ` Skipped: ${skipped.join(", ")}.` : ""}`);
+    load();
+  };
+  const moveTo = (rs: ThemeRow[], to: ThemeKind) =>
+    batch(rs, `Moved to ${KIND_NAMES[to] ?? to}:`, (r) => api.saveTheme(r.id, { ...r.theme, kind: to }), (r) => (r.kind === to ? "already there" : r.is_default ? "the default theme stays" : null));
+  const manyEntries = (rs: ThemeRow[]): MenuEntry[] => [
+    { label: `&Delete ${rs.length} themes`, run: () => confirm(`Delete ${rs.length} themes? Default themes are kept.`) && void batch(rs, "Deleted", (r) => api.deleteTheme(r.id), (r) => (r.is_default ? "the default theme" : null)) },
+    { label: `&Move ${rs.length} themes to`, sub: THEME_KINDS.filter((k) => k !== kind).map((k) => ({ label: KIND_NAMES[k] ?? k, run: () => void moveTo(rs, k) })) },
+    { label: `D&uplicate ${rs.length} themes`, run: () => void batch(rs, "Copied", (r) => api.duplicateTheme(r.id)) },
+    {
+      label: `E&xport ${rs.length} themes...`,
+      run: async () => {
+        const folder = await pickFolder();
+        if (folder) void batch(rs, "Exported", (r) => api.exportTheme(r.id, `${folder}/${r.name.replace(/[\\/:*?"<>|]/g, "_")}.wptheme`));
+      },
+    },
+    { label: `Re-colour ${rs.length} themes to &Brand`, run: () => confirm(`Re-colour ${rs.length} themes with the brand kit?`) && void batch(rs, "Re-coloured", (r) => api.saveTheme(r.id, recolorToBrand(r.theme))) },
+    "-",
+    { label: "Select none", run: () => setMulti(new Set()) },
+  ];
+  const menuEntries = (r: ThemeRow | null): MenuEntry[] => (chosenMany(r).length ? manyEntries(chosenMany(r)) : singleEntries(r));
+  const singleEntries = (r: ThemeRow | null): MenuEntry[] => [
     { label: `&New ${kindName} Theme...`, run: () => onEdit({ newKind: kind }) },
     { label: `&Edit ${kindName} Theme...`, disabled: !r, run: () => r && onEdit({ id: r.id }) },
     "-",
@@ -730,7 +871,18 @@ function ThemesTab({ version, previewKind, onUseForItem, onEdit }: { version: nu
       <aside className="lt-tree" aria-label="Theme kinds">
         <div className="lt-group">Themes</div>
         {THEME_KINDS.map((k) => (
-          <button key={k} className={`lt-node ${kind === k ? "is-selected" : ""}`} onClick={() => setKind(k)}>
+          <button
+            key={k}
+            className={`lt-node ${kind === k ? "is-selected" : ""}`}
+            onClick={() => (setKind(k), setMulti(new Set()))}
+            // drop themes here to move them to this kind
+            onDragOver={(e) => e.dataTransfer.types.includes("application/x-wp-themes") && e.preventDefault()}
+            onDrop={(e) => {
+              const ids = JSON.parse(e.dataTransfer.getData("application/x-wp-themes") || "[]") as number[];
+              const rs = rows.filter((x) => ids.includes(x.id));
+              if (rs.length) void moveTo(rs, k);
+            }}
+          >
             <Icon name="theme" /> {KIND_NAMES[k] ?? k} <span className="lt-count">{rows.filter((r) => r.kind === k).length}</span>
           </button>
         ))}
@@ -747,10 +899,33 @@ function ThemesTab({ version, previewKind, onUseForItem, onEdit }: { version: nu
           {list.map((r) => (
             <button
               key={r.id}
-              className={`lt-theme ${sel === r.id ? "is-selected" : ""}`}
-              onClick={() => setSel(r.id)}
+              className={`lt-theme ${(multi.size ? multi.has(r.id) : sel === r.id) ? "is-selected" : ""}`}
+              aria-pressed={multi.size ? multi.has(r.id) : sel === r.id}
+              draggable
+              onDragStart={(e) => {
+                const ids = multi.size > 1 && multi.has(r.id) ? [...multi] : [r.id];
+                e.dataTransfer.setData("application/x-wp-themes", JSON.stringify(ids));
+                e.dataTransfer.setData("text/plain", ids.length > 1 ? `${ids.length} themes` : r.name);
+              }}
+              onClick={(e) => {
+                const idx = list.findIndex((x) => x.id === r.id);
+                if (e.ctrlKey || e.metaKey) {
+                  const m = new Set(multi.size ? multi : sel != null ? [sel] : []);
+                  if (m.has(r.id)) m.delete(r.id);
+                  else m.add(r.id);
+                  anchor.current = idx;
+                  return setMulti(m);
+                }
+                if (e.shiftKey && anchor.current != null) {
+                  const [a, b] = [Math.min(anchor.current, idx), Math.max(anchor.current, idx)];
+                  return setMulti(new Set(list.slice(a, b + 1).map((x) => x.id)));
+                }
+                anchor.current = idx;
+                setMulti(new Set());
+                setSel(r.id);
+              }}
               onDoubleClick={() => onEdit({ id: r.id })}
-              onContextMenu={(e) => (e.preventDefault(), setSel(r.id), setMenu({ x: e.clientX, y: e.clientY, row: r }))}
+              onContextMenu={(e) => (e.preventDefault(), multi.has(r.id) || (setMulti(new Set()), setSel(r.id)), setMenu({ x: e.clientX, y: e.clientY, row: r }))}
               title="Double-click to edit; right-click for more"
             >
               <div className="lt-theme__pic">
@@ -817,7 +992,7 @@ export function LibraryDock(p: {
   songSearch: React.RefObject<HTMLInputElement>;
   refInput: React.RefObject<HTMLInputElement>;
   previewKind: ProgramItem["kind"] | null;
-  onPreview: (i: ProgramItem) => void;
+  onPreview: (i: ProgramItem, start?: string) => void;
   onAdd: (i: ProgramItem) => void;
   onEditSong: (id: number) => void;
   onNewSong: () => void;

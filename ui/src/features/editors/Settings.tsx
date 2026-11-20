@@ -1,3 +1,4 @@
+import { StageLayoutEditor } from "../../StageLayoutEditor";
 import { useEffect, useState } from "react";
 import { api, pickCsvSave, pickFolder, pickRecording, pickTextSave, type SpeechStatus, type NdiStatus, type RemoteStatus, type ServiceInterval, type UsageRow } from "../../api";
 import { OutputOptions } from "./OutputOptions";
@@ -10,7 +11,7 @@ import type { OutputView } from "../../live/outputs";
 // Settings (design brief §5): compact category list, one 680 px column of labelled
 // rows with short explanations.
 
-type Cat = "appearance" | "brand" | "import" | "backups" | "profiles" | "sync" | "buttons" | "keyboard" | "projection" | "outputs" | "intervals" | "speech" | "remote" | "library" | "about";
+type Cat = "appearance" | "brand" | "import" | "backups" | "profiles" | "sync" | "scripture" | "stage" | "buttons" | "keyboard" | "projection" | "outputs" | "intervals" | "speech" | "remote" | "library" | "about";
 const CATS: { id: Cat; label: string }[] = [
   { id: "appearance", label: "Appearance" },
   { id: "brand", label: "Brand kit" },
@@ -18,6 +19,8 @@ const CATS: { id: Cat; label: string }[] = [
   { id: "backups", label: "Backups" },
   { id: "profiles", label: "Profiles" },
   { id: "sync", label: "Sync" },
+  { id: "scripture", label: "Scripture display" },
+  { id: "stage", label: "Stage display" },
   { id: "keyboard", label: "Keyboard" },
   { id: "buttons", label: "Buttons and MIDI" },
   { id: "projection", label: "Projection" },
@@ -241,6 +244,49 @@ export function Settings({
           {cat === "brand" && <BrandKit />}
           {cat === "buttons" && <ButtonsPanel />}
           {cat === "sync" && <SyncPanel />}
+          {cat === "stage" && <StageLayoutEditor />}
+          {cat === "scripture" && (
+            <section>
+              <h2>Scripture display</h2>
+              <p className="wp-note">As EasyWorship's Scripture options. They apply the next time a reading goes to Preview or Live.</p>
+              <Row name="Verse numbers" hint="Before each verse's words">
+                <select className="wp-input" value={core.scripture_verse_numbers ?? ""} onChange={(e) => void setCoreKey("scripture_verse_numbers", e.target.value)} aria-label="Verse numbers">
+                  <option value="">Hide</option>
+                  <option value="on">Show (16 For God…)</option>
+                  <option value="super">Show small and raised (¹⁶ For God…)</option>
+                </select>
+              </Row>
+              <Row name="Verses per slide" hint="EasyWorship's “break on new verse”: one verse per slide, or short verses flowing together">
+                <select className="wp-input" value={core.scripture_verses_per_slide || "1"} onChange={(e) => void setCoreKey("scripture_verses_per_slide", e.target.value)} aria-label="Verses per slide">
+                  {["1", "2", "3", "4"].map((n) => (
+                    <option key={n} value={n}>
+                      {n === "1" ? "One verse per slide" : `Up to ${n} verses per slide`}
+                    </option>
+                  ))}
+                </select>
+              </Row>
+              <Row name="Reference location" hint="Where the reference layer of the theme shows">
+                <select className="wp-input" value={core.scripture_ref_where ?? ""} onChange={(e) => void setCoreKey("scripture_ref_where", e.target.value)} aria-label="Reference location">
+                  <option value="">Every slide</option>
+                  <option value="first">First slide only</option>
+                  <option value="last">Last slide only</option>
+                  <option value="none">Never</option>
+                </select>
+              </Row>
+              <Row name="Reference shows" hint="The whole reading, or the verses on that slide">
+                <select className="wp-input" value={core.scripture_ref_scope ?? ""} onChange={(e) => void setCoreKey("scripture_ref_scope", e.target.value)} aria-label="Reference shows">
+                  <option value="">The whole passage (John 3:16-18)</option>
+                  <option value="verse">This slide's verses (John 3:17)</option>
+                </select>
+              </Row>
+              <Row name="Abbreviate book names" hint="Jn 3:16 instead of John 3:16 (EasyWorship's abbreviations)">
+                <input type="checkbox" checked={core.scripture_abbrev === "true"} onChange={(e) => void setCoreKey("scripture_abbrev", e.target.checked ? "true" : "false")} aria-label="Abbreviate book names" />
+              </Row>
+              <Row name="Show reference only" hint="Hide the scripture text (e.g. a lower third naming the reading)">
+                <input type="checkbox" checked={core.scripture_ref_only === "true"} onChange={(e) => void setCoreKey("scripture_ref_only", e.target.checked ? "true" : "false")} aria-label="Show reference only" />
+              </Row>
+            </section>
+          )}
           {cat === "import" && (
             <section>
               <h2>Import</h2>

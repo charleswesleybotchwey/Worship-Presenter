@@ -59,9 +59,17 @@ pub fn song_tree(conn: &Connection) -> Result<SongTree> {
         })?
         .collect::<std::result::Result<_, _>>()?;
     let mut st = conn.prepare("SELECT c.id, c.name, (SELECT count(*) FROM my_collection_item i WHERE i.collection_id = c.id) FROM my_collection c ORDER BY c.name")?;
-    let mine = st
+    let mut mine: Vec<Folder> = st
         .query_map([], |r| Ok(Folder { key: format!("mine:{}", r.get::<_, i64>(0)?), name: r.get(1)?, count: r.get(2)? }))?
         .collect::<std::result::Result<_, _>>()?;
+    // smart collections: counted by their rules, marked "smart:" in the key
+    for f in mine.iter_mut() {
+        let id: i64 = f.key[5..].parse().unwrap_or(0);
+        if let Some(rules) = crate::smart::get(conn, id)? {
+            f.count = crate::smart::songs(conn, &rules)?.len() as i64;
+            f.key = format!("mine:{id}:smart");
+        }
+    }
     Ok(SongTree { all, collections, mine })
 }
 
@@ -95,12 +103,16 @@ pub fn browse_songs(conn: &Connection, scope: &Scope, query: &str) -> Result<Vec
                 .query_map([code], |r| r.get(0))?
                 .collect::<std::result::Result<_, _>>()?,
         ),
-        Scope::Mine { id } => Some(
-            conn.prepare("SELECT song_id FROM my_collection_item WHERE collection_id = ?1 ORDER BY idx")?
+        Scope::Mine { id } => Some(match crate::smart::get(conn, *id)? {
+            // a smart collection: the songs matching its rules
+            Some(rules) => crate::smart::songs(conn, &rules)?,
+            None => conn
+                .prepare("SELECT song_id FROM my_collection_item WHERE collection_id = ?1 ORDER BY idx")?
                 .query_map([id], |r| r.get(0))?
                 .collect::<std::result::Result<_, _>>()?,
-        ),
+        }),
     };
+    let smart = matches!(scope, Scope::Mine { id } if crate::smart::get(conn, *id).ok().flatten().is_some());
     let ids: Vec<i64> = if query.trim().is_empty() {
         match scoped {
             Some(v) => v,
@@ -135,7 +147,7 @@ pub fn browse_songs(conn: &Connection, scope: &Scope, query: &str) -> Result<Vec
         }
     }
     // a search keeps its relevance order; a folder is listed in number order
-    if query.trim().is_empty() && !matches!(scope, Scope::Mine { .. }) {
+    if query.trim().is_empty() && (smart || !matches!(scope, Scope::Mine { .. })) {
         rows.sort_by(|a, b| a.sort_key.cmp(&b.sort_key));
     }
     Ok(rows)

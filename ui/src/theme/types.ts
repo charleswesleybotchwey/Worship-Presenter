@@ -34,6 +34,18 @@ export interface TextStyle {
   lineHeight: number;
   letterSpacing: number;
   uppercase: boolean;
+  /** EasyWorship's "Capitalise all words" / "first word of each line" (as drawn only). */
+  capitalize?: "none" | "words" | "lines";
+  /** Word wrapping (default on); off keeps each line whole and shrinks to fit the width. */
+  wrap?: boolean;
+  /** Margins inside the text box, in % of the screen height. */
+  margin?: { l: number; r: number; t: number; b: number };
+  /** The same size on every slide of the item (the size at which all of them fit). */
+  normalize?: boolean;
+  /** Even line lengths (no long line and a short leftover word). */
+  balance?: boolean;
+  /** How the words appear on each new slide (EasyWorship's text animations). */
+  enter?: "none" | "fade" | "rise" | "fly" | "type";
   autoFit: boolean;
   minSize: number;
   shadow: { on: boolean; color: string; blur: number; x: number; y: number };
@@ -125,15 +137,26 @@ export interface Theme {
     image: string | null;
     video?: string | null;
     poster?: string | null;
-    fit: "cover" | "contain";
+    /** cover: fill the screen; contain: show all of it; fill: stretch to the screen */
+    fit: "cover" | "contain" | "fill";
     dim: number;
+    /** EasyWorship's background Rotate (degrees) and flips, opacity and video volume. */
+    turn?: number;
+    flipH?: boolean;
+    flipV?: boolean;
+    /** 0–1 (1 = as it is) */
+    opacity?: number;
+    /** 0–1; heard from the main output only (0 = silent, the default) */
+    volume?: number;
     gradient?: Gradient | null;
     /** More moving backgrounds that take turns with the main one. */
     set?: { video: string; poster: string | null }[];
     /** When the turn passes: each song/reading gets its own, or one per service (day). */
     rotate?: "item" | "service";
   };
-  transition: { kind: "cut" | "fade" | "slide-up" | "wipe" | "zoom" | "push"; ms: number };
+  /** Two languages line by line (each line, then its translation) in the words layer. */
+  pairLines?: boolean;
+  transition: { kind: "cut" | "fade" | "slide-up" | "wipe" | "zoom" | "push" | "cover" | "cube" | "drop" | "iris" | "pageflip"; ms: number };
   layers: Layer[];
   /** Choruses, bridges… styled apart from the verses. */
   sections?: Partial<Record<SectionKind, SectionStyle>>;
@@ -233,8 +256,13 @@ export function blankTheme(kind: ThemeKind): Theme {
 
 /** Content a theme draws: the current slide plus item details. */
 export interface SlideData {
+  /** This view may play a background video's sound (the main output only). */
+  sound?: boolean;
   primary: string[];
   second: string[];
+  /** Every slide's words in this item (for "the same size on every slide"). */
+  allPrimary?: string[][];
+  allSecond?: string[][];
   /** "Verse 1", "Chorus"… for songs (shown only by a section-label layer). */
   section?: string | null;
   /** The slide is its item's first / last (for layers shown only there). */

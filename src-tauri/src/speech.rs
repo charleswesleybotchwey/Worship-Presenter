@@ -142,7 +142,7 @@ impl Speech {
     }
 }
 
-fn speech_dir(st: &AppState) -> PathBuf {
+pub(crate) fn speech_dir(st: &AppState) -> PathBuf {
     st.profile_dir().parent().map(|p| p.join("speech")).unwrap_or_else(|| st.profile_dir().join("speech"))
 }
 
@@ -156,7 +156,7 @@ fn vosk_lib_name() -> &'static str {
     }
 }
 
-fn vosk_ready(dir: &Path) -> bool {
+pub(crate) fn vosk_ready(dir: &Path) -> bool {
     dir.join("vosk").join(vosk_lib_name()).exists() && dir.join("vosk").join("model").join("am").exists()
 }
 
@@ -781,26 +781,130 @@ fn vosk_engine_url() -> String {
     format!("https://github.com/alphacep/vosk-api/releases/download/v{VOSK_VERSION}/vosk-{platform}-{VOSK_VERSION}.zip")
 }
 
-pub(crate) fn download(url: &str, progress: &dyn Fn(String), what: &str) -> Result<Vec<u8>, String> {
-    use std::io::Read;
-    let resp = ureq::get(url).timeout(Duration::from_secs(600)).call().map_err(|e| format!("Could not download the {what} ({e}). Check the internet connection."))?;
-    let total: Option<usize> = resp.header("Content-Length").and_then(|v| v.parse().ok());
-    let mut r = resp.into_reader();
-    let mut buf = Vec::with_capacity(total.unwrap_or(1 << 20));
-    let mut chunk = [0u8; 1 << 16];
-    loop {
-        let n = r.read(&mut chunk).map_err(|e| format!("The {what} download stopped ({e})."))?;
-        if n == 0 {
-            break;
-        }
-        buf.extend_from_slice(&chunk[..n]);
-        let mb = buf.len() as f64 / 1_048_576.0;
-        progress(match total {
-            Some(t) => format!("Downloading the {what}: {mb:.0} of {:.0} MB", t as f64 / 1_048_576.0),
-            None => format!("Downloading the {what}: {mb:.0} MB"),
-        });
+/// The agent for downloads: a slow but working connection is never cut off (no limit on
+/// the whole transfer); only 20 s to connect, or 60 s with no data at all, count as
+/// failures.
+pub(crate) fn download_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(20))
+        .timeout_read(Duration::from_secs(60))
+        .timeout_write(Duration::from_secs(60))
+        .user_agent(concat!("Worship Presenter/", env!("CARGO_PKG_VERSION")))
+        .build()
+}
+
+/// Downloads to a file, written as it arrives (not held in memory). A dropped connection
+/// carries on from where it stopped (HTTP Range), up to 8 tries with growing pauses.
+pub(crate) fn download_to(url: &str, dest: &Path, progress: &dyn Fn(String), what: &str) -> Result<(), String> {
+    use std::io::{Read, Write};
+    let part = PathBuf::from(format!("{}.download", dest.display()));
+    if let Some(p) = part.parent() {
+        std::fs::create_dir_all(p).map_err(err)?;
     }
-    Ok(buf)
+    let agent = download_agent();
+    let mut tries = 0u32;
+    let mut last_err = String::new();
+    loop {
+        if tries > 0 {
+            if tries > 8 {
+                return Err(format!("The {what} download kept stopping ({last_err}). It will carry on from where it stopped if you try again."));
+            }
+            let wait = Duration::from_secs((2u64 << tries.min(4)).min(30));
+            progress(format!("The {what} download stopped; trying again in {} s…", wait.as_secs()));
+            std::thread::sleep(wait);
+        }
+        tries += 1;
+        let have = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
+        let mut req = agent.get(url);
+        if have > 0 {
+            req = req.set("Range", &format!("bytes={have}-"));
+        }
+        let resp = match req.call() {
+            Ok(r) => r,
+            // the part file is already whole (or does not match): start again
+            Err(ureq::Error::Status(416, _)) => {
+                let _ = std::fs::remove_file(&part);
+                last_err = "416".into();
+                continue;
+            }
+            Err(ureq::Error::Status(code, _)) => return Err(format!("Could not download the {what} (the server answered {code}).")),
+            Err(e) => {
+                last_err = e.to_string();
+                continue;
+            }
+        };
+        let resumed = resp.status() == 206 && have > 0;
+        // the whole size: from Content-Range when resuming, else Content-Length
+        let total: Option<u64> = if resumed {
+            resp.header("Content-Range").and_then(|v| v.rsplit('/').next()).and_then(|v| v.parse().ok())
+        } else {
+            resp.header("Content-Length").and_then(|v| v.parse().ok())
+        };
+        let mut file = std::fs::OpenOptions::new().create(true).write(true).append(resumed).truncate(!resumed).open(&part).map_err(err)?;
+        let mut got = if resumed { have } else { 0 };
+        let mut r = resp.into_reader();
+        let mut chunk = vec![0u8; 1 << 16];
+        let started = std::time::Instant::now();
+        let from = got;
+        let mut shown = std::time::Instant::now() - Duration::from_secs(1);
+        let ended = loop {
+            match r.read(&mut chunk) {
+                Ok(0) => break Ok(()),
+                Ok(n) => {
+                    if let Err(e) = file.write_all(&chunk[..n]) {
+                        return Err(format!("Could not save the {what} ({e}). Is the disk full?"));
+                    }
+                    got += n as u64;
+                    if shown.elapsed() >= Duration::from_millis(500) {
+                        shown = std::time::Instant::now();
+                        let secs = started.elapsed().as_secs_f64().max(0.1);
+                        let speed = (got - from) as f64 / secs; // bytes a second
+                        let mb = got as f64 / 1_048_576.0;
+                        progress(match total {
+                            Some(t) if speed > 0.0 => {
+                                let left = ((t.saturating_sub(got)) as f64 / speed) as u64;
+                                format!("Downloading the {what}: {mb:.0} of {:.0} MB ({:.1} MB/s, about {} min {:02} s left)", t as f64 / 1_048_576.0, speed / 1_048_576.0, left / 60, left % 60)
+                            }
+                            Some(t) => format!("Downloading the {what}: {mb:.0} of {:.0} MB", t as f64 / 1_048_576.0),
+                            None => format!("Downloading the {what}: {mb:.0} MB"),
+                        });
+                    }
+                }
+                Err(e) => break Err(e.to_string()),
+            }
+        };
+        let _ = file.flush();
+        drop(file);
+        match ended {
+            // complete when the size is known and reached (or unknown and the server ended it)
+            Ok(()) if total.is_none_or(|t| got >= t) => {
+                let _ = std::fs::remove_file(dest);
+                std::fs::rename(&part, dest).map_err(err)?;
+                return Ok(());
+            }
+            Ok(()) => last_err = format!("ended at {got} of {} bytes", total.unwrap_or(0)),
+            Err(e) => last_err = e,
+        }
+        // something arrived: the next try resumes, and gets its full number of tries
+        if got > have {
+            tries = tries.min(2);
+        }
+    }
+}
+
+/// Downloads into memory (small files: checksums, archives that are unpacked at once),
+/// through a file so it can resume.
+pub(crate) fn download(url: &str, progress: &dyn Fn(String), what: &str) -> Result<Vec<u8>, String> {
+    let tmp = std::env::temp_dir().join(format!("wp-dl-{}-{:x}", std::process::id(), {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        url.hash(&mut h);
+        h.finish()
+    }));
+    download_to(url, &tmp, progress, what)?;
+    let bytes = std::fs::read(&tmp).map_err(err);
+    let _ = std::fs::remove_file(&tmp);
+    bytes
 }
 
 /// Unzips, dropping the archive's top folder (vosk-win64-0.3.45/…, vosk-model-…/…).
@@ -910,7 +1014,28 @@ mod tests {
 /// (name, file, approximate size in MB)
 const WHISPER_MODELS: [(&str, &str, u64); 2] = [("base.en", "ggml-base.en.bin", 148), ("small.en", "ggml-small.en.bin", 488)];
 
-fn whisper_path(dir: &Path, model: &str) -> PathBuf {
+/// The SHA-1 fingerprints whisper.cpp publishes for its models (models/README.md): a
+/// download that does not match is not installed.
+const WHISPER_SHA1: [(&str, &str); 2] = [("base.en", "137c40403d78fd54d454da0f9bd998f78703390c"), ("small.en", "db8a495a91d927739e50b3fc1cc4c6b8f6c2d022")];
+
+/// A file's SHA-1, read in pieces (models are hundreds of MB).
+pub(crate) fn file_sha1(path: &Path) -> Result<String, String> {
+    use sha1::{Digest, Sha1};
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).map_err(err)?;
+    let mut h = Sha1::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = f.read(&mut buf).map_err(err)?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
+pub(crate) fn whisper_path(dir: &Path, model: &str) -> PathBuf {
     let file = WHISPER_MODELS.iter().find(|(m, _, _)| *m == model).map(|(_, f, _)| *f).unwrap_or("ggml-base.en.bin");
     dir.join("whisper").join(file)
 }
@@ -1045,17 +1170,27 @@ pub async fn speech_install_whisper(app: AppHandle, model: String) -> Res<()> {
         let progress = |m: String| *st.speech.install.lock().unwrap() = Some(m);
         let result = (|| -> Result<(), String> {
             let url = format!("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{file}");
-            let bytes = download(&url, &progress, &format!("Whisper {name} model (about {mb} MB)"))?;
+            let path = whisper_path(&speech_dir(&st), name);
+            let tmp = path.with_extension("part");
+            // written to disk as it arrives, resuming after a dropped connection
+            download_to(&url, &tmp, &progress, &format!("Whisper {name} model (about {mb} MB)"))?;
             // a real model file: whisper.cpp's "ggml" signature and about the right size
-            let sig_ok = bytes.len() > 8 && &bytes[0..4] == b"lmgg";
-            let size_ok = (bytes.len() as u64) > mb * 1_000_000 * 9 / 10 && (bytes.len() as u64) < mb * 1_000_000 * 11 / 10;
+            let len = std::fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0);
+            let mut sig = [0u8; 4];
+            let sig_ok = std::fs::File::open(&tmp).and_then(|mut f| std::io::Read::read_exact(&mut f, &mut sig)).is_ok() && &sig == b"lmgg";
+            let size_ok = len > mb * 1_000_000 * 9 / 10 && len < mb * 1_000_000 * 11 / 10;
             if !sig_ok || !size_ok {
+                let _ = std::fs::remove_file(&tmp);
                 return Err("The downloaded file is not a Whisper model, so it was not installed. Try again later or on another network.".into());
             }
-            let path = whisper_path(&speech_dir(&st), name);
-            std::fs::create_dir_all(path.parent().unwrap()).map_err(err)?;
-            let tmp = path.with_extension("part");
-            std::fs::write(&tmp, &bytes).map_err(err)?;
+            // exactly the published model (whisper.cpp's fingerprint)
+            progress("Checking the model…".into());
+            if let Some((_, want)) = WHISPER_SHA1.iter().find(|(m, _)| *m == name) {
+                if file_sha1(&tmp)? != *want {
+                    let _ = std::fs::remove_file(&tmp);
+                    return Err("The downloaded model is not the official whisper.cpp file (its fingerprint does not match), so it was not installed. Try again later or on another network.".into());
+                }
+            }
             std::fs::rename(&tmp, &path).map_err(err)?;
             Ok(())
         })();
@@ -1251,4 +1386,82 @@ mod status_tests {
 /// first English Bible, else the first Bible.
 pub(crate) fn recognition_bible(conn: &rusqlite::Connection) -> Option<String> {
     conn.query_row("SELECT code FROM bible_version ORDER BY (lang LIKE 'en%') DESC, id LIMIT 1", [], |r| r.get(0)).ok()
+}
+
+#[cfg(test)]
+mod download_tests {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
+    /// A small web server: serves `body`, honours "Range: bytes=N-", and the first time
+    /// cuts the connection halfway (as a bad network does).
+    fn server(body: Vec<u8>) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/model.bin", l.local_addr().unwrap());
+        let resumes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let r2 = resumes.clone();
+        std::thread::spawn(move || {
+            let mut first = true;
+            for s in l.incoming() {
+                let mut s = s.unwrap();
+                let mut reader = BufReader::new(s.try_clone().unwrap());
+                let mut from = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("range: bytes=") {
+                        from = v.trim().trim_end_matches('-').parse().unwrap_or(0);
+                        r2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+                let rest = &body[from..];
+                let head = if from > 0 {
+                    format!("HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nConnection: close\r\n\r\n", rest.len(), from, body.len() - 1, body.len())
+                } else {
+                    format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", rest.len())
+                };
+                let _ = s.write_all(head.as_bytes());
+                if first {
+                    first = false;
+                    let _ = s.write_all(&rest[..rest.len() / 2]); // then the line drops
+                } else {
+                    let _ = s.write_all(rest);
+                }
+                let _ = s.flush();
+                // the line drops: closed at once, as a real connection failing would be
+                let _ = s.shutdown(std::net::Shutdown::Both);
+                drop(reader);
+            }
+        });
+        (url, resumes)
+    }
+
+    #[test]
+    fn a_dropped_download_carries_on_where_it_stopped() {
+        let body: Vec<u8> = (0..3_000_000u32).map(|i| (i % 251) as u8).collect();
+        let (url, resumes) = server(body.clone());
+        let dest = std::env::temp_dir().join(format!("wp-dl-test-{}.bin", std::process::id()));
+        let _ = std::fs::remove_file(&dest);
+        super::download_to(&url, &dest, &|_| {}, "test file").unwrap();
+        let got = std::fs::read(&dest).unwrap();
+        assert_eq!(got.len(), body.len());
+        assert!(got == body, "every byte right after the resume");
+        assert!(resumes.load(std::sync::atomic::Ordering::SeqCst) >= 1, "it resumed rather than starting again");
+        let _ = std::fs::remove_file(&dest);
+    }
+}
+
+#[cfg(test)]
+mod sha1_tests {
+    #[test]
+    fn fingerprints_are_read_correctly() {
+        let p = std::env::temp_dir().join(format!("wp-sha1-{}", std::process::id()));
+        std::fs::write(&p, b"abc").unwrap();
+        // the standard SHA-1 test value for "abc"
+        assert_eq!(super::file_sha1(&p).unwrap(), "a9993e364706816aba3e25717850c26c9cd0d89d");
+        let _ = std::fs::remove_file(&p);
+        assert!(super::WHISPER_SHA1.iter().all(|(m, h)| super::WHISPER_MODELS.iter().any(|(n, _, _)| n == m) && h.len() == 40));
+    }
 }

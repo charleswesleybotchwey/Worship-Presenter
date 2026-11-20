@@ -16,6 +16,9 @@ use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder
 mod ndi;
 mod applog;
 mod midi;
+mod check;
+mod online;
+mod secrets;
 mod stream;
 mod whisper_worker;
 mod deepgram;
@@ -50,6 +53,10 @@ pub enum ProgramItem {
     },
     Media { media_id: i64, title: String },
     Announcement { presentation_id: i64, title: String },
+    /// A divider in the service order ("Praise & Worship", "Sermon"): never on screen.
+    Header { title: String },
+    /// A web page, shown in its own window over the main screen while live.
+    Web { url: String, title: String },
 }
 
 /// Payload every window receives on "live-state".
@@ -82,6 +89,8 @@ pub struct AppState {
     caption: Mutex<Option<String>>,
     /// Outputs the operator wants open: role → display index (None = window on control screen).
     outputs: Mutex<HashMap<String, Option<usize>>>,
+    /// Screens switched off (EasyWorship's Live button): what was open, to reopen.
+    screens_off: Mutex<Option<(Vec<(String, Option<usize>)>, Vec<String>)>>,
     /// Last time each output acknowledged; a silent output is rebuilt.
     acks: Mutex<HashMap<String, (Instant, u64)>>,
     /// Schedule currently open, for auto-save and usage logging.
@@ -202,6 +211,13 @@ fn err<E: std::fmt::Display>(e: E) -> String {
 
 fn build_slides(conn: &Connection, item: &ProgramItem, live: &LiveState) -> Res<(Vec<Slide>, Option<String>)> {
     match item {
+        // a divider in the service order has nothing to show
+        ProgramItem::Header { title } => Err(format!("“{title}” is a heading in the service order; it has nothing to show.")),
+        // one slide: the page itself is shown in its own window (see web_window)
+        ProgramItem::Web { url, title } => Ok((
+            vec![Slide { reference: None, label: "Web page".into(), occurrence: 0, first_key: 0, last_key: 0, primary: vec![title.clone()], second: vec![url.clone()], image: None, chords: vec![] }],
+            Some(title.clone()),
+        )),
         ProgramItem::Song { song_id, title, lyrics, .. } => {
             let (sections, langs) = match lyrics {
                 // "Apply to this service": this item's own lyrics
@@ -224,39 +240,107 @@ fn build_slides(conn: &Connection, item: &ProgramItem, live: &LiveState) -> Res<
             Ok((wp_core::announcements::to_slides(&d), Some(title.clone())))
         }
         ProgramItem::Media { title, .. } => Ok((
-            vec![Slide { label: "Media".into(), occurrence: 0, first_key: 0, last_key: 0, primary: vec![], second: vec![], image: None, chords: vec![] }],
+            vec![Slide { reference: None, label: "Media".into(), occurrence: 0, first_key: 0, last_key: 0, primary: vec![], second: vec![], image: None, chords: vec![] }],
             Some(title.clone()),
         )),
         ProgramItem::Scripture { reference, versions, .. } => {
             let codes: Vec<&str> = versions.iter().map(String::as_str).collect();
             let p = library::lookup(conn, reference, &codes).map_err(err)?;
             let first = codes.first().copied().unwrap_or_default();
+            // EasyWorship's scripture options (Settings → Scripture display)
+            let set = |k: &str| conn.query_row("SELECT value FROM setting WHERE key = ?1", [k], |r| r.get::<_, String>(0)).ok().unwrap_or_default();
+            let numbers = set("scripture_verse_numbers"); // "", "on" or "super"
+            let per: usize = set("scripture_verses_per_slide").parse().unwrap_or(1).clamp(1, 4);
+            let where_ = set("scripture_ref_where"); // "", "first", "last" or "none"
+            let each_verse = set("scripture_ref_scope") == "verse";
+            let only_ref = set("scripture_ref_only") == "true";
+            let display = if set("scripture_abbrev") == "true" { wp_core::reference::abbreviated(&p.display, p.reference.book_no) } else { p.display.clone() };
+            let book = display.rsplit_once(' ').map(|(b, _)| b.to_string()).unwrap_or_default();
+            let mark = |v: u16, t: &str| -> String {
+                match numbers.as_str() {
+                    "on" => format!("{v} {t}"),
+                    "super" => format!("{}\u{2009}{t}", v.to_string().chars().map(|c| "⁰¹²³⁴⁵⁶⁷⁸⁹".chars().nth(c.to_digit(10).unwrap_or(0) as usize).unwrap_or(c)).collect::<String>()),
+                    _ => t.to_string(),
+                }
+            };
+            let verses: Vec<&library::VerseOut> = p.verses.iter().filter(|v| v.version == first).collect();
+            let groups: Vec<&[&library::VerseOut]> = verses.chunks(per).collect();
+            let n = groups.len();
             let mut slides = Vec::new();
-            for v in p.verses.iter().filter(|v| v.version == first) {
-                let second: Vec<String> = p
-                    .verses
+            for (i, g) in groups.iter().enumerate() {
+                let (a, z) = (g[0], g[g.len() - 1]);
+                let primary: Vec<String> = g.iter().map(|v| mark(v.verse, &v.text)).collect();
+                let second: Vec<String> = g
                     .iter()
-                    .filter(|o| o.version != first && o.chapter == v.chapter && o.verse == v.verse)
-                    .map(|o| o.text.clone())
+                    .flat_map(|v| p.verses.iter().filter(move |o| o.version != first && o.chapter == v.chapter && o.verse == v.verse).map(move |o| mark(v.verse, &o.text)))
                     .collect();
-                let key = (v.chapter as i64) * 1000 + v.verse as i64;
+                let show = only_ref || match where_.as_str() { "first" => i == 0, "last" => i + 1 == n, "none" => false, _ => true };
+                let here = if each_verse {
+                    if a.chapter == z.chapter && a.verse != z.verse { format!("{book} {}:{}-{}", a.chapter, a.verse, z.verse) } else { format!("{book} {}:{}", a.chapter, a.verse) }
+                } else {
+                    display.clone()
+                };
                 slides.push(Slide {
-                    label: format!("{}:{}", v.chapter, v.verse),
+                    reference: Some(if show { here } else { String::new() }),
+                    label: format!("{}:{}", a.chapter, a.verse),
                     occurrence: 0,
-                    first_key: key,
-                    last_key: key,
-                    primary: vec![v.text.clone()],
-                    second,
+                    first_key: (a.chapter as i64) * 1000 + a.verse as i64,
+                    last_key: (z.chapter as i64) * 1000 + z.verse as i64,
+                    primary: if only_ref { vec![] } else { primary },
+                    second: if only_ref { vec![] } else { second },
                     image: None,
                     chords: vec![],
                 });
             }
-            Ok((slides, Some(p.display)))
+            Ok((slides, Some(display)))
         }
     }
 }
 
+/// A web page item: shown in its own window over the main screen while it is live and the
+/// screens show it (closed by another item, Blank, Logo, Clear or Screens off). The window
+/// is outside the app's permissions ("main" and "output-*" only): a website cannot reach
+/// the app.
+fn web_window(app: &AppHandle, s: &AppState) {
+    let want: Option<String> = match (&*s.item.lock().unwrap(), s.live.lock().unwrap().mode) {
+        (Some(ProgramItem::Web { url, .. }), Mode::Live) if s.screens_off.lock().unwrap().is_none() => Some(url.clone()),
+        _ => None,
+    };
+    let label = "web-main";
+    let existing = app.get_webview_window(label);
+    let Some(url) = want.filter(|u| u.starts_with("https://") || u.starts_with("http://")) else {
+        if let Some(w) = existing {
+            let _ = w.destroy();
+        }
+        return;
+    };
+    let Ok(parsed) = url.parse::<tauri::Url>() else { return };
+    if let Some(w) = existing {
+        if w.url().map(|u| u != parsed).unwrap_or(true) {
+            let _ = w.navigate(parsed);
+        }
+        return;
+    }
+    // over the main output's monitor (else the primary one)
+    let display = s.outputs.lock().unwrap().get("main").copied().flatten();
+    let mon = display.and_then(|i| app.available_monitors().ok()?.into_iter().nth(i)).or_else(|| app.primary_monitor().ok().flatten());
+    let app2 = app.clone();
+    // built off the calling thread (a window built inside a command can stall on Windows)
+    std::thread::spawn(move || {
+        let mut b = tauri::WebviewWindowBuilder::new(&app2, label, tauri::WebviewUrl::External(parsed)).title("Web page").decorations(false).always_on_top(true).skip_taskbar(true).focused(false).resizable(false);
+        if let Some(m) = &mon {
+            let sc = m.scale_factor();
+            let (p, z) = (m.position(), m.size());
+            b = b.position(p.x as f64 / sc, p.y as f64 / sc).inner_size(z.width as f64 / sc, z.height as f64 / sc);
+        }
+        if let Err(e) = b.build() {
+            applog::write("FAIL", &format!("web page window: {e}"));
+        }
+    });
+}
+
 fn broadcast(app: &AppHandle, s: &AppState) {
+    web_window(app, s);
     let payload = Broadcast {
         state: s.live.lock().unwrap().clone(),
         item: s.item.lock().unwrap().clone(),
@@ -638,6 +722,23 @@ fn output_status(st: State<'_, AppState>) -> Vec<OutputStatus> {
         .collect()
 }
 
+/// Everything the service window keeps an eye on, in one request (it used to ask four
+/// times a second or more, separately).
+#[derive(Serialize)]
+struct StatusAll {
+    outputs: Vec<OutputStatus>,
+    speech: speech::SpeechStatus,
+    stream: stream::StreamStatus,
+    notes: Vec<PulpitNote>,
+}
+
+#[tauri::command(async)]
+fn status_all(app: AppHandle, st: State<'_, AppState>, known_lines: Option<usize>) -> StatusAll {
+    static FIRST: std::sync::Once = std::sync::Once::new();
+    FIRST.call_once(|| applog::write("START", "the service window is following the outputs (one status request)"));
+    StatusAll { outputs: output_status(st.clone()), speech: speech::speech_status(st.clone(), known_lines), stream: stream::stream_status(app, st.clone()), notes: pulpit_notes(st) }
+}
+
 #[tauri::command(async)]
 fn close_output(app: AppHandle, st: State<'_, AppState>, role: String) {
     st.outputs.lock().unwrap().remove(&role);
@@ -646,6 +747,47 @@ fn close_output(app: AppHandle, st: State<'_, AppState>, role: String) {
     if let Some(w) = app.get_webview_window(&format!("output-{role}")) {
         let _ = w.destroy();
     }
+}
+
+/// All screens off (projector, alternate, stage windows and NDI streams), remembering
+/// which were on; or back on, exactly those.
+#[tauri::command(async)]
+fn screens_power(app: AppHandle, st: State<'_, AppState>, on: bool) -> Res<bool> {
+    if !on {
+        if st.screens_off.lock().unwrap().is_some() {
+            return Ok(false);
+        }
+        let windows: Vec<(String, Option<usize>)> = st.outputs.lock().unwrap().iter().map(|(r, d)| (r.clone(), *d)).collect();
+        let ndi: Vec<String> = st.ndi.jobs.lock().unwrap().keys().filter_map(|k| k.strip_prefix("out-").map(str::to_string)).collect();
+        for (role, _) in &windows {
+            close_output(app.clone(), st.clone(), role.clone());
+        }
+        for role in &ndi {
+            stop_ndi_output(&app, role);
+        }
+        applog::write("SCREENS", &format!("off ({} windows, {} NDI)", windows.len(), ndi.len()));
+        *st.screens_off.lock().unwrap() = Some((windows, ndi));
+        web_window(&app, &st);
+        return Ok(false);
+    }
+    let Some((windows, ndi)) = st.screens_off.lock().unwrap().take() else { return Ok(true) };
+    for (role, display) in windows {
+        let _ = build_output(&app, &role, display);
+    }
+    for role in ndi {
+        let f = wp_core::options::output(&st.db.lock().unwrap(), &role).ok().and_then(|c| c.ndi);
+        if let Some(f) = f {
+            let _ = start_ndi_output(&app, &role, f);
+        }
+    }
+    applog::write("SCREENS", "on");
+    web_window(&app, &st);
+    Ok(true)
+}
+
+#[tauri::command(async)]
+fn screens_are_on(st: State<'_, AppState>) -> bool {
+    st.screens_off.lock().unwrap().is_none()
 }
 
 // ---------- service orders ----------
@@ -1082,7 +1224,8 @@ fn diagnostic_report(app: AppHandle, st: State<'_, AppState>) -> String {
 // ---------- finding lyrics online (Hymnary.org, LRCLIB) ----------
 
 fn web_text(url: &str) -> Result<String, String> {
-    let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(12)).user_agent(concat!("Worship Presenter/", env!("CARGO_PKG_VERSION"), " (github.com/charleswesleybotchwey/Worship-Presenter)")).build();
+    // 20 s to connect, 30 s with no answer (not 12 s for everything: slow lines)
+    let agent = ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(20)).timeout_read(Duration::from_secs(30)).user_agent(concat!("Worship Presenter/", env!("CARGO_PKG_VERSION"), " (github.com/charleswesleybotchwey/Worship-Presenter)")).build();
     let r = agent.get(url).call().map_err(|e| format!("No answer from the website ({e}). Check the internet connection."))?;
     r.into_string().map_err(err)
 }
@@ -1202,6 +1345,155 @@ async fn bible_download(app: AppHandle, id: String, code: String, title: String,
     })
     .await
     .map_err(err)?
+}
+
+/// Find and replace across the songs: what would change (nothing changes).
+#[tauri::command(async)]
+fn songs_replace_plan(st: State<'_, AppState>, find: String, with: String, options: wp_core::find_replace::Options) -> Res<Vec<wp_core::find_replace::Change>> {
+    wp_core::find_replace::plan(&st.db.lock().unwrap(), &find, &with, &options).map_err(err)
+}
+
+/// Find and replace across the songs (a backup first). Returns how many songs changed.
+#[tauri::command(async)]
+fn songs_replace_apply(st: State<'_, AppState>, find: String, with: String, options: wp_core::find_replace::Options) -> Res<usize> {
+    let conn = st.db.lock().unwrap();
+    wp_core::backup::create(&conn, &st.backups(), "before-replace").map_err(err)?;
+    wp_core::find_replace::apply(&conn, &find, &with, &options).map_err(err)
+}
+
+/// An EasyWorship schedule's song slides as lyrics: each named slide ("V1", "C") starts a
+/// section; a slide with no name continues the one before it.
+fn ews_body(slides: &[(Option<String>, Vec<String>)]) -> String {
+    let mut body = String::new();
+    let mut verses = 0;
+    for (label, lines) in slides {
+        match label {
+            Some(l) => {
+                let l = if l == "V" { verses += 1; format!("V{verses}") } else { if l.starts_with('V') { verses += 1 } l.clone() };
+                body.push_str(&format!("\n[{l}]\n"));
+            }
+            None if body.is_empty() => {
+                verses += 1;
+                body.push_str("[V1]\n");
+            }
+            None => {}
+        }
+        body.push_str(&lines.join("\n"));
+        body.push('\n');
+    }
+    body.trim().to_string()
+}
+
+#[derive(Serialize)]
+struct EwsImport {
+    title: String,
+    items: Vec<ProgramItem>,
+    notes: Vec<String>,
+}
+
+/// Opens an EasyWorship 7 schedule (.ewsx): songs found in the library (by title, then
+/// by hymn number) or made from the schedule's slides, readings in that Bible (or the
+/// main one), media copied into the library; anything else kept as a heading.
+#[tauri::command]
+async fn import_ews(app: AppHandle, path: String) -> Res<EwsImport> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use wp_core::import::ews::{read, EwsItem};
+        let st = app.state::<AppState>();
+        let p = std::path::Path::new(&path);
+        let sched = read(p).map_err(err)?;
+        let mut items = vec![];
+        let mut notes = vec![];
+        let fold = wp_core::text::fold;
+        for it in &sched.items {
+            match it {
+                EwsItem::Song { title, author, copyright, number, slides } => {
+                    let conn = st.db.lock().unwrap();
+                    // the same song in the library: by title, then by hymn number ("MHB 1")
+                    let by_title: Option<(i64, String)> = conn
+                        .prepare("SELECT id, title FROM song")
+                        .and_then(|mut q| q.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))).map(|rows| rows.filter_map(|r| r.ok()).find(|(_, t)| fold(t) == fold(title))))
+                        .ok()
+                        .flatten();
+                    let found = by_title.or_else(|| wp_core::library::quick_song(&conn, title).ok().and_then(|h| h.into_iter().next()).map(|h| (h.id, h.title)));
+                    if let Some((id, t)) = found {
+                        items.push(ProgramItem::Song { song_id: id, title: t, theme_id: None, lyrics: None });
+                        continue;
+                    }
+                    // not in the library: made from the schedule's slides (a slide with
+                    // no section name continues the one before it)
+                    let body = ews_body(slides);
+                    let fante = body.contains(['ɛ', 'ɔ', 'Ɛ', 'Ɔ']);
+                    let numbers = title
+                        .rsplit_once(' ')
+                        .filter(|(h, n)| !h.is_empty() && n.chars().all(|c| c.is_ascii_digit()) && !n.is_empty())
+                        .map(|(h, n)| vec![wp_core::songs::Number { hymnal: h.trim().to_string(), number: n.to_string() }])
+                        .unwrap_or_else(|| if number.is_empty() { vec![] } else { vec![wp_core::songs::Number { hymnal: "EW".into(), number: number.clone() }] });
+                    let doc = wp_core::songs::SongDoc {
+                        id: None,
+                        title: title.clone(),
+                        author: Some(author.clone()).filter(|a| !a.is_empty()),
+                        copyright: Some(copyright.clone()).filter(|c| !c.is_empty()),
+                        ccli: None,
+                        numbers,
+                        lyrics: vec![wp_core::songs::Lyric { lang: if fante { "fat".into() } else { "en".into() }, body: body.trim().to_string() }],
+                        sequence: String::new(),
+                        lines_per_slide: None,
+                        key: None,
+                    };
+                    let id = wp_core::songs::save(&conn, &doc).map_err(err)?;
+                    notes.push(format!("“{title}” was not in your library: added from the schedule's slides{}.", if fante { " (as Fante)" } else { "" }));
+                    items.push(ProgramItem::Song { song_id: id, title: title.clone(), theme_id: None, lyrics: None });
+                }
+                EwsItem::Scripture { reference, version } => {
+                    let conn = st.db.lock().unwrap();
+                    let have = version.as_ref().filter(|v| conn.query_row("SELECT 1 FROM bible_version WHERE upper(code) = upper(?1)", [v], |_| Ok(())).is_ok());
+                    let code = match have {
+                        Some(v) => conn.query_row("SELECT code FROM bible_version WHERE upper(code) = upper(?1)", [v], |r| r.get::<_, String>(0)).unwrap_or(v.clone()),
+                        None => {
+                            let main = crate::speech::recognition_bible(&conn).unwrap_or_default();
+                            notes.push(format!("{reference}: {} is not installed here, so it uses {main}.", version.as_deref().unwrap_or("its Bible")));
+                            main
+                        }
+                    };
+                    items.push(ProgramItem::Scripture { reference: reference.clone(), versions: vec![code], theme_id: None });
+                }
+                EwsItem::Media { title, file, .. } => {
+                    let Some(f) = file else {
+                        notes.push(format!("“{title}”: its file is not in the schedule, so it was left out."));
+                        continue;
+                    };
+                    let tmp = std::env::temp_dir().join(format!("wp-ews-media-{}", std::process::id()));
+                    std::fs::create_dir_all(&tmp).map_err(err)?;
+                    let ext = std::path::Path::new(f).extension().and_then(|e| e.to_str()).unwrap_or("mp4");
+                    let named = tmp.join(format!("{}.{ext}", title.chars().filter(|c| !"\\/:*?\"<>|".contains(*c)).collect::<String>()));
+                    let out = sched.extract_media(f, &tmp).map_err(err)?;
+                    let _ = std::fs::rename(&out, &named);
+                    let m = wp_core::media::import(&st.db.lock().unwrap(), &st.profile_dir().join("media"), &named).map_err(err)?;
+                    let _ = std::fs::remove_dir_all(&tmp);
+                    items.push(ProgramItem::Media { media_id: m.id, title: m.title });
+                }
+                EwsItem::Other { title, .. } => {
+                    notes.push(format!("“{title}” is a kind of EasyWorship item not opened here: kept as a heading."));
+                    items.push(ProgramItem::Header { title: format!("{title} (from EasyWorship)") });
+                }
+            }
+        }
+        let title = p.file_stem().and_then(|s| s.to_str()).unwrap_or("EasyWorship schedule").to_string();
+        applog::write("IMPORT", &format!("EasyWorship schedule: {} items, {} notes", items.len(), notes.len()));
+        Ok(EwsImport { title, items, notes })
+    })
+    .await
+    .map_err(err)?
+}
+
+/// A smart song collection's rules (None: songs put in by hand).
+#[tauri::command(async)]
+fn smart_rules(st: State<'_, AppState>, id: i64) -> Res<Option<wp_core::smart::Rules>> {
+    wp_core::smart::get(&st.db.lock().unwrap(), id).map_err(err)
+}
+#[tauri::command(async)]
+fn smart_rules_set(st: State<'_, AppState>, id: i64, rules: Option<wp_core::smart::Rules>) -> Res<()> {
+    wp_core::smart::set(&st.db.lock().unwrap(), id, rules.as_ref()).map_err(err)
 }
 
 /// "My collections" for scripture readings and media.
@@ -1375,7 +1667,7 @@ fn identify_output(app: AppHandle, role: String) {
 }
 
 /// Settings the core uses; only these keys can be written.
-const SETTINGS: &[&str] = &["project_on_restart", "low_spec_mode", "lines_per_slide", "advance_after_go_live", "font_fallback", "speech_engine", "speech_mic", "speech_refs_only", "speech_whisper_model", "deepgram_key", "deepgram_model", "quick_hymnal", "logo_media_id", "brand_colors", "brand_font", "brand_heading_font"];
+const SETTINGS: &[&str] = &["project_on_restart", "low_spec_mode", "lines_per_slide", "advance_after_go_live", "font_fallback", "speech_engine", "speech_mic", "speech_refs_only", "speech_whisper_model", "scripture_verse_numbers", "stage_layout", "ndi_lower_third", "scripture_verses_per_slide", "scripture_ref_where", "scripture_ref_scope", "scripture_ref_only", "scripture_abbrev", "deepgram_key", "deepgram_model", "quick_hymnal", "logo_media_id", "brand_colors", "brand_font", "brand_heading_font"];
 
 #[tauri::command(async)]
 fn get_settings(st: State<'_, AppState>) -> Res<std::collections::HashMap<String, String>> {
@@ -2122,6 +2414,7 @@ pub(crate) fn full_content(st: &AppState, role: &str) -> (wp_render::Content, se
                 }
                 Err(_) => black.clone(),
             },
+            Some(ProgramItem::Header { .. }) | Some(ProgramItem::Web { .. }) => black.clone(),
             None => black.clone(),
         },
     };
@@ -2157,26 +2450,32 @@ fn start_ndi_output(app: &AppHandle, role: &str, f: wp_core::options::NdiFormat)
     };
     let key = format!("out-{role}");
     let (slot, stats, stop) = st.ndi.start_pump(&key, name, None, f.fps)?;
-    // the alternate output is the lower-third look: built-in renderer, exact transparency
-    if role == "alternate" {
-        ndi::run_builtin_as(app.clone(), slot, stats, stop, None, f.width, f.height);
-        return Ok(());
-    }
-    // full screen: like FreeShow, send the real output page (videos, animations, camera)
+    // like FreeShow: every NDI output sends the real output page (moving video, text
+    // animations, transitions, rich text, exactly as on the screens). The lower third is
+    // drawn on the key green and keyed to real transparency. The built-in renderer is the
+    // fallback (no window capture here), or the choice in Settings (exact transparency).
+    let lower = role == "alternate";
+    let builtin_chosen = lower && st.db.lock().unwrap().query_row("SELECT value FROM setting WHERE key = 'ndi_lower_third'", [], |r| r.get::<_, String>(0)).ok().as_deref() == Some("builtin");
     #[cfg(windows)]
-    {
-        match ndi_window(app, role, f) {
-            Ok(hwnd) => match ndi::capture::start(hwnd, slot.clone(), stats.clone(), false) {
+    if !builtin_chosen {
+        match ndi_window(app, role, if lower { "ndi" } else { role }, f) {
+            Ok(hwnd) => match ndi::capture::start(hwnd, slot.clone(), stats.clone(), lower) {
                 Ok(running) => {
                     if let Some(j) = st.ndi.jobs.lock().unwrap().get_mut(&key) {
                         j.capture = Some(running);
                     }
+                    applog::write("NDI", &format!("{name}: sending the output page ({}x{}{})", f.width, f.height, if lower { ", keyed to transparency" } else { "" }));
                     return Ok(());
                 }
-                Err(e) => eprintln!("NDI window capture failed, using the built-in renderer: {e}"),
+                Err(e) => applog::write("NDI", &format!("{name}: window capture failed ({e}); using the built-in renderer")),
             },
-            Err(e) => eprintln!("NDI window failed, using the built-in renderer: {e}"),
+            Err(e) => applog::write("NDI", &format!("{name}: the NDI window could not open ({e}); using the built-in renderer")),
         }
+    }
+    let _ = builtin_chosen;
+    if lower {
+        ndi::run_builtin_as(app.clone(), slot, stats, stop, None, f.width, f.height);
+        return Ok(());
     }
     ndi::run_builtin_as(app.clone(), slot, stats, stop, Some(role.to_string()), f.width, f.height);
     Ok(())
@@ -2186,7 +2485,7 @@ fn start_ndi_output(app: &AppHandle, role: &str, f: wp_core::options::NdiFormat)
 /// visible desktop and out of the taskbar (WebView2 has no off-screen painting, so it is
 /// captured instead; the flags in BROWSER_ARGS keep it from being throttled).
 #[cfg(windows)]
-fn ndi_window(app: &AppHandle, role: &str, f: wp_core::options::NdiFormat) -> Res<*mut std::ffi::c_void> {
+fn ndi_window(app: &AppHandle, role: &str, page: &str, f: wp_core::options::NdiFormat) -> Res<*mut std::ffi::c_void> {
     let label = format!("output-ndi-{role}");
     if let Some(w) = app.get_webview_window(&label) {
         let _ = w.destroy();
@@ -2195,7 +2494,7 @@ fn ndi_window(app: &AppHandle, role: &str, f: wp_core::options::NdiFormat) -> Re
             std::thread::sleep(Duration::from_millis(50));
         }
     }
-    let w = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(format!("index.html#/output/{role}").into()))
+    let w = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(format!("index.html#/output/{page}").into()))
         .additional_browser_args(BROWSER_ARGS)
         .title(format!("Worship Presenter – NDI {role}"))
         .decorations(false)
@@ -2312,6 +2611,13 @@ fn set_window_look(app: AppHandle, dark: bool) {
 fn show_main_window(app: AppHandle) {
     applog::write("START", "the service window is drawn: showing it");
     if let Some(w) = app.get_webview_window("main") {
+        // a small screen (a 1366×768 laptop at 150 %): fill it rather than overflow it
+        if let Ok(Some(m)) = w.current_monitor() {
+            let size = m.size().to_logical::<f64>(m.scale_factor());
+            if size.width < 1500.0 || size.height < 950.0 {
+                let _ = w.maximize();
+            }
+        }
         let _ = w.show();
         let _ = w.set_focus();
     }
@@ -2328,6 +2634,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     let file = SubmenuBuilder::new(app, "&File")
         .item(&item("file.service", "&Open or start a service order…", "")?)
         .item(&item("file.import", "&Import songs or Bibles…", "")?)
+        .item(&item("file.ews", "Open &EasyWorship schedule…", "")?)
         .item(&item("file.backups", "&Backups…", "")?)
         .item(&item("file.print-order", "&Print the service order…", "Ctrl+P")?)
         .separator()
@@ -2787,6 +3094,7 @@ pub fn run() {
                 slides: Mutex::new(Vec::new()),
                 caption: Mutex::new(None),
                 outputs: Mutex::new(HashMap::new()),
+                screens_off: Mutex::new(None),
                 acks: Mutex::new(HashMap::new()),
                 schedule_id: Mutex::new(None),
                 profiles_root: root.clone(),
@@ -3089,8 +3397,18 @@ pub fn run() {
             theme_rules,
             theme_gallery,
             quick_song,
+            screens_power,
+            status_all,
+            check::dashboard,
+            check::system_check,
+            screens_are_on,
             outline_deck,
             item_collections,
+            smart_rules,
+            songs_replace_plan,
+            import_ews,
+            songs_replace_apply,
+            smart_rules_set,
             bible_catalogue,
             lyrics_search,
             lyrics_words,
@@ -3099,6 +3417,13 @@ pub fn run() {
             update_check,
             update_install,
             stream::stream_install_ffmpeg,
+            secrets::stream_key_set,
+            online::online_key_set,
+            online::online_keys_saved,
+            online::online_search,
+            online::online_download,
+            online::online_open,
+            secrets::stream_keys_saved,
             stream::stream_start,
             stream::stream_stop,
             stream::stream_status,
@@ -3163,4 +3488,67 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("Worship Presenter failed to start");
+}
+
+#[cfg(test)]
+mod scripture_display_tests {
+    use super::*;
+
+    fn bible() -> Connection {
+        let c = wp_core::db::open_memory().unwrap();
+        c.execute("INSERT INTO bible_version (id, code, name, lang) VALUES (1, 'NKJV', 'NKJV', 'en')", []).unwrap();
+        c.execute("INSERT INTO bible_book (version_id, book_no, name, aliases, chapters) VALUES (1, 43, 'John', 'John', 21)", []).unwrap();
+        for v in 16..=18 {
+            c.execute("INSERT INTO bible_verse (version_id, book_no, chapter, verse, text) VALUES (1, 43, 3, ?1, ?2)", rusqlite::params![v, format!("Verse {v} text")]).unwrap();
+        }
+        c
+    }
+
+    fn slides(c: &Connection) -> Vec<Slide> {
+        let item = ProgramItem::Scripture { reference: "John 3:16-18".into(), versions: vec!["NKJV".into()], theme_id: None };
+        build_slides(c, &item, &LiveState::default()).unwrap().0
+    }
+
+    fn set(c: &Connection, k: &str, v: &str) {
+        c.execute("INSERT OR REPLACE INTO setting (key, value) VALUES (?1, ?2)", [k, v]).unwrap();
+    }
+
+    #[test]
+    fn easyworship_scripture_options() {
+        let c = bible();
+        let s = slides(&c);
+        assert_eq!(s.len(), 3);
+        assert_eq!((s[0].primary[0].as_str(), s[0].reference.as_deref()), ("Verse 16 text", Some("John 3:16-18")), "as before: whole passage on every slide");
+        set(&c, "scripture_verse_numbers", "on");
+        assert_eq!(slides(&c)[1].primary[0], "17 Verse 17 text");
+        set(&c, "scripture_verse_numbers", "super");
+        assert!(slides(&c)[0].primary[0].starts_with("¹⁶"));
+        set(&c, "scripture_verse_numbers", "");
+        set(&c, "scripture_verses_per_slide", "2");
+        let s = slides(&c);
+        assert_eq!(s.len(), 2, "16-17, then 18");
+        assert_eq!((s[0].label.as_str(), s[0].first_key, s[0].last_key, s[0].primary.len()), ("3:16", 3016, 3017, 2));
+        set(&c, "scripture_ref_scope", "verse");
+        set(&c, "scripture_ref_where", "first");
+        let s = slides(&c);
+        assert_eq!((s[0].reference.as_deref(), s[1].reference.as_deref()), (Some("John 3:16-17"), Some("")), "first slide only, its own verses");
+        set(&c, "scripture_abbrev", "true");
+        set(&c, "scripture_ref_where", "");
+        assert_eq!(slides(&c)[1].reference.as_deref(), Some("Jn 3:18"));
+        set(&c, "scripture_ref_only", "true");
+        let s = slides(&c);
+        assert!(s.iter().all(|x| x.primary.is_empty() && x.reference.as_deref().is_some_and(|r| !r.is_empty())), "reference only: no words, reference always");
+    }
+}
+
+#[cfg(test)]
+mod ews_tests {
+    #[test]
+    fn slides_become_sections() {
+        let sl = |l: Option<&str>, w: &[&str]| (l.map(str::to_string), w.iter().map(|x| x.to_string()).collect::<Vec<_>>());
+        let body = super::ews_body(&[sl(Some("V1"), &["Jesus, ’nye W’ Asɔr", "Yɛ n’ Agyenkwa"]), sl(None, &["Wɔrosɔ ne gyedzi"]), sl(Some("C"), &["Amen"]), sl(Some("V2"), &["Tsew ne bra"])]);
+        assert_eq!(body, "[V1]\nJesus, ’nye W’ Asɔr\nYɛ n’ Agyenkwa\nWɔrosɔ ne gyedzi\n\n[C]\nAmen\n\n[V2]\nTsew ne bra");
+        assert_eq!(wp_core::songs::parse_body(&body).len(), 3, "the editor reads it as three sections");
+        assert!(super::ews_body(&[sl(None, &["no names at all"])]).starts_with("[V1]\n"));
+    }
 }

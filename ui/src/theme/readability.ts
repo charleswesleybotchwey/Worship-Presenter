@@ -35,7 +35,7 @@ export const contrast = (a: RGB, b: RGB) => {
 };
 
 /** Average colour of a picture inside a rectangle (in % of the frame), or null. */
-async function averageOf(src: string, rect: { x: number; y: number; w: number; h: number }, fit: "cover" | "contain"): Promise<RGB | null> {
+async function averageOf(src: string, rect: { x: number; y: number; w: number; h: number }, fit: "cover" | "contain" | "fill" | "fill"): Promise<RGB | null> {
   try {
     const img = new Image();
     img.crossOrigin = "anonymous";

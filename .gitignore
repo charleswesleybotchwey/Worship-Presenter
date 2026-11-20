@@ -7,3 +7,5 @@ src-tauri/gen/
 *.db-shm
 docs/design/baselines/current/
 docs/design/baselines/diff/
+ui/test-results/
+ui/playwright-report/

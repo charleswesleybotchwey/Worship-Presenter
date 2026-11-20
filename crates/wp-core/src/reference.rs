@@ -231,3 +231,23 @@ mod tests {
         assert!(parse("John 0:3", &a).is_err());
     }
 }
+
+/// "John 3:16-18" → "Jn 3:16-18" (EasyWorship's abbreviations), for the book given.
+pub fn abbreviated(display: &str, book_no: u16) -> String {
+    let Some(b) = BOOKS.iter().find(|b| b.no == book_no) else { return display.to_string() };
+    match display.rsplit_once(' ') {
+        Some((_, rest)) => format!("{} {rest}", b.ew),
+        None => display.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod abbrev_tests {
+    #[test]
+    fn easyworship_abbreviations() {
+        assert_eq!(super::abbreviated("John 3:16-18", 43), "Jn 3:16-18");
+        let c = super::abbreviated("1 Corinthians 13:4", 46);
+        assert!(c.starts_with('1') && c.ends_with(" 13:4") && c.len() < "1 Corinthians 13:4".len(), "{c}");
+        assert_eq!(super::abbreviated("Yohane 3:16", 43), "Jn 3:16", "any Bible's book name");
+    }
+}

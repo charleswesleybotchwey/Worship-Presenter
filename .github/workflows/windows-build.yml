@@ -148,8 +148,33 @@ jobs:
           if-no-files-found: error
 
 
+  # the interface: unit tests (Vitest) and the operator workflows end to end (Playwright)
+  interface-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install
+        run: npm --prefix ui ci
+      - name: Unit tests
+        run: npm --prefix ui test
+      - name: Build the interface
+        run: npm --prefix ui run build
+      - name: Operator workflows (Playwright)
+        working-directory: ui
+        run: |
+          npx playwright install --with-deps chromium
+          npm run e2e
+
   release:
-    needs: build
+    needs: [build, interface-tests]
     # a version tag, or Run workflow with a version typed in
     if: startsWith(github.ref, 'refs/tags/v') || inputs.version != ''
     runs-on: ubuntu-latest

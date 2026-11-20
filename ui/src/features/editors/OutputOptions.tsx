@@ -20,6 +20,11 @@ function Num({ label, value, onChange }: { label: string; value: number; onChang
 export function OutputOptions({ views, mainLive }: { views: (role: string) => OutputView; mainLive: boolean }) {
   const [all, setAll] = useState<OutputConfig[]>([]);
   const [role, setRole] = useState("main");
+  // how the lower third goes over NDI: the real output page (as FreeShow) or the built-in drawing
+  const [lowerNdi, setLowerNdi] = useState<"page" | "builtin">("page");
+  useEffect(() => {
+    api.getSettings().then((x) => setLowerNdi(x.ndi_lower_third === "builtin" ? "builtin" : "page")).catch(() => {});
+  }, []);
   const [draft, setDraft] = useState<OutputConfig | null>(null);
   const [tab, setTab] = useState<Tab>("general");
   const [displays, setDisplays] = useState<Display[]>([]);
@@ -141,10 +146,29 @@ export function OutputOptions({ views, mainLive }: { views: (role: string) => Ou
                       )}
                     </select>
                   </label>
+                  {draft.role === "alternate" && (
+                    <label className="oo-row">
+                      <span>Lower third over NDI</span>
+                      <select
+                        className="wp-input"
+                        aria-label="Lower third over NDI"
+                        value={lowerNdi}
+                        onChange={(e) => {
+                          const v = e.target.value as "page" | "builtin";
+                          setLowerNdi(v);
+                          void api.setSetting("ndi_lower_third", v);
+                        }}
+                      >
+                        <option value="page">The output page: moving video, animations, everything (as FreeShow)</option>
+                        <option value="builtin">Built-in drawing: exact see-through edges, still pictures only</option>
+                      </select>
+                    </label>
+                  )}
                   <p className="oo-note">
                     Sent over NDI as “{draft.role === "main" ? "Worship Presenter Main" : draft.role === "alternate" ? "Worship Presenter Alternate" : "Worship Presenter Foldback"}”, with no window
-                    on any monitor{draft.role === "alternate" ? " (the lower-third look, see-through for keying)" : ""}. In OBS add an NDI source (DistroAV plugin); vMix lists it under NDI. Videos
-                    are sent as their preview picture. Needs the NDI Runtime (Settings → Outputs → NDI).
+                    on any monitor{draft.role === "alternate" ? " (the lower-third look, see-through for keying)" : ""}. As in FreeShow, the real output page is sent: moving video, text
+                    animations and transitions exactly as on the screens. In OBS add an NDI source (DistroAV plugin); vMix lists it under NDI. Needs the NDI Runtime (Settings → Outputs → NDI).
+                    {draft.role === "alternate" ? " A change of the lower-third choice applies when the NDI output is next started (Apply)." : ""}
                   </p>
                 </>
               )}

@@ -61,7 +61,7 @@ impl Host for Desk {
         });
         let title = item.as_ref().map(|i| match i {
             ProgramItem::Scripture { .. } => caption.clone().unwrap_or_default(),
-            ProgramItem::Song { title, .. } | ProgramItem::Media { title, .. } | ProgramItem::Announcement { title, .. } => title.clone(),
+            ProgramItem::Song { title, .. } | ProgramItem::Media { title, .. } | ProgramItem::Announcement { title, .. } | ProgramItem::Header { title } | ProgramItem::Web { title, .. } => title.clone(),
         });
         serde_json::json!({
             "server_now_ms": wp_core::cues::now_ms(),

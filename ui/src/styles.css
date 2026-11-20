@@ -548,3 +548,37 @@ p { margin: 0; }
   .pr-table { width: 100%; border-collapse: collapse; font-size: 10pt; }
   .pr-table th, .pr-table td { border-bottom: 1px solid #bbb; padding: 3pt 6pt; text-align: left; }
 }
+/* more changes between slides (EasyWorship's transitions) */
+.anim-cover { animation: wp-cover ease-out both; }
+.anim-cube { animation: wp-cube ease-out both; transform-origin: left center; }
+.anim-drop { animation: wp-drop cubic-bezier(.3,1.4,.5,1) both; }
+.anim-iris { animation: wp-iris ease-out both; }
+.anim-pageflip { animation: wp-pageflip ease-out both; transform-origin: left center; }
+@keyframes wp-cover { from { transform: translateX(100cqw); } to { transform: none; } }
+@keyframes wp-cube { from { opacity: .4; transform: perspective(120cqw) rotateY(-80deg); } to { opacity: 1; transform: none; } }
+@keyframes wp-drop { from { opacity: 0; transform: translateY(-30cqh); } to { opacity: 1; transform: none; } }
+@keyframes wp-iris { from { clip-path: circle(0% at 50% 50%); } to { clip-path: circle(75% at 50% 50%); } }
+@keyframes wp-pageflip { from { opacity: 0; transform: perspective(120cqw) rotateY(-100deg); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .anim-cover, .anim-cube, .anim-drop, .anim-iris, .anim-pageflip { animation: none !important; } }
+/* text animations: how a new slide's words appear (theme text layer: Words appear) */
+.tl-enter { animation-duration: .55s; animation-timing-function: ease-out; animation-fill-mode: both; }
+.tl-enter--fade { animation-name: wp-line-fade; }
+.tl-enter--rise { animation-name: wp-line-rise; }
+.tl-enter--fly { animation-name: wp-line-fly; }
+.tl-enter--type { animation-name: wp-line-type; animation-duration: .7s; animation-timing-function: steps(28, end); }
+@keyframes wp-line-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes wp-line-rise { from { opacity: 0; transform: translateY(.6em); } to { opacity: 1; transform: none; } }
+@keyframes wp-line-fly { from { opacity: 0; transform: translateX(-30cqw); } to { opacity: 1; transform: none; } }
+@keyframes wp-line-type { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0 0 0 0); } }
+@media (prefers-reduced-motion: reduce) { .tl-enter { animation: none !important; } }
+/* a custom stage layout: boxes placed in % of the screen, text sized to the screen */
+.stage-view--custom { position: relative; container-type: size; display: block; }
+.stg-box { position: absolute; overflow: hidden; line-height: 1.15; box-sizing: border-box; padding: .2em .4em; border-radius: 4px; }
+.stg-box p { margin: 0 0 .15em; }
+.stg-box__label { opacity: .7; }
+.stg-box--clock, .stg-box--timer, .stg-box--key { font-weight: 700; font-variant-numeric: tabular-nums; }
+.stg-box--timer .is-over { color: #ff5a5a; }
+.stg-box--next .stage-view__nextlabel { display: block; font-size: .7em; opacity: .7; }
+/* two languages line by line: the translation line under each line */
+.tl-pairhost { display: contents; }
+[data-paired] { font-size: .86em; font-style: var(--wp-paired-style, italic); color: var(--wp-paired, inherit); opacity: .95; margin-bottom: .25em; }

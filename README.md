@@ -6,6 +6,8 @@ Works like EasyWorship, with extras such as automatic scripture recognition.
 
 ## What it does
 
+- **Moving from EasyWorship**: its songs, Bibles and themes import (Settings → Import), and
+  File → Open EasyWorship schedule opens a saved EasyWorship 7 schedule (.ewsx).
 - **Songs** with two languages on one slide (e.g. English and Fante), chords for the band,
   and quick hymn numbers ("555", "MHB 1"). Find a song's words online by title and artist
   (Songs → right-click → Find lyrics online): Hymnary.org for hymns, LRCLIB for others.
@@ -13,9 +15,12 @@ Works like EasyWorship, with extras such as automatic scripture recognition.
   available…). English references work in every Bible.
 - **Scripture recognition**: listens to the preacher and suggests the verse being
   announced or read. Nothing goes on screen until you choose.
-- **Media, PowerPoint and PDF**, announcements, timers, alerts and background music.
+- **Web pages** in the service (🌐 in the Schedule): shown over the main screen when live.
+- **Media, PowerPoint and PDF**, announcements, timers, alerts and background music. Free
+  pictures and videos from Pixabay and Unsplash (Media → Online; each needs a free key).
 - **Several outputs**: projector, lower third for the livestream, stage display, and NDI
-  for OBS or vMix.
+  for OBS or vMix. As in FreeShow, NDI sends the real output page: moving video, text
+  animations and transitions exactly as on the screens (the lower third keyed to transparency).
 - **Themes** with a gallery, brand colours, and import from EasyWorship and ProPresenter.
 - **Phones**: a remote control for the media desk, and the words on the congregation's
   phones.
@@ -82,6 +87,13 @@ interface rather than a laptop microphone.
 The app checks for a new version once a day and offers **Install and restart**. It never
 installs while something is live. You can also use **Settings → About → Check for updates**.
 
+## Before the service
+
+The dots beside Blank / Logo / Clear show every output at a glance (green live, blue
+blank, amber held, red off or not answering). Click them for the Outputs panel and
+**Check system**: screens, NDI, disk space, backup, Bibles, scripture recognition and
+recording, each problem with a Fix button.
+
 ## When something goes wrong
 
 Go to **Settings → About → Copy a diagnostic report**, and send it with a description of
@@ -121,7 +133,9 @@ publish to a separate public repository:
    (e.g. `charleswesleybotchwey/Worship-Presenter-Releases`).
 
 **Building locally** (Node 22, Rust, and LLVM/CMake for Whisper): `npm run setup`, then
-`npm run dev`. Tests: `cargo test -p wp-core -p wp-remote -p wp-audio -p wp-render`.
+`npm run dev`. Tests: `cargo test -p wp-core -p wp-remote -p wp-audio -p wp-render`, and
+for the interface `npm --prefix ui test` (unit) and `npm --prefix ui run e2e` (operator
+workflows in a browser; run `npm --prefix ui run build` first). Every push runs them all.
 A GitHub Codespace has everything installed; `npm run preview` shows the interface in a
 browser.
 

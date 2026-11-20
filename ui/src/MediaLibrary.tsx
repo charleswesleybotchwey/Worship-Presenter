@@ -1,5 +1,6 @@
 import { dragItem, useGoLive } from "./dnd";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { OnlineMedia } from "./OnlineMedia";
+import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import { PopupMenu, type MenuEntry } from "./PopupMenu";
 import { api, pickMediaFiles, type ItemCollection, type MediaItem } from "./api";
 import { makeThumb, useMediaUrl } from "./theme/media";
@@ -46,6 +47,9 @@ export type MediaGridControl = {
   sort: MediaSort;
   setSort: (s: MediaSort) => void;
   refresh: () => void;
+  /** The items chosen together (Ctrl/Shift+click), when the menu is on one of them. */
+  selection: MediaItem[];
+  clearSelection: () => void;
 };
 
 export function MediaGrid({
@@ -68,11 +72,45 @@ export function MediaGrid({
   /** Show only these items (a media collection). */
   onlyIds?: number[] | null;
 }) {
+  // several items at once: Ctrl+click adds or removes one, Shift+click takes a range
+  const [multi, setMulti] = useState<Set<number>>(new Set());
+  const anchor = useRef<number | null>(null);
+  // the item last clicked here (the library does not always say which is chosen)
+  const [lastPick, setLastPick] = useState<number | null>(null);
+  const current = selectedId ?? lastPick;
+  const many = (m: MediaItem) => (multi.size > 1 && multi.has(m.id) ? shownRef.current.filter((x) => multi.has(x.id)) : []);
+  const pickWith = (e: React.MouseEvent, m: MediaItem) => {
+    const idx = shownRef.current.findIndex((x) => x.id === m.id);
+    if (e.ctrlKey || e.metaKey) {
+      const next = new Set(multi.size ? multi : current != null ? [current] : []);
+      if (next.has(m.id)) next.delete(m.id);
+      else next.add(m.id);
+      anchor.current = idx;
+      return setMulti(next);
+    }
+    if (e.shiftKey && anchor.current != null) {
+      const [a, b] = [Math.min(anchor.current, idx), Math.max(anchor.current, idx)];
+      return setMulti(new Set(shownRef.current.slice(a, b + 1).map((x) => x.id)));
+    }
+    anchor.current = idx;
+    setMulti(new Set());
+    setLastPick(m.id);
+    if (m.missing) return setProblem(`“${m.title}” is missing from the media folder. Use Relink to point it at the file.`);
+    onPick(m);
+  };
+  const isPicked = (m: MediaItem) => (multi.size ? multi.has(m.id) : m.id === current);
   const dragProps = (m: MediaItem) =>
     draggableItems && !m.missing
-      ? { draggable: true, onDragStart: (e: React.DragEvent) => dragItem(e, { kind: "media", media_id: m.id, title: m.title }) }
+      ? {
+          draggable: true,
+          onDragStart: (e: React.DragEvent) => {
+            const sel = many(m).filter((x) => !x.missing);
+            dragItem(e, sel.length > 1 ? sel.map((x) => ({ kind: "media" as const, media_id: x.id, title: x.title })) : { kind: "media", media_id: m.id, title: m.title });
+          },
+        }
       : {};
   const [itemMenu, setItemMenu] = useState<{ x: number; y: number; entries: MenuEntry[] } | null>(null);
+  const shownRef = useRef<MediaItem[]>([]);
   const [sort, setSort] = useState<MediaSort>(() => (localStorage.getItem("wp-media-sort") as MediaSort) || "title");
   const setSortSaved = (v: MediaSort) => (setSort(v), localStorage.setItem("wp-media-sort", v));
   const menuProps = (m: MediaItem) =>
@@ -81,7 +119,8 @@ export function MediaGrid({
           onContextMenu: async (e: React.MouseEvent) => {
             e.preventDefault();
             const { clientX: x, clientY: y } = e;
-            const entries = await menuFor(m, { importFiles, layout, setLayout: setLayoutSaved, sort, setSort: setSortSaved, refresh: () => void refresh() });
+            if (!multi.has(m.id)) setMulti(new Set());
+            const entries = await menuFor(m, { importFiles, layout, setLayout: setLayoutSaved, sort, setSort: setSortSaved, refresh: () => void refresh(), selection: many(m), clearSelection: () => setMulti(new Set()) });
             setItemMenu({ x, y, entries });
           },
         }
@@ -147,6 +186,7 @@ export function MediaGrid({
     }
   };
 
+  shownRef.current = shown;
   return (
     <div className="media">
       <div className="media__bar">
@@ -185,12 +225,12 @@ export function MediaGrid({
             <li
               key={m.id}
               role="option"
-              aria-selected={m.id === selectedId}
-              className={`wp-row wp-row--lib ${m.id === selectedId ? "is-selected" : ""}`}
+              aria-selected={isPicked(m)}
+              className={`wp-row wp-row--lib ${isPicked(m) ? "is-selected" : ""}`}
               title={m.title}
               {...dragProps(m)}
               {...menuProps(m)}
-              onClick={() => (m.missing ? setProblem(`“${m.title}” is missing from the media folder. Use Relink to point it at the file.`) : onPick(m))}
+              onClick={(e) => pickWith(e, m)}
             >
               <Icon name={m.kind === "image" ? "image" : m.kind === "video" ? "video" : "speaker"} />
               <span className="wp-row__title">{m.title}</span>
@@ -214,8 +254,8 @@ export function MediaGrid({
         {layout === "thumbs" && shown.map((m) => {
           const t = thumbSrc(m, url);
           return (
-            <li key={m.id} className={m.id === selectedId ? "is-current" : ""} {...dragProps(m)} {...menuProps(m)}>
-              <button className="media__card" onClick={() => onPick(m)} title={m.title}>
+            <li key={m.id} className={isPicked(m) ? "is-current" : ""} {...dragProps(m)} {...menuProps(m)}>
+              <button className="media__card" onClick={(e) => pickWith(e, m)} title={m.title}>
                 <span className="media__thumb">{t ? <img src={t} alt="" loading="lazy" /> : <span className="media__icon">{m.kind === "audio" ? "♪" : "▶"}</span>}</span>
                 <span className="media__title">{m.title}</span>
                 <span className={`media__meta ${m.missing ? "is-missing" : ""}`}>{m.missing ? "File missing" : m.kind === "image" ? "Picture" : `${m.kind === "video" ? "Video" : "Sound"} ${duration(m.duration_ms)}`}</span>
@@ -234,6 +274,9 @@ export function MediaGrid({
 export function MediaLibrary({ onPreview, onAdd, version }: { onPreview: (m: MediaItem) => void; onAdd: (m: MediaItem) => void; version: number }) {
   const [menu, setMenu] = useState<number | null>(null);
   const [note, setNote] = useState<{ text: string; bad?: boolean } | null>(null);
+  // the library, or free pictures and videos online (Pixabay, Unsplash)
+  const [online, setOnline] = useState(false);
+  const [bump, setBump] = useState(0);
 
   const useAsBackground = async (m: MediaItem, kind: ThemeKind) => {
     setMenu(null);
@@ -265,6 +308,13 @@ export function MediaLibrary({ onPreview, onAdd, version }: { onPreview: (m: Med
     if (showColl == null) return setCollIds([]);
     api.itemCollectionItems(showColl).then((xs) => setCollIds(xs.flatMap((x) => (x.kind === "media" ? [x.media_id] : [])))).catch(() => {});
   }, [showColl, colls]);
+  const toCollMany = async (ms: MediaItem[]) => {
+    const name = prompt("Name of the new collection (e.g. Easter backgrounds)");
+    if (!name?.trim()) return;
+    const cid = await api.itemCollectionCreate("media", name);
+    for (const m of ms) await api.itemCollectionAdd(cid, { kind: "media", media_id: m.id, title: m.title });
+    void loadColls();
+  };
   const toColl = async (m: MediaItem, id: number | null) => {
     let cid = id;
     if (cid == null) {
@@ -277,6 +327,31 @@ export function MediaLibrary({ onPreview, onAdd, version }: { onPreview: (m: Med
   };
   // EasyWorship's media menu (right-click a picture, video or sound), then the extras
   const menuFor = async (m: MediaItem, g: MediaGridControl): Promise<MenuEntry[]> => {
+    if (g.selection.length > 1) {
+      const sel = g.selection;
+      const n = sel.length;
+      return [
+        { label: `&Add ${n} items to the schedule`, run: () => sel.forEach((x) => !x.missing && onAdd(x)) },
+        {
+          label: `Add ${n} to co&llection`,
+          sub: [...colls.map((c) => ({ label: c.name, run: () => void Promise.all(sel.map((x) => api.itemCollectionAdd(c.id, { kind: "media", media_id: x.id, title: x.title }))).then(loadColls) })), ...(colls.length ? ["-" as const] : []), { label: "New collection…", run: () => void toCollMany(sel) }],
+        },
+        "-",
+        {
+          label: `&Delete ${n} items`,
+          run: async () => {
+            if (!confirm(`Delete ${n} items from the media library? Themes or items using them will show nothing in their place.`)) return;
+            const failed: string[] = [];
+            for (const x of sel) await api.deleteMedia(x.id).catch(() => failed.push(x.title));
+            g.clearSelection();
+            g.refresh();
+            setNote({ text: failed.length ? `Deleted ${n - failed.length}; could not delete: ${failed.join(", ")}.` : `Deleted ${n} items.`, bad: failed.length > 0 });
+          },
+        },
+        "-",
+        { label: "Select none", run: g.clearSelection },
+      ];
+    }
     const what = m.kind === "image" ? "Image" : m.kind === "video" ? "Video" : "Audio";
     const used = await api.mediaUsedBy(m.id).catch(() => [] as string[]);
     const logo = (await api.getSettings().catch(() => ({}) as Record<string, string>)).logo_media_id;
@@ -378,6 +453,15 @@ export function MediaLibrary({ onPreview, onAdd, version }: { onPreview: (m: Med
 
   return (
     <>
+      <div className="media__where" role="radiogroup" aria-label="Media from">
+        <button role="radio" aria-checked={!online} className={!online ? "is-on" : ""} onClick={() => setOnline(false)}>
+          Library
+        </button>
+        <button role="radio" aria-checked={online} className={online ? "is-on" : ""} onClick={() => setOnline(true)} title="Free pictures and videos from Pixabay and Unsplash">
+          Online
+        </button>
+      </div>
+      {online && <OnlineMedia onDownloaded={() => setBump((x) => x + 1)} />}
       {note && <p className={note.bad ? "form-error" : "notice"}>{note.text}</p>}
       {colls.length > 0 && (
         <label className="media__show">
@@ -392,8 +476,9 @@ export function MediaLibrary({ onPreview, onAdd, version }: { onPreview: (m: Med
           </select>
         </label>
       )}
+      {!online && (
       <MediaGrid
-        key={version + (note?.text ?? "")}
+        key={version + (note?.text ?? "") + bump}
         onPick={onPreview}
         draggableItems
         menuFor={menuFor}
@@ -436,6 +521,7 @@ export function MediaLibrary({ onPreview, onAdd, version }: { onPreview: (m: Med
           </>
         )}
       />
+      )}
         </>
   );
 }

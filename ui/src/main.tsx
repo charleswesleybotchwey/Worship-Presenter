@@ -1,8 +1,10 @@
-import { StrictMode } from "react";
+import { StrictMode, Suspense, lazy } from "react";
 import { createRoot } from "react-dom/client";
-import { Control } from "./Control";
-import { Output } from "./Output";
-import { Fixture } from "./ui/Fixture";
+// each window loads only its own part: projector, stage and NDI windows do not carry
+// the whole operator interface (they start faster and use less memory)
+const Control = lazy(() => import("./Control").then((m) => ({ default: m.Control })));
+const Output = lazy(() => import("./Output").then((m) => ({ default: m.Output })));
+const Fixture = lazy(() => import("./ui/Fixture").then((m) => ({ default: m.Fixture })));
 
 const ident = location.hash.match(/^#\/identify\/(\d+)\/([^/]*)\/?(.*)$/);
 
@@ -54,7 +56,7 @@ if (ident) {
 createRoot(document.getElementById("root")!).render(<StrictMode>
     <MediaUrlProvider>
       <ThemesProvider>
-        {m ? <Output role={m[1]} /> : location.hash === "#/fixture" ? <Fixture /> : <Control />}
+        <Suspense fallback={null}>{m ? <Output role={m[1]} /> : location.hash === "#/fixture" ? <Fixture /> : <Control />}</Suspense>
       </ThemesProvider>
     </MediaUrlProvider>
   </StrictMode>);

@@ -519,6 +519,21 @@ fn constant_eq(a: &[u8], b: &[u8]) -> bool {
 
 /// What the congregation's phones may see: exactly what is on the screens (the item's
 /// title and its words, both languages), never the service order, notes, timers or chords.
+/// Lyrics lines without the rich-text markers (**bold**, *italic*, __u__, {gold}…{/}).
+fn plain_lines(v: &serde_json::Value) -> serde_json::Value {
+    let strip = |l: &str| -> String {
+        let mut t = l.replace("**", "").replace("__", "").replace("{/}", "");
+        while let Some(a) = t.find('{') {
+            match t[a..].find('}') {
+                Some(b) if b <= 10 && t[a + 1..a + b].chars().all(|c| c.is_ascii_alphanumeric() || c == '#') && b > 3 => t.replace_range(a..=a + b, ""),
+                _ => break,
+            }
+        }
+        t.replace('*', "")
+    };
+    v.as_array().map(|a| serde_json::Value::Array(a.iter().map(|l| serde_json::Value::String(strip(l.as_str().unwrap_or("")))).collect())).unwrap_or(serde_json::Value::Array(vec![]))
+}
+
 pub fn public_view(snap: &serde_json::Value, open: bool) -> serde_json::Value {
     if !open {
         return serde_json::json!({ "closed": true });
@@ -529,7 +544,7 @@ pub fn public_view(snap: &serde_json::Value, open: bool) -> serde_json::Value {
     let slides: Vec<serde_json::Value> = if showing {
         snap["slides"]
             .as_array()
-            .map(|a| a.iter().map(|s| serde_json::json!({ "label": s["label"], "primary": s["primary"], "second": s["second"] })).collect())
+            .map(|a| a.iter().map(|s| serde_json::json!({ "label": s["label"], "primary": plain_lines(&s["primary"]), "second": plain_lines(&s["second"]) })).collect())
             .unwrap_or_default()
     } else {
         vec![]

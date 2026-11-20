@@ -26,6 +26,8 @@ const BLACK = { kind: "color" as const, color: "#000000", image: null, fit: "cov
 const CLEAR = { ...BLACK, kind: "transparent" as const };
 
 export function SlideView({
+  sound,
+  allSlides,
   slide,
   kind = "song",
   caption,
@@ -46,6 +48,10 @@ export function SlideView({
   adjust,
   copyright,
 }: {
+  /** May play a background video's sound (the main output). */
+  sound?: boolean;
+  /** The item's other slides (for "the same size on every slide"). */
+  allSlides?: Slide[];
   /** The song's copyright line, for a theme's copyright layer. */
   copyright?: string | null;
   /** The Live pane's quick change for this item (words larger/smaller, up/down). */
@@ -53,7 +59,7 @@ export function SlideView({
   slide?: Slide;
   /** Whether this is its item's first / last slide (layers shown only there). */
   position?: { first: boolean; last: boolean };
-  kind?: "song" | "scripture" | "media" | "announcement";
+  kind?: "song" | "scripture" | "media" | "announcement" | "header" | "web";
   caption?: string | null;
   media?: MediaItem | null;
   look?: SlideLook;
@@ -89,6 +95,6 @@ export function SlideView({
     if (look?.lowerThird || !media) return <ThemeView theme={{ ...theme, background: CLEAR, layers: [] }} data={{ primary: [], second: [] }} />;
     return <MediaView item={media} playing={playing} restart={restart} muted={muted} still={still} />;
   }
-  const data = { primary: slide.primary, second: slide.second, reference: kind === "scripture" ? caption : null, title: kind === "song" ? caption : null, section: kind === "song" ? sectionName(slide.label) : null, first: position?.first, last: position?.last, textScale: adjust?.scale, textShift: adjust?.shift, rotateKey: caption ?? slide.label, copyright: kind === "song" ? copyright ?? null : null };
+  const data = { sound, allPrimary: allSlides?.map((x) => x.primary), allSecond: allSlides?.map((x) => x.second), primary: slide.primary, second: slide.second, reference: kind === "scripture" ? (slide.reference != null ? slide.reference || null : caption) : null, title: kind === "song" ? caption : null, section: kind === "song" ? sectionName(slide.label) : null, first: position?.first, last: position?.last, textScale: adjust?.scale, textShift: adjust?.shift, rotateKey: caption ?? slide.label, copyright: kind === "song" ? copyright ?? null : null };
   return <ThemeView theme={theme} data={data} phase={phase} showKey={showKey} textKey={textKey} hideText={hideText} still={still} />;
 }

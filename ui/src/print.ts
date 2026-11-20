@@ -1,3 +1,4 @@
+import { stripRich } from "./rich";
 import { api, type SongDoc } from "./api";
 import { pieces } from "./chords";
 
@@ -35,7 +36,7 @@ function sections(body: string): { label: string; lines: string[] }[] {
   for (const raw of body.split("\n")) {
     const m = /^\[([^\]]+)\]\s*$/.exec(raw.trim());
     if (m) out.push({ label: m[1], lines: [] });
-    else if (raw.trim()) (out[out.length - 1] ?? (out.push({ label: "", lines: [] }), out[0])).lines.push(raw.trim());
+    else if (raw.trim()) (out[out.length - 1] ?? (out.push({ label: "", lines: [] }), out[0])).lines.push(stripRich(raw.trim()));
   }
   return out;
 }

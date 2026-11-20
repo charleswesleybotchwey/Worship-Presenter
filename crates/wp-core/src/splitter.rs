@@ -53,6 +53,10 @@ pub struct Position {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Slide {
+    /// Scripture: this slide's reference as the display options want it ("" = none
+    /// shown); None = the item's caption, as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
     pub label: String,
     pub occurrence: usize,
     pub first_key: i64,
@@ -104,7 +108,7 @@ pub fn split(sections: &[Section], o: &Options) -> Vec<Slide> {
             // the congregation is shown)
             let chord_lines: Vec<String> = sec.segments.iter().filter(|g| g.lang == o.primary && chunk.contains(&g.align_key)).map(|g| g.chords.clone().unwrap_or_default()).collect();
             let chords = if chord_lines.iter().any(|c| !c.is_empty()) { chord_lines } else { Vec::new() };
-            out.push(Slide {
+            out.push(Slide { reference: None,
                 label: sec.label.clone(),
                 occurrence: occ,
                 first_key: chunk[0],

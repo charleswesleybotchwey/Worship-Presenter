@@ -149,7 +149,7 @@ pub mod capture {
                     px[3] = 255;
                 }
             }
-            self.f.slot.put(Frame { width, height, data });
+            self.f.slot.put(Frame { width, height, data, fade_ms: 0 });
             self.f.stats.captured.fetch_add(1, Ordering::Relaxed);
             self.f.stats.process_us.store(t.elapsed().as_micros() as u64, Ordering::Relaxed);
             Ok(())
@@ -205,7 +205,10 @@ pub fn run_builtin_as(app: tauri::AppHandle, slot: Arc<Slot>, stats: Arc<Stats>,
                 if sig != last || (clock && last_at.elapsed().as_secs() >= 1) {
                     let t = Instant::now();
                     let data = r.render(&theme, &content, width, height, &st.profile_dir().join("media"));
-                    slot.put(pump::Frame { width, height, data });
+                    // a new slide fades in as the theme says ("cut": at once); the clock's
+                    // ticks do not fade
+                    let fade_ms = if sig != last && theme["transition"]["kind"].as_str() != Some("cut") { theme["transition"]["ms"].as_u64().unwrap_or(300).min(1500) as u32 } else { 0 };
+                    slot.put(pump::Frame { width, height, data, fade_ms });
                     stats.captured.fetch_add(1, Ordering::Relaxed);
                     stats.process_us.store(t.elapsed().as_micros() as u64, Ordering::Relaxed);
                     last = sig;

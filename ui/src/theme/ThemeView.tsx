@@ -1,3 +1,4 @@
+import { renderRich, stripRich } from "../rich";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { resolveBrand, useBrand } from "./brand";
 import { useMediaUrl } from "./media";
@@ -13,12 +14,25 @@ import { fontStack, gradientCss, sectionKindOf, type Layer, type TextBox, type S
 
 export type Phase = "in" | "out" | "static";
 
-function contentFor(l: TextLayer, d: SlideData, clock: string): string[] {
+/** Marks a translation line inside the words layer (two languages line by line). */
+export const PAIRED = "\u2063";
+
+/** Each line, then its translation (the extra lines of the longer one at the end). */
+export function pairLines(primary: string[], second: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < Math.max(primary.length, second.length); i++) {
+    if (i < primary.length) out.push(primary[i]);
+    if (i < second.length) out.push(PAIRED + second[i]);
+  }
+  return out;
+}
+
+function contentFor(l: TextLayer, d: SlideData, clock: string, paired = false): string[] {
   switch (l.field) {
     case "lyrics":
-      return d.primary;
+      return paired && d.second.length ? pairLines(d.primary, d.second) : d.primary;
     case "second":
-      return d.second;
+      return paired ? [] : d.second;
     case "reference":
       return d.reference ? [d.reference] : [];
     case "title":
@@ -45,6 +59,8 @@ function textCss(s: TextStyle, sizeCqh: number): CSSProperties {
     lineHeight: s.lineHeight,
     letterSpacing: `${s.letterSpacing}em`,
     textTransform: s.uppercase ? "uppercase" : "none",
+    whiteSpace: s.wrap === false ? "nowrap" : undefined,
+    ...(s.balance ? ({ textWrap: "balance" } as CSSProperties) : {}),
     textShadow: s.shadow.on ? `${s.shadow.x}cqh ${s.shadow.y}cqh ${s.shadow.blur}cqh ${s.shadow.color}` : "none",
     WebkitTextStroke: s.outline.on ? `${s.outline.width}cqh ${s.outline.color}` : undefined,
     paintOrder: "stroke fill",
@@ -74,10 +90,31 @@ function animCss(l: Layer, phase: Phase): { className: string; style: CSSPropert
 }
 
 /** Text that shrinks (down to minSize) until it fits its box. */
-function FitText({ lines, style, valign }: { lines: string[]; style: TextStyle; valign: TextStyle["valign"] }) {
+/** A looping background video; its sound only where allowed (the main output). */
+function BgVideo({ src, poster, style, volume }: { src: string; poster?: string; style: CSSProperties; volume: number }) {
+  const ref = useRef<HTMLVideoElement>(null);
+  useEffect(() => {
+    if (ref.current) ref.current.volume = Math.min(1, Math.max(0, volume));
+  }, [volume]);
+  return <video ref={ref} className="tv__bg" src={src} poster={poster} style={style} autoPlay muted={volume <= 0} loop playsInline />;
+}
+
+/** EasyWorship's capitalisation options, as the words are drawn (the song is unchanged). */
+export function capitalise(lines: string[], how: TextStyle["capitalize"]): string[] {
+  const up = (w: string) => (w ? w[0].toLocaleUpperCase() + w.slice(1) : w);
+  if (how === "words") return lines.map((l) => l.split(/(\s+)/).map(up).join(""));
+  if (how === "lines") return lines.map((l) => up(l));
+  return lines;
+}
+
+/** The size at which every slide's words fit (cached per item and box size). */
+const normalCache = new Map<string, number>();
+
+function FitText({ lines: raw, style, valign, others }: { lines: string[]; style: TextStyle; valign: TextStyle["valign"]; others?: string[][] }) {
   const box = useRef<HTMLDivElement>(null);
   const inner = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState(style.size);
+  const lines = capitalise(raw, style.capitalize);
   const key = lines.join("\n");
 
   useLayoutEffect(() => {
@@ -94,6 +131,31 @@ function FitText({ lines, style, valign }: { lines: string[]; style: TextStyle; 
         t.style.fontSize = `${sz}cqh`;
         setSize(sz);
       };
+      // "the same size on every slide": the smallest size at which any slide fits
+      if (style.normalize && others && others.length > 1) {
+        const ck = `${b.clientWidth}x${b.clientHeight}|${JSON.stringify(style)}|${others.map((o) => o.join("\n")).join("\u0001")}`;
+        let n = normalCache.get(ck);
+        if (n == null) {
+          const saved = t.innerHTML;
+          let least = style.size;
+          for (const o of others) {
+            t.innerHTML = capitalise(o, style.capitalize).map((x) => `<p>${stripRich(x).replace(/&/g, "&amp;").replace(/</g, "&lt;")}</p>`).join("");
+            if (fits(least)) continue;
+            let [lo, hi] = [style.size * 0.25, least];
+            for (let i = 0; i < 10; i++) {
+              const mid = (lo + hi) / 2;
+              if (fits(mid)) lo = mid;
+              else hi = mid;
+            }
+            least = lo;
+          }
+          t.innerHTML = saved;
+          n = least;
+          if (normalCache.size > 200) normalCache.clear();
+          normalCache.set(ck, n);
+        }
+        if (fits(n)) return done(n);
+      }
       if (fits(style.size)) return done(style.size);
       // words are never cut off: shrink to the theme's smallest size, and below it
       // (down to a quarter) only if they still would not fit; with auto-fit off, the
@@ -124,13 +186,26 @@ function FitText({ lines, style, valign }: { lines: string[]; style: TextStyle; 
 
   const bx = style.box?.mode && style.box.mode !== "off" ? style.box : null;
   // the box: padding comes out of the text area, so shrink-to-fit keeps it inside
-  const pad = bx ? { padding: `${bx.padY}cqh ${bx.padX}cqh` } : undefined;
+  const m = style.margin ?? { l: 0, r: 0, t: 0, b: 0 };
+  const pad =
+    bx || m.l || m.r || m.t || m.b
+      ? { padding: `${(bx?.padY ?? 0) + m.t}cqh ${(bx?.padX ?? 0) + m.r}cqh ${(bx?.padY ?? 0) + m.b}cqh ${(bx?.padX ?? 0) + m.l}cqh` }
+      : undefined;
   const lineBg = bx?.mode === "lines" ? { background: bx.color, padding: `${bx.padY * 0.5}cqh ${bx.padX}cqh`, borderRadius: `${bx.radius}cqh`, boxDecorationBreak: "clone" as const, WebkitBoxDecorationBreak: "clone" as const, ...(bx.blur ? { backdropFilter: `blur(${bx.blur}cqh)` } : null) } : null;
   return (
     <div ref={box} className={`tl-box tl-box--${valign}`} style={pad}>
       <div ref={inner} className={bx?.mode === "block" ? "tl-hug" : undefined} style={{ ...textCss(style, size), ...(bx?.mode === "block" ? { alignSelf: style.align === "left" ? "flex-start" : style.align === "right" ? "flex-end" : "center" } : null) }}>
         {lines.map((l, i) => (
-          <p key={i}>{lineBg ? <span className="tl-line" style={lineBg}>{l}</span> : l}</p>
+          <p
+            // a translation line (two languages line by line) takes the second-language look
+            data-paired={l.startsWith(PAIRED) || undefined}
+            // a new slide's lines are new elements, so their animation plays again
+            key={style.enter && style.enter !== "none" ? `${key}\u0001${i}` : i}
+            className={style.enter && style.enter !== "none" ? `tl-enter tl-enter--${style.enter}` : undefined}
+            style={style.enter && style.enter !== "none" ? { animationDelay: `${i * (style.enter === "type" ? 700 : 140)}ms` } : undefined}
+          >
+            {lineBg ? <span className="tl-line" style={lineBg}>{renderRich(l.replace(PAIRED, ""))}</span> : renderRich(l.replace(PAIRED, ""))}
+          </p>
         ))}
       </div>
     </div>
@@ -261,13 +336,25 @@ export function ThemeView({
   const url = useMediaUrl();
   const clock = useClock(theme.layers.some((l) => l.kind === "text" && l.field === "clock"));
   const bg = theme.background;
-  const secondEmpty = data.second.length === 0;
+  // two languages line by line: the words layer holds both, using the whole area
+  const paired = !!theme.pairLines && data.second.length > 0;
+  const secondLook = theme.layers.find((x): x is TextLayer => x.kind === "text" && x.field === "second")?.style;
+  const secondEmpty = data.second.length === 0 || paired;
   // how the words change between slides: fade, slide up, wipe, zoom or push (cut: none)
   const fade = theme.transition.kind !== "cut" ? { animationDuration: `${theme.transition.ms}ms` } : undefined;
-  const enter = { fade: "anim-xfade", "slide-up": "anim-slideup", wipe: "anim-wipe", zoom: "anim-zoom", push: "anim-push", cut: "" }[theme.transition.kind] ?? "anim-xfade";
+  const enter =
+    { fade: "anim-xfade", "slide-up": "anim-slideup", wipe: "anim-wipe", zoom: "anim-zoom", push: "anim-push", cover: "anim-cover", cube: "anim-cube", drop: "anim-drop", iris: "anim-iris", pageflip: "anim-pageflip", cut: "" }[
+      theme.transition.kind
+    ] ?? "anim-xfade";
 
   const vid = bg.kind === "video" ? pickVideo(bg, data.rotateKey) : null;
   const tinted = bg.kind === "color" && /^#([0-9a-f]{8}|[0-9a-f]{4})$/i.test(bg.color.trim()) && !/f{2}$|^#[0-9a-f]{3}f$/i.test(bg.color.trim());
+  // EasyWorship's background options: turn, flips and opacity
+  const bgLook: CSSProperties = {
+    objectFit: bg.fit,
+    opacity: bg.opacity ?? 1,
+    transform: bg.turn || bg.flipH || bg.flipV ? `rotate(${bg.turn ?? 0}deg) scale(${bg.flipH ? -1 : 1}, ${bg.flipV ? -1 : 1})` : undefined,
+  };
   return (
     <div
       className={`tv ${bg.kind === "transparent" ? "tv--keyed" : ""} ${tinted ? "tv--tinted" : ""} ${editor ? "tv--editor" : ""}`}
@@ -277,13 +364,13 @@ export function ThemeView({
           : { background: bg.kind === "color" ? bg.color : bg.kind === "transparent" ? "transparent" : bg.kind === "gradient" && bg.gradient ? gradientCss(bg.gradient) : "#000" }
       }
     >
-      {bg.kind === "image" && bg.image && <img className="tv__bg" src={url(bg.image)} alt="" style={{ objectFit: bg.fit }} />}
+      {bg.kind === "image" && bg.image && <img className="tv__bg" src={url(bg.image)} alt="" style={bgLook} />}
       {bg.kind === "video" && vid?.video && (still ? (
-        vid.poster ? <img className="tv__bg" src={url(vid.poster)} alt="" style={{ objectFit: bg.fit }} /> : null
+        vid.poster ? <img className="tv__bg" src={url(vid.poster)} alt="" style={bgLook} /> : null
       ) : (
         // muted, looping, never restarted by slide changes (the element stays mounted;
         // a new item may pick another video from the set)
-        <video key={vid.video} className="tv__bg" src={url(vid.video)} poster={vid.poster ? url(vid.poster) : undefined} style={{ objectFit: bg.fit }} autoPlay muted loop playsInline />
+        <BgVideo key={vid.video} src={url(vid.video)} poster={vid.poster ? url(vid.poster) : undefined} style={bgLook} volume={data.sound ? bg.volume ?? 0 : 0} />
       ))}
       {(bg.kind === "image" || bg.kind === "video") && bg.dim > 0 && <div className="tv__dim" style={{ opacity: bg.dim }} />}
       {theme.layers.map((l0) => {
@@ -306,7 +393,7 @@ export function ThemeView({
         let rect = { x: l.x, y: l.y, w: l.w, h: l.h };
         let inner: ReactNode = null;
         if (l.kind === "text") {
-          const lines = contentFor(l, data, clock);
+          const lines = contentFor(l, data, clock, paired);
           if (l.solo && secondEmpty && l.field !== "second") rect = l.solo;
           const isSlideText = l.field === "lyrics" || l.field === "second" || l.field === "reference";
           // Clear: every text goes (words, verse labels, reference, title, copyright),
@@ -316,7 +403,20 @@ export function ThemeView({
             <>
               {l.style.box?.mode === "block" && lines.length > 0 && <GrowBox box={l.style.box} />}
               <div key={isSlideText ? textKey : "fixed"} className={`tl-text ${isSlideText && fade && phase !== "static" ? enter : ""}`} style={isSlideText ? fade : undefined}>
-                {lines.length ? <FitText lines={lines} style={l.style} valign={l.style.valign} /> : <div className="tl-placeholder">{l.name}</div>}
+                {lines.length ? (
+                  <div
+                    className="tl-pairhost"
+                    style={
+                      paired && l.field === "lyrics"
+                        ? ({ "--wp-paired": secondLook?.color ?? "inherit", "--wp-paired-style": secondLook?.italic === false ? "normal" : "italic" } as CSSProperties)
+                        : undefined
+                    }
+                  >
+                    <FitText lines={lines} style={l.style} valign={l.style.valign} others={l.field === "lyrics" ? data.allPrimary : l.field === "second" ? data.allSecond : undefined} />
+                  </div>
+                ) : (
+                  <div className="tl-placeholder">{l.name}</div>
+                )}
               </div>
             </>
           );

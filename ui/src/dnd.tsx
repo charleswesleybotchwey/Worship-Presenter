@@ -7,14 +7,18 @@ import { ContextMenu } from "./features/service/panes";
 
 export const DRAG_TYPE = "application/x-wp-item";
 
-export function dragItem(e: React.DragEvent, item: ProgramItem) {
-  e.dataTransfer.setData(DRAG_TYPE, JSON.stringify(item));
-  e.dataTransfer.setData("text/plain", "title" in item ? String(item.title) : item.kind === "scripture" ? item.reference : "item");
+/** Drags one item, or several (a multiple selection), to the schedule. */
+export function dragItem(e: React.DragEvent, what: ProgramItem | ProgramItem[]) {
+  const items = Array.isArray(what) ? what : [what];
+  e.dataTransfer.setData(DRAG_TYPE, JSON.stringify(items.length === 1 ? items[0] : items));
+  const item = items[0];
+  e.dataTransfer.setData("text/plain", items.length > 1 ? `${items.length} items` : "title" in item ? String(item.title) : item.kind === "scripture" ? item.reference : "item");
   e.dataTransfer.effectAllowed = "copy";
 }
 
 /** Sends a library item straight to the screens (set by the service window). */
-export const GoLiveContext = createContext<(item: ProgramItem) => void>(() => {});
+/** Go live with an item (start: the slide label to begin at, e.g. a verse "3:16"). */
+export const GoLiveContext = createContext<(item: ProgramItem, start?: string) => void>(() => {});
 export const useGoLive = () => useContext(GoLiveContext);
 
 /** Preview / Go live / Add to schedule, plus anything item-specific (Edit…). */

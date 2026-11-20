@@ -164,7 +164,7 @@ impl Renderer {
                 }
                 if kind == "image" {
                     if let Some(img) = self.image(bg["image"].as_str().unwrap_or(""), media_dir) {
-                        draw_image(&mut px, &img, Rect::from_xywh(0.0, 0.0, w, h).unwrap(), bg["fit"].as_str() != Some("contain"), 1.0);
+                        draw_background(&mut px, &img, w, h, bg);
                     }
                     let dim = bg["dim"].as_f64().unwrap_or(0.0) as f32;
                     if dim > 0.0 {
@@ -326,8 +326,34 @@ impl Renderer {
             Some("right") => Align::Right,
             _ => Align::Center,
         };
-        let shown = if s["uppercase"].as_bool() == Some(true) { text.to_uppercase() } else { text.to_string() };
-        buf.set_text(&mut self.fonts, &shown, &attrs, Shaping::Advanced, Some(align));
+        let upper = s["uppercase"].as_bool() == Some(true);
+        let spans = rich_spans(text);
+        if spans.iter().any(|p| p.bold || p.italic || p.color.is_some()) {
+            // **bold**, *italic*, {gold}colour{/}: each piece with its own look
+            let texts: Vec<String> = spans.iter().map(|p| if upper { p.text.to_uppercase() } else { p.text.clone() }).collect();
+            let list: Vec<(&str, Attrs)> = spans
+                .iter()
+                .zip(texts.iter())
+                .map(|(p, t)| {
+                    let mut a = attrs.clone();
+                    if p.bold {
+                        a = a.weight(Weight(800));
+                    }
+                    if p.italic {
+                        a = a.style(Style::Italic);
+                    }
+                    if let Some([r, g, b]) = p.color {
+                        a.color_opt = Some(Color::rgba(r, g, b, 255));
+                    }
+                    (t.as_str(), a)
+                })
+                .collect();
+            buf.set_rich_text(&mut self.fonts, list, &attrs, Shaping::Advanced, Some(align));
+        } else {
+            let plain: String = spans.iter().map(|p| p.text.as_str()).collect();
+            let shown = if upper { plain.to_uppercase() } else { plain };
+            buf.set_text(&mut self.fonts, &shown, &attrs, Shaping::Advanced, Some(align));
+        }
         buf.shape_until_scroll(&mut self.fonts, false);
         buf
     }
@@ -433,21 +459,32 @@ impl Renderer {
         let area = Area { x: x0 as usize, y: y0 as usize, w: rw as usize };
         let mut mask = vec![0u8; (rw * rh) as usize];
         let (ox, oy) = (r.left().round() as i32, top.round() as i32);
+        // the colour of words given one in the lyrics ({gold}…{/}); 0 = the layer's colour
+        let mut tint = vec![0u32; (rw * rh) as usize];
         buf.draw(&mut self.fonts, &mut self.cache, Color::rgba(255, 255, 255, 255), |x, y, w, hh, col| {
             let a = col.a();
             if a == 0 {
                 return;
             }
+            let own = (col.r(), col.g(), col.b()) != (255, 255, 255);
             for yy in 0..hh as i32 {
                 for xx in 0..w as i32 {
                     let (gx, gy) = (ox + x + xx - x0, oy + y + yy - y0);
                     if gx >= 0 && gy >= 0 && gx < rw && gy < rh {
                         let i = (gy * rw + gx) as usize;
                         mask[i] = mask[i].max(a);
+                        if own {
+                            tint[i] = 0xff00_0000 | (col.r() as u32) << 16 | (col.g() as u32) << 8 | col.b() as u32;
+                        }
                     }
                 }
             }
         });
+        // the words in their own colours are painted separately from the rest
+        let mut colours: Vec<u32> = tint.iter().copied().filter(|t| *t != 0).collect();
+        colours.sort_unstable();
+        colours.dedup();
+        let plain_mask: Vec<u8> = if colours.is_empty() { mask.clone() } else { mask.iter().zip(&tint).map(|(m, t)| if *t == 0 { *m } else { 0 }).collect() };
         if sh["on"].as_bool() == Some(true) {
             if let Some(col) = parse_color(sh["color"].as_str().unwrap_or("#000000cc")) {
                 let dx = (sh["x"].as_f64().unwrap_or(0.0) as f32 * unit).round() as i32;
@@ -465,12 +502,17 @@ impl Renderer {
         }
         let g = &s["gradient"];
         match (parse_color(g["from"].as_str().unwrap_or("")), parse_color(g["to"].as_str().unwrap_or(""))) {
-            (Some(a), Some(b)) if g.is_object() => paint_mask_gradient(px, &mask, area, outer, a, b, g["angle"].as_f64().unwrap_or(180.0) as f32, opacity),
+            (Some(a), Some(b)) if g.is_object() => paint_mask_gradient(px, &plain_mask, area, outer, a, b, g["angle"].as_f64().unwrap_or(180.0) as f32, opacity),
             _ => {
                 if let Some(col) = parse_color(s["color"].as_str().unwrap_or("#ffffff")) {
-                    paint_mask(px, &mask, area, with_alpha(col, opacity));
+                    paint_mask(px, &plain_mask, area, with_alpha(col, opacity));
                 }
             }
+        }
+        for c in colours {
+            let m: Vec<u8> = mask.iter().zip(&tint).map(|(m, t)| if *t == c { *m } else { 0 }).collect();
+            let col = tiny_skia::Color::from_rgba8((c >> 16) as u8, (c >> 8) as u8, c as u8, 255);
+            paint_mask(px, &m, area, with_alpha(col, opacity));
         }
     }
 }
@@ -549,6 +591,109 @@ fn fill_rect(px: &mut Pixmap, r: Rect, col: tiny_skia::Color, radius: f32, strok
             px.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
         }
     }
+}
+
+/// A background picture as the theme says: fill / show all / stretch, turned and flipped
+/// about its centre, with its opacity.
+fn draw_background(px: &mut Pixmap, img: &Pixmap, w: f32, h: f32, bg: &Value) {
+    let turn = bg["turn"].as_f64().unwrap_or(0.0) as f32;
+    let quarter = ((turn / 90.0).round() as i32).rem_euclid(2) == 1;
+    // a quarter turn swaps the picture's sides when fitting it
+    let (iw, ih) = if quarter { (img.height() as f32, img.width() as f32) } else { (img.width() as f32, img.height() as f32) };
+    let (sx, sy) = match bg["fit"].as_str() {
+        Some("contain") => {
+            let k = (w / iw).min(h / ih);
+            (k, k)
+        }
+        Some("fill") => (w / iw, h / ih),
+        _ => {
+            let k = (w / iw).max(h / ih);
+            (k, k)
+        }
+    };
+    let (sx, sy) = if quarter { (sy, sx) } else { (sx, sy) };
+    let fx = if bg["flipH"].as_bool() == Some(true) { -1.0 } else { 1.0 };
+    let fy = if bg["flipV"].as_bool() == Some(true) { -1.0 } else { 1.0 };
+    let t = Transform::from_translate(-(img.width() as f32) / 2.0, -(img.height() as f32) / 2.0).post_scale(sx * fx, sy * fy).post_rotate(turn).post_translate(w / 2.0, h / 2.0);
+    let opacity = bg["opacity"].as_f64().unwrap_or(1.0).clamp(0.0, 1.0) as f32;
+    let paint = PixmapPaint { opacity, quality: tiny_skia::FilterQuality::Bilinear, ..PixmapPaint::default() };
+    px.draw_pixmap(0, 0, img.as_ref(), &paint, t, None);
+}
+
+/// A piece of a lyrics line with its look (the app's rich-text markers).
+struct Span {
+    text: String,
+    bold: bool,
+    italic: bool,
+    color: Option<[u8; 3]>,
+}
+
+const COLOUR_NAMES: [(&str, [u8; 3]); 13] = [
+    ("white", [255, 255, 255]),
+    ("black", [0, 0, 0]),
+    ("red", [255, 0, 0]),
+    ("gold", [255, 215, 0]),
+    ("yellow", [255, 255, 0]),
+    ("orange", [255, 165, 0]),
+    ("green", [0, 128, 0]),
+    ("blue", [0, 0, 255]),
+    ("purple", [128, 0, 128]),
+    ("pink", [255, 192, 203]),
+    ("grey", [128, 128, 128]),
+    ("gray", [128, 128, 128]),
+    ("silver", [192, 192, 192]),
+];
+
+fn colour_of(name: &str) -> Option<[u8; 3]> {
+    if let Some(h) = name.strip_prefix('#') {
+        let full: String = if h.len() == 3 { h.chars().flat_map(|c| [c, c]).collect() } else { h.chars().take(6).collect() };
+        if full.len() == 6 && full.chars().all(|c| c.is_ascii_hexdigit()) {
+            let v = u32::from_str_radix(&full, 16).ok()?;
+            return Some([(v >> 16) as u8, (v >> 8) as u8, v as u8]);
+        }
+        return None;
+    }
+    COLOUR_NAMES.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|(_, c)| *c)
+}
+
+/// "**Jesus** is {gold}King{/}" → pieces with their looks (underline is not drawn here).
+fn rich_spans(text: &str) -> Vec<Span> {
+    let (mut b, mut i, mut c): (bool, bool, Option<[u8; 3]>) = (false, false, None);
+    let mut out: Vec<Span> = vec![];
+    let mut cur = String::new();
+    let mut rest = text;
+    let flush = |cur: &mut String, out: &mut Vec<Span>, b: bool, i: bool, c: Option<[u8; 3]>| {
+        if !cur.is_empty() {
+            out.push(Span { text: std::mem::take(cur), bold: b, italic: i, color: c });
+        }
+    };
+    while !rest.is_empty() {
+        if let Some(r) = rest.strip_prefix("**") {
+            flush(&mut cur, &mut out, b, i, c);
+            b = !b;
+            rest = r;
+        } else if let Some(r) = rest.strip_prefix("__") {
+            rest = r;
+        } else if let Some(r) = rest.strip_prefix('*') {
+            flush(&mut cur, &mut out, b, i, c);
+            i = !i;
+            rest = r;
+        } else if let Some(r) = rest.strip_prefix("{/}") {
+            flush(&mut cur, &mut out, b, i, c);
+            c = None;
+            rest = r;
+        } else if let Some(end) = rest.strip_prefix('{').and_then(|r| r.find('}')).filter(|e| colour_of(&rest[1..1 + e]).is_some()) {
+            flush(&mut cur, &mut out, b, i, c);
+            c = colour_of(&rest[1..1 + end]);
+            rest = &rest[end + 2..];
+        } else {
+            let ch = rest.chars().next().unwrap();
+            cur.push(ch);
+            rest = &rest[ch.len_utf8()..];
+        }
+    }
+    flush(&mut cur, &mut out, b, i, c);
+    out
 }
 
 fn draw_image(px: &mut Pixmap, img: &Pixmap, r: Rect, cover: bool, opacity: f32) {
@@ -877,5 +1022,55 @@ mod tests {
         save_png(&std::env::temp_dir().join("render-bands.png").to_string_lossy(), &f, 1920, 1080);
         assert!(f[(40 * 1920 + 960) * 4 + 3] > 150, "alert band at the top");
         assert!(f[(1000 * 1920 + 960) * 4 + 3] > 120, "subtitle band near the bottom");
+    }
+}
+
+#[cfg(test)]
+mod rich_and_background_tests {
+    use super::*;
+
+    #[test]
+    fn markers_become_styled_pieces() {
+        let s = rich_spans("Praise **Jesus**, {gold}King{/} of *kings* __Amen__");
+        let t: Vec<(&str, bool, bool, Option<[u8; 3]>)> = s.iter().map(|p| (p.text.as_str(), p.bold, p.italic, p.color)).collect();
+        assert_eq!(t, vec![("Praise ", false, false, None), ("Jesus", true, false, None), (", ", false, false, None), ("King", false, false, Some([255, 215, 0])), (" of ", false, false, None), ("kings", false, true, None), (" Amen", false, false, None)]);
+        assert_eq!(rich_spans("{here} stays").iter().map(|p| p.text.clone()).collect::<String>(), "{here} stays");
+    }
+
+    fn frame(theme: serde_json::Value, words: &str, dir: &Path) -> Vec<u8> {
+        let c = Content { primary: vec![words.to_string()], ..Default::default() };
+        Renderer::new().render(&theme, &c, 320, 180, dir)
+    }
+
+    #[test]
+    fn a_coloured_word_is_drawn_in_its_colour() {
+        let theme = serde_json::json!({ "background": { "kind": "color", "color": "#000000" }, "layers": [
+            { "kind": "text", "field": "lyrics", "x": 0, "y": 0, "w": 100, "h": 100, "opacity": 1,
+              "style": { "font": "Noto Sans", "size": 20, "color": "#ffffff", "align": "center", "valign": "middle", "lineHeight": 1.2, "autoFit": true, "minSize": 4 } } ] });
+        let dir = std::env::temp_dir();
+        // frames are BGRA: red is the third byte
+        let reds = |px: &[u8]| px.chunks(4).filter(|p| p[2] > 180 && p[1] < 60 && p[0] < 60).count();
+        assert_eq!(reds(&frame(theme.clone(), "Jesus is King", &dir)), 0);
+        assert!(reds(&frame(theme, "Jesus is {red}King{/}", &dir)) > 20, "the word in red");
+    }
+
+    #[test]
+    fn a_flipped_background_is_mirrored() {
+        // a picture: red on the left, blue on the right
+        let mut img = Pixmap::new(40, 20).unwrap();
+        for (i, p) in img.pixels_mut().iter_mut().enumerate() {
+            *p = if i % 40 < 20 { tiny_skia::PremultipliedColorU8::from_rgba(255, 0, 0, 255).unwrap() } else { tiny_skia::PremultipliedColorU8::from_rgba(0, 0, 255, 255).unwrap() };
+        }
+        let dir = std::env::temp_dir().join(format!("wp-render-bg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        img.save_png(dir.join("halves.png")).unwrap();
+        let theme = |flip: bool| serde_json::json!({ "background": { "kind": "image", "image": "media:halves.png", "fit": "fill", "flipH": flip, "dim": 0 }, "layers": [] });
+        // (red, blue) at a point on the left; frames are BGRA
+        let left = |px: &[u8]| { let p = &px[(90 * 320 + 40) * 4..(90 * 320 + 40) * 4 + 4]; (p[2], p[0]) };
+        let plain = frame(theme(false), "", &dir);
+        let flipped = frame(theme(true), "", &dir);
+        assert!(left(&plain).0 > 200 && left(&plain).1 < 50, "red on the left as it is");
+        assert!(left(&flipped).1 > 200 && left(&flipped).0 < 50, "blue on the left when flipped");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

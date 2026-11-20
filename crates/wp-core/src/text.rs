@@ -100,3 +100,43 @@ mod tests {
         assert_eq!(fold("Ŋmalɛ"), "nmale");
     }
 }
+
+/// Lyrics' rich-text markers (**bold**, *italic*, __underline__, {gold}colour{/}) taken
+/// out, for everything that shows plain words (NDI picture, phones, printing).
+pub fn strip_rich(line: &str) -> String {
+    const NAMES: [&str; 13] = ["white", "black", "red", "gold", "yellow", "orange", "green", "blue", "purple", "pink", "grey", "gray", "silver"];
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while !rest.is_empty() {
+        if rest.starts_with("**") || rest.starts_with("__") {
+            rest = &rest[2..];
+        } else if rest.starts_with('*') {
+            rest = &rest[1..];
+        } else if rest.starts_with("{/}") {
+            rest = &rest[3..];
+        } else if let Some(end) = rest.strip_prefix('{').and_then(|r| r.find('}')) {
+            let name = &rest[1..1 + end];
+            let colour = (name.starts_with('#') && (4..=9).contains(&name.len()) && name[1..].chars().all(|c| c.is_ascii_hexdigit())) || NAMES.iter().any(|n| n.eq_ignore_ascii_case(name));
+            if colour {
+                rest = &rest[end + 2..];
+            } else {
+                out.push('{');
+                rest = &rest[1..];
+            }
+        } else {
+            let c = rest.chars().next().unwrap();
+            out.push(c);
+            rest = &rest[c.len_utf8()..];
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod rich_tests {
+    #[test]
+    fn markers_come_out() {
+        assert_eq!(super::strip_rich("Praise **Jesus**, {#ffcc00}King{/} of *kings* __Amen__"), "Praise Jesus, King of kings Amen");
+        assert_eq!(super::strip_rich("{Gold}Ɔdɔ{/} {here}"), "Ɔdɔ {here}");
+    }
+}

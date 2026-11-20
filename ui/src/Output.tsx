@@ -37,12 +37,13 @@ export function Output({ role }: { role: string }) {
   const [lowSpec, setLowSpec] = useState(false);
   // this output's own options (EasyWorship's Options dialog)
   const [cfg, setCfg] = useState<OutputConfig | null>(null);
+  // the NDI lower third follows the alternate output's options (its theme and so on)
+  const cfgRole = role === "ndi" ? "alternate" : role;
   useEffect(() => {
-    if (role === "ndi") return;
-    const load = () => api.outputConfig(role).then(setCfg).catch(() => {});
+    const load = () => api.outputConfig(cfgRole).then(setCfg).catch(() => {});
     load();
     let stop = () => {};
-    onOutputConfigChanged((r) => r === role && load()).then((u) => (stop = u));
+    onOutputConfigChanged((r) => r === cfgRole && load()).then((u) => (stop = u));
     return () => stop();
   }, [role]);
   const [identify, setIdentify] = useState(false);
@@ -120,7 +121,8 @@ export function Output({ role }: { role: string }) {
   }, [cfg?.alpha]);
   const kindNow = shown?.item?.kind;
   const outputTheme = kindNow === "song" ? cfg?.song_theme_id : kindNow === "scripture" ? cfg?.scripture_theme_id : null;
-  const m = cfg?.margins;
+  // margins correct a physical screen's edges: not for an NDI picture
+  const m = role === "ndi" ? undefined : cfg?.margins;
   const cam = role === "main" && !lost && !isHeld && (mode === "live" || mode === "clear") ? b?.state.camera ?? null : null;
   // full-screen camera hides the slide's words
   const camFull = cam?.mode === "full";
@@ -135,6 +137,8 @@ export function Output({ role }: { role: string }) {
         {cam && cam.mode !== "corner" && <CameraFeed cam={cam} />}
         <SlideView
           slide={slide}
+          allSlides={shown?.slides}
+          sound={role === "main"}
           adjust={{ scale: shown?.state.text_scale ?? 1, shift: shown?.state.text_shift ?? 0 }}
           copyright={shown?.song_copyright}
           position={{ first: (shown?.state.slide_idx ?? 0) === 0, last: (shown?.state.slide_idx ?? 0) >= (shown?.slides.length ?? 1) - 1 }}

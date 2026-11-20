@@ -19,7 +19,28 @@ export type RecStatus = Awaited<ReturnType<typeof api.streamStatus>>;
 export function RecordPanel({ status, onClose, refresh }: { status: RecStatus | null; onClose: () => void; refresh: () => void }) {
   const [p, setP] = useState(load);
   const [msg, setMsg] = useState<{ text: string; bad?: boolean } | null>(null);
-  useEffect(() => localStorage.setItem("wp-record", JSON.stringify(p)), [p]);
+  // stream keys live in this computer's protected store (Windows data protection), never here
+  const [saved, setSaved] = useState<Record<string, boolean>>({});
+  const [typing, setTyping] = useState<Record<string, string>>({});
+  const loadSaved = () => api.streamKeysSaved().then(setSaved).catch(() => {});
+  useEffect(() => {
+    // keys kept here by earlier versions: move them to the protected store, then forget them
+    const old = p.dests.filter((d) => d.target.trim());
+    Promise.all(old.map((d) => api.streamKeySet(d.kind, d.target)))
+      .then(() => old.length && setP((x) => ({ ...x, dests: x.dests.map((d) => ({ ...d, target: "" })) })))
+      .finally(loadSaved);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  useEffect(() => {
+    localStorage.setItem("wp-record", JSON.stringify({ ...p, dests: p.dests.map((d) => ({ ...d, target: "" })) }));
+  }, [p]);
+  const saveKey = async (kind: string) => {
+    const v = (typing[kind] ?? "").trim();
+    if (!v) return;
+    await api.streamKeySet(kind, v);
+    setTyping((t) => ({ ...t, [kind]: "" }));
+    void loadSaved();
+  };
   const act = async (f: () => Promise<unknown>) => {
     try {
       const r = await f();
@@ -59,17 +80,30 @@ export function RecordPanel({ status, onClose, refresh }: { status: RecStatus | 
                   <label className="wp-check">
                     <input type="checkbox" disabled={running} checked={d.on} onChange={(e) => setP({ ...p, dests: p.dests.map((x, j) => (j === i ? { ...x, on: e.target.checked } : x)) })} /> {NAMES[d.kind]}
                   </label>
-                  {d.on && (
-                    <input
-                      className="wp-input"
-                      type={d.kind === "custom" ? "text" : "password"}
-                      disabled={running}
-                      placeholder={d.kind === "custom" ? "rtmp://your-relay/live/key" : "Paste the stream key"}
-                      value={d.target}
-                      onChange={(e) => setP({ ...p, dests: p.dests.map((x, j) => (j === i ? { ...x, target: e.target.value } : x)) })}
-                      aria-label={NAMES[d.kind]}
-                    />
-                  )}
+                  {d.on &&
+                    (saved[d.kind] && typing[d.kind] === undefined ? (
+                      <div className="rec__saved">
+                        <span className="wp-note wp-note--inline">{d.kind === "custom" ? "Address saved" : "Key saved"} (kept protected on this computer)</span>
+                        <button className="btn-quiet" disabled={running} onClick={() => setTyping((t) => ({ ...t, [d.kind]: "" }))}>
+                          Replace
+                        </button>
+                        <button className="btn-quiet" disabled={running} onClick={() => void api.streamKeySet(d.kind, "").then(loadSaved)}>
+                          Remove
+                        </button>
+                      </div>
+                    ) : (
+                      <input
+                        className="wp-input"
+                        type={d.kind === "custom" ? "text" : "password"}
+                        autoComplete="off"
+                        disabled={running}
+                        placeholder={d.kind === "custom" ? "rtmp://your-relay/live/key (saved when you leave the box)" : "Paste the stream key (saved when you leave the box)"}
+                        value={typing[d.kind] ?? ""}
+                        onChange={(e) => setTyping((t) => ({ ...t, [d.kind]: e.target.value }))}
+                        onBlur={() => void saveKey(d.kind)}
+                        aria-label={NAMES[d.kind]}
+                      />
+                    ))}
                 </div>
               ))}
               {running ? (
@@ -88,7 +122,7 @@ export function RecordPanel({ status, onClose, refresh }: { status: RecStatus | 
                 <div className="ps__foot">
                   <button
                     className="wp-btn wp-btn--primary"
-                    onClick={() => void act(() => api.streamStart({ record: p.record, folder: p.folder || null, destinations: p.dests.filter((d) => d.on).map(({ kind, target }) => ({ kind, target })) }))}
+                    onClick={() => void act(() => api.streamStart({ record: p.record, folder: p.folder || null, destinations: p.dests.filter((d) => d.on).map(({ kind }) => ({ kind, target: "" })) }))}
                   >
                     Start
                   </button>

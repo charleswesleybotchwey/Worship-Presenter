@@ -122,7 +122,7 @@ pub fn to_slides(d: &Deck) -> Vec<Slide> {
     d.slides
         .iter()
         .enumerate()
-        .map(|(i, s)| Slide {
+        .map(|(i, s)| Slide { reference: None,
             label: if s.title.trim().is_empty() { format!("Slide {}", i + 1) } else { s.title.trim().to_string() },
             occurrence: i,
             first_key: i as i64,

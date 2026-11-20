@@ -328,7 +328,40 @@ function TextStyleProps({ s, set }: { s: TextStyle; set: (p: Partial<TextStyle>)
         <Check label="Italic" value={s.italic} onChange={(italic) => set({ italic })} />
         <Check label="Capitals" value={s.uppercase} onChange={(uppercase) => set({ uppercase })} />
       </div>
+      <Select
+        label="Capitalise"
+        value={s.capitalize ?? "none"}
+        options={[
+          { value: "none", label: "As written" },
+          { value: "words", label: "All words" },
+          { value: "lines", label: "First word of each line" },
+        ]}
+        onChange={(capitalize) => set({ capitalize })}
+      />
+      <Check label="Word wrapping" value={s.wrap !== false} onChange={(wrap) => set({ wrap })} />
+      <div className="prop-row">
+        <Num label="Margin left" value={s.margin?.l ?? 0} step={0.5} min={0} suffix="%" onChange={(l) => set({ margin: { ...(s.margin ?? { l: 0, r: 0, t: 0, b: 0 }), l } })} />
+        <Num label="Right" value={s.margin?.r ?? 0} step={0.5} min={0} suffix="%" onChange={(r) => set({ margin: { ...(s.margin ?? { l: 0, r: 0, t: 0, b: 0 }), r } })} />
+      </div>
+      <div className="prop-row">
+        <Num label="Top" value={s.margin?.t ?? 0} step={0.5} min={0} suffix="%" onChange={(t) => set({ margin: { ...(s.margin ?? { l: 0, r: 0, t: 0, b: 0 }), t } })} />
+        <Num label="Bottom" value={s.margin?.b ?? 0} step={0.5} min={0} suffix="%" onChange={(b) => set({ margin: { ...(s.margin ?? { l: 0, r: 0, t: 0, b: 0 }), b } })} />
+      </div>
       <Check label="Shrink to fit the box" value={s.autoFit} onChange={(autoFit) => set({ autoFit })} />
+      <Check label="Same size on every slide" value={!!s.normalize} onChange={(normalize) => set({ normalize })} />
+      <Check label="Balance the lines" value={!!s.balance} onChange={(balance) => set({ balance })} />
+      <Select
+        label="Words appear"
+        value={s.enter ?? "none"}
+        options={[
+          { value: "none", label: "All at once" },
+          { value: "fade", label: "Fade in, line by line" },
+          { value: "rise", label: "Rise in, line by line" },
+          { value: "fly", label: "Fly in from the left" },
+          { value: "type", label: "Typewriter" },
+        ]}
+        onChange={(enter) => set({ enter })}
+      />
       {s.autoFit && <Num label="Smallest size" value={s.minSize} step={0.25} min={0.5} suffix="%" onChange={(minSize) => set({ minSize })} />}
       <Check label="Gradient words" value={!!s.gradient} onChange={(on) => set({ gradient: on ? { from: s.color.slice(0, 7), to: "#f2b705", angle: 180 } : null })} />
       {s.gradient && <GradientProps g={s.gradient} onChange={(gradient) => set({ gradient })} />}
@@ -806,13 +839,40 @@ export function ThemeEditor({ onClose, request }: { onClose: () => void; /** Fro
                         <ImagePick label="From a file…" onPick={(image) => change({ ...theme, background: { ...theme.background, image } })} />
                       </div>
                     )}
-                    <Select label="Fit" value={theme.background.fit} options={[{ value: "cover", label: "Fill the screen" }, { value: "contain", label: "Show all of it" }]} onChange={(fit) => change({ ...theme, background: { ...theme.background, fit } })} />
+                    <Select
+                      label="Fit"
+                      value={theme.background.fit}
+                      options={[
+                        { value: "cover", label: "Fill the screen" },
+                        { value: "contain", label: "Show all of it" },
+                        { value: "fill", label: "Stretch" },
+                      ]}
+                      onChange={(fit) => change({ ...theme, background: { ...theme.background, fit } })}
+                    />
+                    <div className="prop-row">
+                      <Num label="Turn" value={theme.background.turn ?? 0} step={90} min={-360} suffix="°" onChange={(turn) => change({ ...theme, background: { ...theme.background, turn } })} />
+                      <Check label="Flip ↔" value={!!theme.background.flipH} onChange={(flipH) => change({ ...theme, background: { ...theme.background, flipH } })} />
+                      <Check label="Flip ↕" value={!!theme.background.flipV} onChange={(flipV) => change({ ...theme, background: { ...theme.background, flipV } })} />
+                    </div>
+                    <label className="prop">
+                      <span>Opacity</span>
+                      <input type="range" min={0} max={100} value={Math.round((theme.background.opacity ?? 1) * 100)} onChange={(e) => change({ ...theme, background: { ...theme.background, opacity: Number(e.target.value) / 100 } })} />
+                    </label>
+                    {theme.background.kind === "video" && (
+                      <label className="prop" title="The video's sound plays from the main output only">
+                        <span>Volume</span>
+                        <input type="range" min={0} max={100} value={Math.round((theme.background.volume ?? 0) * 100)} onChange={(e) => change({ ...theme, background: { ...theme.background, volume: Number(e.target.value) / 100 } })} />
+                      </label>
+                    )}
                     <label className="prop">
                       <span>Darken</span>
                       <input type="range" min={0} max={90} value={Math.round(theme.background.dim * 100)} onChange={(e) => change({ ...theme, background: { ...theme.background, dim: Number(e.target.value) / 100 } })} />
                     </label>
                   </>
                 )}
+              </Group>
+              <Group title="Two languages">
+                <Check label="Line by line (each line, then its translation)" value={!!theme.pairLines} onChange={(pairLines) => change({ ...theme, pairLines })} />
               </Group>
               <Group title="Between slides">
                 <Select
@@ -825,6 +885,11 @@ export function ThemeEditor({ onClose, request }: { onClose: () => void; /** Fro
                     { value: "wipe", label: "Wipe" },
                     { value: "zoom", label: "Zoom" },
                     { value: "push", label: "Push" },
+                    { value: "cover", label: "Cover" },
+                    { value: "cube", label: "Cube" },
+                    { value: "drop", label: "Drop" },
+                    { value: "iris", label: "Iris" },
+                    { value: "pageflip", label: "Page flip" },
                   ]}
                   onChange={(kind) => change({ ...theme, transition: { ...theme.transition, kind } })}
                 />

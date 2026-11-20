@@ -1,3 +1,4 @@
+import { stripRich } from "../../rich";
 import { useEffect, useRef } from "react";
 import type { Slide } from "../../api";
 import { Icon } from "../../Icon";
@@ -60,7 +61,7 @@ export function SlideList({
               >
                 <span className="sl-num wp-num">{i + 1}</span>
                 <span className="sl-text">
-                  {s.image ? <em>Picture</em> : s.primary.map((l, k) => <span key={k}>{l}</span>)}
+                  {s.image ? <em>Picture</em> : s.primary.map((l, k) => <span key={k}>{stripRich(l)}</span>)}
                   {s.second.map((l, k) => (
                     <span key={`s${k}`} className="sl-second">
                       {l}

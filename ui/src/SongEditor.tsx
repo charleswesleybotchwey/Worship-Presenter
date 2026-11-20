@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { capitaliseLines, dropBlankLines, tidySpaces, trimLineEnds } from "./songTidy";
 import { api, type Slide, type SongDoc } from "./api";
 import { SlideView } from "./SlideView";
 
@@ -43,6 +44,8 @@ function sections(body: string) {
   }
   return out.filter((x) => x.lines.length && x.label.toUpperCase() !== "TITLE");
 }
+
+const TIDY: Record<string, (b: string) => string> = { caps: capitaliseLines, ends: trimLineEnds, spaces: tidySpaces, blank: dropBlankLines };
 
 export function SongEditor({
   songId,
@@ -108,6 +111,19 @@ export function SongEditor({
   const update = (p: Partial<SongDoc>) => (setDoc({ ...doc, ...p }), setDirty(true));
   const setBody = (body: string) => update({ lyrics: doc.lyrics.map((l, i) => (i === tab ? { ...l, body } : l)) });
 
+  // rich text: wrap the selected words in markers (**bold**, *italic*, __underline__, {gold}…{/})
+  const wrap = (before: string, after: string) => {
+    const el = area.current;
+    const body = doc.lyrics[tab].body;
+    const s = el?.selectionStart ?? body.length;
+    const e = el?.selectionEnd ?? body.length;
+    if (s === e) return;
+    setBody(body.slice(0, s) + before + body.slice(s, e) + after + body.slice(e));
+    requestAnimationFrame(() => {
+      el?.focus();
+      el?.setSelectionRange(s + before.length, e + before.length);
+    });
+  };
   const insert = (text: string) => {
     const el = area.current;
     const body = doc.lyrics[tab].body;
@@ -210,7 +226,7 @@ export function SongEditor({
             <div className="fields">
               <label className="field field--wide">
                 <span>Title</span>
-                <input value={doc.title} onChange={(e) => update({ title: e.target.value })} autoFocus={doc.id == null} />
+                <input value={doc.title} spellCheck lang="en" onChange={(e) => update({ title: e.target.value })} autoFocus={doc.id == null} />
               </label>
               <label className="field">
                 <span>Hymn numbers</span>
@@ -285,6 +301,46 @@ export function SongEditor({
               <button className="btn-quiet" onClick={() => insertSection("B")}>
                 + Bridge
               </button>
+              <select
+                className="wp-input editor__tidy"
+                value=""
+                aria-label="Tidy the words"
+                title="Tidy the words in this language"
+                onChange={(e) => {
+                  const f = TIDY[e.target.value];
+                  if (f) update({ lyrics: doc.lyrics.map((l, i) => (i === tab ? { ...l, body: f(l.body) } : l)) });
+                }}
+              >
+                <option value="">Tidy…</option>
+                <option value="caps">Capitalise the first letter of each line</option>
+                <option value="ends">Remove punctuation at line ends</option>
+                <option value="spaces">Remove extra spaces</option>
+                <option value="blank">Remove blank lines inside sections</option>
+              </select>
+              <span className="editor__sep" />
+              <button className="char-btn" style={{ fontWeight: 800 }} onClick={() => wrap("**", "**")} title="Bold: select words, then click (shown on the screens)">
+                B
+              </button>
+              <button className="char-btn" style={{ fontStyle: "italic" }} onClick={() => wrap("*", "*")} title="Italic">
+                I
+              </button>
+              <button className="char-btn" style={{ textDecoration: "underline" }} onClick={() => wrap("__", "__")} title="Underline">
+                U
+              </button>
+              <select
+                className="wp-input editor__tidy"
+                value=""
+                aria-label="Colour the selected words"
+                title="Colour the selected words"
+                onChange={(e) => e.target.value && wrap(`{${e.target.value}}`, "{/}")}
+              >
+                <option value="">Colour…</option>
+                {["gold", "yellow", "orange", "red", "pink", "purple", "blue", "green", "white", "silver"].map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
               <span className="editor__sep" />
               {CHARS.map((c) => (
                 <button key={c} className="char-btn" onClick={() => insert(c)} title={`Type ${c}`}>
@@ -295,7 +351,9 @@ export function SongEditor({
             <textarea
               ref={area}
               className="lyrics"
-              spellCheck={false}
+              // Windows' spell check for English words; off for Ghanaian languages,
+              // which it has no dictionary for (everything would be underlined)
+              spellCheck={doc.lyrics[tab].lang.startsWith("en")}
               lang={doc.lyrics[tab].lang}
               value={doc.lyrics[tab].body}
               onChange={(e) => setBody(e.target.value)}

@@ -19,12 +19,16 @@ export const sameItem = (a: ProgramItem | null | undefined, b: ProgramItem | nul
       ? a.reference === (b as typeof a).reference
       : a.kind === "announcement"
         ? a.presentation_id === (b as typeof a).presentation_id
-        : a.media_id === (b as typeof a).media_id);
+        : a.kind === "header"
+          ? a.title === (b as typeof a).title
+          : a.kind === "web"
+            ? a.url === (b as typeof a).url
+            : a.media_id === (b as typeof a).media_id);
 
 /** The per-item look, for items that can have one. */
 export const themeIdOf = (i: ProgramItem | null | undefined) => (i && (i.kind === "song" || i.kind === "scripture") ? i.theme_id ?? null : null);
 
-const glyph = (k: ProgramItem["kind"]) => (k === "song" ? "note" : k === "media" ? "image" : k === "announcement" ? "slides" : "book");
+const glyph = (k: ProgramItem["kind"]) => (k === "song" ? "note" : k === "media" || k === "web" ? "image" : k === "announcement" ? "slides" : "book");
 
 // ---------- Schedule (the sidebar) ----------
 
@@ -34,6 +38,9 @@ export function SchedulePane({
   liveItem,
   onSelect,
   onActivate,
+  onHeading,
+  onWebPage,
+  onThemeDrop,
   onRemove,
   onMove,
   onAddFromLibrary,
@@ -47,6 +54,12 @@ export function SchedulePane({
   onSelect: (i: number) => void;
   /** Double-click: straight to the screens (as in EasyWorship). */
   onActivate?: (i: number) => void;
+  /** Add a heading below item i (null: at the end), or rename heading i. */
+  onHeading?: (i: number | null, rename: boolean) => void;
+  /** Add a web page below item i (null: at the end). */
+  onWebPage?: (i: number | null) => void;
+  /** A theme dropped on item i (from the Themes tab). */
+  onThemeDrop?: (i: number, themeId: number) => void;
   onRemove: (i: number) => void;
   onMove: (from: number, to: number) => void;
   onAddFromLibrary: () => void;
@@ -61,7 +74,9 @@ export function SchedulePane({
     if (raw && onDropItem) {
       e.preventDefault();
       e.stopPropagation();
-      onDropItem(JSON.parse(raw) as ProgramItem, at);
+      // one item, or a multiple selection, kept in order at the drop point
+      const v = JSON.parse(raw) as ProgramItem | ProgramItem[];
+      (Array.isArray(v) ? v : [v]).forEach((it, k) => onDropItem(it, at == null ? null : at + k));
       return true;
     }
     return false;
@@ -81,6 +96,16 @@ export function SchedulePane({
         <button className="wp-icon-btn" title="Add from library (Ctrl+F)" aria-label="Add from library" onClick={onAddFromLibrary}>
           <Icon name="plus" />
         </button>
+        {onWebPage && (
+          <button className="wp-icon-btn" title="Add a web page (shown over the main screen when live)" aria-label="Add a web page" onClick={() => onWebPage(selected ?? null)}>
+            🌐
+          </button>
+        )}
+        {onHeading && (
+          <button className="wp-icon-btn wp-heading-btn" title="Add a heading (Praise & Worship, Sermon…)" aria-label="Add a heading" onClick={() => onHeading(selected ?? null, false)}>
+            H
+          </button>
+        )}
         <button className="wp-icon-btn" title="Open, start or rename a service" aria-label="Service orders" onClick={onMenu}>
           <Icon name="more" />
         </button>
@@ -97,23 +122,34 @@ export function SchedulePane({
         <ol className="wp-rows wp-rows--schedule" role="listbox" aria-label="Service order">
           {items.map((it, i) => {
             const isLive = sameItem(it, liveItem);
+            // items are numbered without the headings
+            const num = items.slice(0, i + 1).filter((x) => x.kind !== "header").length;
             return (
               <li
                 key={i}
                 role="option"
                 aria-selected={selected === i}
                 tabIndex={selected === i || (selected == null && i === 0) ? 0 : -1}
-                className={`wp-row ${selected === i ? "is-selected" : ""}`}
+                className={`wp-row ${it.kind === "header" ? "wp-row--header" : ""} ${selected === i ? "is-selected" : ""}`}
                 draggable
                 title={onActivate ? `${itemTitle(it)} (double-click to go live)` : itemTitle(it)}
                 onDragStart={() => (drag.current = i)}
                 onDragOver={(e) => e.preventDefault()}
                 onDrop={(e) => {
+                  // a theme dragged from the Themes tab: this item takes it
+                  const themes = e.dataTransfer.getData("application/x-wp-themes");
+                  if (themes && onThemeDrop) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const [id] = JSON.parse(themes) as number[];
+                    if (id != null) onThemeDrop(i, id);
+                    return;
+                  }
                   if (dropFrom(e, i)) return;
                   if (drag.current !== null) onMove(drag.current, i);
                 }}
                 onClick={() => onSelect(i)}
-                onDoubleClick={onActivate ? () => onActivate(i) : undefined}
+                onDoubleClick={it.kind === "header" ? () => onHeading?.(i, true) : onActivate ? () => onActivate(i) : undefined}
                 onKeyDown={(e) => {
                   if (e.altKey && e.key === "ArrowUp" && i > 0) return e.preventDefault(), onMove(i, i - 1);
                   if (e.altKey && e.key === "ArrowDown" && i < items.length - 1) return e.preventDefault(), onMove(i, i + 1);
@@ -123,8 +159,8 @@ export function SchedulePane({
                   if (e.key === "Delete") return e.preventDefault(), onRemove(i);
                 }}
               >
-                <span className="wp-row__num">{String(i + 1).padStart(2, "0")}</span>
-                <Icon name={glyph(it.kind)} />
+                <span className="wp-row__num">{it.kind === "header" ? "" : String(num).padStart(2, "0")}</span>
+                {it.kind !== "header" && <Icon name={glyph(it.kind)} />}
                 <span className="wp-row__title">{itemTitle(it)}</span>
                 {it.kind === "song" && it.lyrics && <span className="wp-row__meta">Edited words</span>}
                 {isLive && (

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { onControlAction, onMenu, onOutputConfigChanged, type Broadcast } from "./api";
+import { onControlAction, onMenu, onOutputConfigChanged, pickEwsOpen, slideForVerse, type Broadcast } from "./api";
 import { StageView } from "./StageView";
 import { msUntil, PreServicePanel, type PreServicePlan } from "./PreService";
 import { OfferingSlide } from "./OfferingSlide";
@@ -9,8 +9,11 @@ import { RecordPanel, type RecStatus } from "./RecordPanel";
 import { useMainAspect } from "./live/aspect";
 import { TranscriptPanel } from "./TranscriptPanel";
 import { LyricsFinder } from "./LyricsFinder";
+import { FindReplace } from "./FindReplace";
+import { OutputsPanel } from "./OutputsPanel";
+import { ServiceActions, TimerChip, AutoBar, RepeatBar, Clock, ViewToggle, PreviewMedia } from "./features/service/LiveControls";
 import { GoLiveContext } from "./dnd";
-import { api, isDesktop, type PulpitNote, type SpeechStatus, onLibraryRestored, onProfileChanged, onSettingsChanged, type LangMode, type LiveState, type MediaItem, type Mode, type ProgramItem, type Schedule, type Slide, type Timer } from "./api";
+import { api, isDesktop, type PulpitNote, type SpeechStatus, onLibraryRestored, onProfileChanged, onSettingsChanged, type LangMode, type LiveState, type MediaItem, type Mode, type ProgramItem, type Schedule, type Slide } from "./api";
 import { SlideView } from "./SlideView";
 import { Icon } from "./Icon";
 import { ServiceMenu, niceDate } from "./ServiceMenu";
@@ -22,14 +25,12 @@ import { ThemeEditor } from "./theme/ThemeEditor";
 import { AlertPanel, TimerPanel } from "./CuePanels";
 import { MusicPanel, useMusic } from "./MusicPanel";
 import { CameraPanel } from "./CameraPanel";
-import { fmtLeft, timerLeft, useNow } from "./Cues";
 import type { ThemeRow } from "./theme/types";
 import { Palette, type PaletteCommand } from "./features/commands/Palette";
 import { SchedulePane, SlideGrid, itemTitle, sameItem, themeIdOf } from "./features/service/panes";
 import { AnnouncementEditor } from "./features/editors/AnnouncementEditor";
 import { LibraryDock, type LibTab } from "./features/library/LibraryDock";
 import { SlideList } from "./features/service/SlideList";
-import { useMediaUrl } from "./theme/media";
 import type { Deck } from "./api";
 import { outputLabel, useLive, ROLE_NAMES, type OutputView } from "./live/outputs";
 import { Settings } from "./features/editors/Settings";
@@ -137,7 +138,7 @@ export function Control() {
   const [, setSourceTab] = useState<"schedule" | "library">("schedule");
   const [, setCompactTask] = useState<"schedule" | "library" | "preview">("preview");
   const [notice, setNotice] = useState<{ text: string; bad?: boolean; action?: { label: string; run: () => void } } | null>(null);
-  const [layer, setLayer] = useState<null | "palette" | "outputs" | "import" | "backups" | "profiles" | "service" | "timer" | "alert" | "music" | "camera" | "preservice" | "offering" | "outline" | "record" | "lyrics">(null);
+  const [layer, setLayer] = useState<null | "palette" | "outputs" | "import" | "backups" | "profiles" | "service" | "timer" | "alert" | "music" | "camera" | "preservice" | "offering" | "outline" | "record" | "lyrics" | "replace" | "outputs">(null);
   const music = useMusic();
   const [profile, setProfile] = useState({ slug: "default", name: "" });
   const [libraryVersion, setLibraryVersion] = useState(0);
@@ -155,7 +156,9 @@ export function Control() {
     return () => window.removeEventListener("wp-toast", f);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-  const pendingLive = useRef<{ item: ProgramItem; idx: number } | null>(null);
+  // go live once the item is in Preview: from slide idx, or from the slide labelled start
+  // (a verse "3:16" in a whole chapter)
+  const pendingLive = useRef<{ item: ProgramItem; idx: number; start?: string } | null>(null);
   const [notes, setNotes] = useState<PulpitNote[]>([]);
   useEffect(() => {
     const load = () =>
@@ -252,6 +255,23 @@ export function Control() {
   const canGoLive = !!preview;
 
   const say = (text: string, bad = false) => setNotice({ text, bad });
+  // the service bar takes two rows when its buttons do not fit on one (measured, so it
+  // keeps working as buttons are added): Go live, Blank, Logo and Clear never fall off
+  const barRef = useRef<HTMLElement | null>(null);
+  const oneRowNeeds = useRef(0);
+  const [twoRows, setTwoRows] = useState(false);
+  useLayoutEffect(() => {
+    const bar = barRef.current;
+    if (!bar) return;
+    if (!twoRows && bar.scrollWidth > bar.clientWidth + 1) {
+      oneRowNeeds.current = bar.scrollWidth;
+      setTwoRows(true);
+    } else if (twoRows && oneRowNeeds.current && bar.clientWidth >= oneRowNeeds.current + 8) {
+      setTwoRows(false);
+    }
+  });
+  // the service being saved (kept apart from the screen state, which arrives later)
+  const serviceIdRef = useRef<number | null>(null);
   const run = useCallback(async <T,>(p: Promise<T>) => {
     try {
       const r = await p;
@@ -265,6 +285,20 @@ export function Control() {
 
   // ---------- service order, recovery, profiles ----------
 
+  // an EasyWorship 7 schedule (.ewsx) becomes a new service here
+  const openEws = async () => {
+    const path = await pickEwsOpen();
+    if (!path) return;
+    const r = await run(api.importEws(path));
+    if (!r) return;
+    const today = new Date().toISOString().slice(0, 10);
+    const created = await run(api.newSchedule(r.title, today, false, null));
+    if (!created) return;
+    await run(api.saveSchedule(created.id, r.items));
+    openService({ ...created, items: r.items });
+    setLibraryVersion((v) => v + 1);
+    say(`Opened “${r.title}” from EasyWorship: ${r.items.length} items.${r.notes.length ? " " + r.notes.join(" ") : ""}`);
+  };
   const openService = useCallback((sc: Schedule) => {
     const { items, ...meta } = sc;
     loadedItems.current = JSON.stringify(items);
@@ -276,6 +310,7 @@ export function Control() {
 
   const afterRestore = useCallback(() => {
     loadedItems.current = "[]";
+    serviceIdRef.current = null; // a new service: never save into the previous one
     setService(null);
     setSchedule([]);
     setPreview(null);
@@ -300,30 +335,52 @@ export function Control() {
     return () => (a(), b());
   }, [afterRestore, reopenLast]);
 
-  useEffect(() => {
-    const json = JSON.stringify(schedule);
-    if (json === loadedItems.current) return;
-    if (service == null && schedule.length === 0) return;
-    const t = setTimeout(async () => {
+  // Autosave, one save at a time: edits made while a save is running wait for it, and only
+  // the newest waiting change is written (an older save can never land after a newer one;
+  // a new service is created once, however fast the edits come)
+  const saveChain = useRef<Promise<void>>(Promise.resolve());
+  const waitingSave = useRef<{ json: string; items: ProgramItem[] } | null>(null);
+  const serviceId = serviceIdRef;
+  if (service?.id != null) serviceId.current = service.id;
+  const flushSave = useCallback(() => {
+    saveChain.current = saveChain.current.then(async () => {
+      const job = waitingSave.current;
+      if (!job) return;
+      waitingSave.current = null;
       try {
         setSaved("saving");
-        let id = service?.id;
+        let id = serviceId.current;
         if (id == null) {
           const today = new Date().toISOString().slice(0, 10);
           const created = await api.newSchedule("Untitled service", today, false, null);
           const { items: _ignored, ...meta } = created;
+          serviceId.current = created.id;
           setService(meta);
           id = created.id;
         }
-        await api.saveSchedule(id, schedule);
-        loadedItems.current = json;
-        setSaved("saved");
+        await api.saveSchedule(id, job.items);
+        loadedItems.current = job.json;
+        setSaved(waitingSave.current ? "saving" : "saved");
       } catch {
         setSaved("failed");
       }
-    }, 400);
+    });
+    return saveChain.current;
+  }, []);
+  useEffect(() => {
+    const json = JSON.stringify(schedule);
+    if (json === loadedItems.current) return;
+    if (service == null && schedule.length === 0) return;
+    waitingSave.current = { json, items: schedule };
+    const t = setTimeout(() => void flushSave(), 400);
     return () => clearTimeout(t);
-  }, [schedule, service]);
+  }, [schedule, service, flushSave]);
+  // closing the window right after an edit: write it now rather than lose it
+  useEffect(() => {
+    const now = () => void flushSave();
+    window.addEventListener("beforeunload", now);
+    return () => window.removeEventListener("beforeunload", now);
+  }, [flushSave]);
 
   useEffect(() => {
     api.listThemes().then(setThemeRows).catch(() => {});
@@ -332,7 +389,9 @@ export function Control() {
   // ---------- staging (never public) ----------
 
   const load = useCallback(
-    async (item: ProgramItem) => {
+    async (item: ProgramItem, start?: string) => {
+      // a heading in the service order has nothing to show
+      if (item.kind === "header") return;
       if (item.kind === "song" && item.lyrics?.length) {
         // this service's own words
         const slides = await run(api.previewSongDoc({ id: item.song_id, title: item.title, author: null, copyright: null, ccli: null, numbers: [], lyrics: item.lyrics, sequence: "", lines_per_slide: null }));
@@ -348,9 +407,19 @@ export function Control() {
         const media = all?.find((m) => m.id === item.media_id) ?? null;
         if (!media) return void setNotice({ text: "That picture or video is no longer in the library.", bad: true });
         setPreview({ item, slides: [MEDIA_SLIDE], caption: item.title, media });
+      } else if (item.kind === "web") {
+        // a web page: shown in its own window over the main screen when live
+        setPreview({ item, slides: [{ label: "Web page", occurrence: 0, first_key: 0, last_key: 0, primary: [item.title], second: [item.url] }], caption: item.title });
       } else {
         const r = await run(api.previewScripture(item.reference, item.versions));
-        if (r) setPreview({ item, slides: r[0], caption: r[1] });
+        if (r) {
+          setPreview({ item, slides: r[0], caption: r[1] });
+          // a whole chapter, positioned on the verse chosen
+          const at = start ? slideForVerse(r[0], start) : 0;
+          setPreviewIdx(Math.max(0, at));
+          setCompactTask("preview");
+          return;
+        }
       }
       setPreviewIdx(0);
       setCompactTask("preview");
@@ -419,7 +488,10 @@ export function Control() {
   const stepSchedule = useCallback(
     async (d: number) => {
       if (!schedule.length) return;
-      const next = Math.max(0, Math.min(schedule.length - 1, (selected ?? -1) + d));
+      // headings are stepped over
+      let next = (selected ?? -1) + d;
+      while (next >= 0 && next < schedule.length && schedule[next].kind === "header") next += d;
+      if (next < 0 || next >= schedule.length) return;
       setSelected(next);
       await load(schedule[next]);
     },
@@ -516,6 +588,10 @@ export function Control() {
     const outline = () => setLayer("outline");
     const lyrics = () => setLayer("lyrics");
     window.addEventListener("wp-lyrics", lyrics);
+    const replace = () => setLayer("replace");
+    window.addEventListener("wp-replace", replace);
+    const outputs = () => setLayer("outputs");
+    window.addEventListener("wp-outputs", outputs);
     window.addEventListener("wp-offering", open);
     window.addEventListener("wp-outline", outline);
     return () => (window.removeEventListener("wp-offering", open), window.removeEventListener("wp-outline", outline), window.removeEventListener("wp-lyrics", lyrics));
@@ -595,6 +671,7 @@ export function Control() {
     switch (id) {
       case "file.service": return palette("service");
       case "file.import": return palette("import");
+      case "file.ews": return void openEws();
       case "file.backups": return palette("backups");
       case "file.print-order": return palette("print-order");
       case "file.outputs": return palette("outputs");
@@ -685,6 +762,11 @@ export function Control() {
       { id: "quick", group: "Library", label: "Quick scripture", hint: "Ctrl+G", run: () => (setActiveTab("service"), setTimeout(() => quickInput.current?.focus())) },
       { id: "new-song", group: "Library", label: "New song", run: () => openTab({ id: "song", songId: null }) },
       { id: "lyrics", group: "Library", label: "Find lyrics online…", run: () => setLayer("lyrics") },
+      { id: "replace", group: "Library", label: "Find and replace in songs…", run: () => setLayer("replace") },
+      { id: "web", group: "Service", label: "Add a web page to the service…", run: () => document.querySelector<HTMLButtonElement>("button[aria-label='Add a web page']")?.click() },
+      { id: "check", group: "Service", label: "Check system (screens, disk, backup…)", run: () => setLayer("outputs") },
+      { id: "outputs-panel", group: "Service", label: "Outputs dashboard", run: () => setLayer("outputs") },
+      { id: "ews", group: "Service", label: "Open an EasyWorship schedule (.ewsx)…", run: () => void openEws() },
       { id: "ann", group: "Library", label: "Announcements (offering, birthdays, welcome loop)", keywords: "notices slides momo tithe", run: () => (setActiveTab("service"), setLibTab("presentations"), setSourceTab("library")) },
       { id: "media", group: "Library", label: "Media library", run: () => (setActiveTab("service"), setLibTab("media"), setSourceTab("library")) },
       { id: "import", group: "Settings", label: "Import songs, Bibles and presentations", run: () => (setSettingsPage("import"), openTab({ id: "settings" })) },
@@ -734,8 +816,9 @@ export function Control() {
     const p = pendingLive.current;
     if (p && preview && sameItem(preview.item, p.item)) {
       pendingLive.current = null;
-      setPreviewIdx(p.idx);
-      void goLive(p.idx);
+      const idx = p.start ? slideForVerse(preview.slides, p.start) : p.idx;
+      setPreviewIdx(idx);
+      void goLive(idx);
     }
   }, [preview, goLive]);
   // ---------- notes from the pulpit phone ----------
@@ -813,6 +896,30 @@ export function Control() {
       liveItem={live?.item ?? null}
       dateLabel={service ? `${service.template ? "Template" : service.service_date ? niceDate(service.service_date) : ""}` : ""}
       onSelect={(i) => (setSelected(i), void load(schedule[i]))}
+      onThemeDrop={(i, themeId) => {
+        const it = schedule[i];
+        if (!it || (it.kind !== "song" && it.kind !== "scripture")) return say("Themes apply to songs and readings.", true);
+        const item = { ...it, theme_id: themeId } as ProgramItem;
+        setSchedule((sc) => sc.map((x, k) => (k === i ? item : x)));
+        if (preview && sameItem(preview.item, it)) setPreview({ ...preview, item });
+        // on the screens now: the new look at once, on the same slide
+        if (live?.item && sameItem(live.item, it) && state?.mode === "live") void run(api.goLive(item, state.slide_idx));
+        say(`“${itemTitle(it)}” now uses that theme.`);
+      }}
+      onWebPage={(i) => {
+        const url = prompt("Web page address (https://…)", "https://");
+        if (!url || !/^https?:\/\/\S+\.\S+/.test(url.trim())) return url && url !== "https://" ? say("That is not a web address (it starts with https://).", true) : undefined;
+        const title = prompt("A name for it in the service order", new URL(url.trim()).hostname) || url.trim();
+        const w: ProgramItem = { kind: "web", url: url.trim(), title };
+        setSchedule((sc) => (i == null ? [...sc, w] : [...sc.slice(0, i + 1), w, ...sc.slice(i + 1)]));
+      }}
+      onHeading={(i, rename) => {
+        const old = rename && i != null && schedule[i]?.kind === "header" ? (schedule[i] as Extract<ProgramItem, { kind: "header" }>).title : "";
+        const title = prompt(rename ? "Rename the heading" : "Heading (e.g. Praise & Worship, Sermon, Offertory)", old);
+        if (!title?.trim()) return;
+        const h: ProgramItem = { kind: "header", title: title.trim() };
+        setSchedule((sc) => (rename && i != null ? sc.map((x, k) => (k === i ? h : x)) : i == null ? [...sc, h] : [...sc.slice(0, i + 1), h, ...sc.slice(i + 1)]));
+      }}
       onActivate={(i) => {
         setSelected(i);
         pendingLive.current = { item: schedule[i], idx: 0 };
@@ -834,9 +941,9 @@ export function Control() {
   );
 
   const libraryDock = (
-    <GoLiveContext.Provider value={(item) => {
-      pendingLive.current = { item, idx: 0 };
-      void load(item);
+    <GoLiveContext.Provider value={(item, start) => {
+      pendingLive.current = { item, idx: 0, start };
+      void load(item, start);
     }}>
     <LibraryDock
       tab={libTab}
@@ -845,7 +952,7 @@ export function Control() {
       songSearch={songSearch}
       refInput={refInput}
       previewKind={preview?.item.kind ?? null}
-      onPreview={(item) => void load(item)}
+      onPreview={(item, start) => void load(item, start)}
       onAdd={(item) => setSchedule((sc) => [...sc, item])}
       onEditSong={(id) => openTab({ id: "song", songId: id })}
       onNewSong={() => openTab({ id: "song", songId: null })}
@@ -911,7 +1018,7 @@ export function Control() {
           {preview?.media && preview.media.kind !== "image" ? (
             <PreviewMedia item={preview.media} />
           ) : (
-            <SlideView slide={previewSlide} position={{ first: previewIdx === 0, last: previewIdx >= (preview?.slides.length ?? 1) - 1 }} kind={preview?.item.kind} caption={preview?.caption} media={preview?.media} themeId={themeIdOf(preview?.item) ?? previewRule} still />
+            <SlideView slide={previewSlide} allSlides={preview?.slides} position={{ first: previewIdx === 0, last: previewIdx >= (preview?.slides.length ?? 1) - 1 }} kind={preview?.item.kind} caption={preview?.caption} media={preview?.media} themeId={themeIdOf(preview?.item) ?? previewRule} still />
           )}
         </div>
         <div className="ew-out__info">
@@ -1056,6 +1163,7 @@ export function Control() {
               conf?.item && (conf.item.kind === "song" || conf.item.kind === "scripture") && confState?.mode !== "blank" && confState?.mode !== "logo" ? (
                 <SlideView
                   slide={confSlide}
+                  allSlides={confSlides}
                   look={{ lowerThird: true }}
                   kind={conf.item.kind}
                   caption={conf.caption}
@@ -1069,6 +1177,7 @@ export function Control() {
             ) : (
               <SlideView
               slide={confSlide}
+              allSlides={confSlides}
               position={{ first: (confState?.slide_idx ?? 0) === 0, last: (confState?.slide_idx ?? 0) >= confSlides.length - 1 }}
               adjust={{ scale: confState?.text_scale ?? 1, shift: confState?.text_shift ?? 0 }}
               kind={conf?.item?.kind}
@@ -1257,7 +1366,7 @@ export function Control() {
       </nav>
 
       {activeTab === "service" ? (
-        <header className={`wp-bar ${width < 960 ? "wp-bar--two" : ""}`}>
+        <header ref={barRef} className={`wp-bar ${twoRows ? "wp-bar--two" : ""}`}>
           <div className="wp-bar__where">
             <button className="wp-crumb" onClick={() => setLayer("profiles")} title="Profiles">
               {profile.name || "Profile"}
@@ -1562,6 +1671,17 @@ export function Control() {
           onClose={() => setTranscriptOpen(false)}
         />
       )}
+      {layer === "outputs" && (
+        <OutputsPanel
+          onClose={() => setLayer(null)}
+          onFix={(where) => {
+            setLayer(null);
+            if (where === "screens") void api.screensPower(true);
+            else (setSettingsPage(where as Parameters<typeof setSettingsPage>[0]), openTab({ id: "settings" }));
+          }}
+        />
+      )}
+      {layer === "replace" && <FindReplace onClose={() => setLayer(null)} onDone={(n) => (setLayer(null), setLibraryVersion((v) => v + 1), say(`Changed ${n} song${n === 1 ? "" : "s"}. A backup was made first (Settings → Backups).`))} />}
       {layer === "lyrics" && (
         <LyricsFinder
           onClose={() => setLayer(null)}
@@ -1606,131 +1726,3 @@ export function Control() {
 }
 
 // Resume is the lit switch pressed again (and Live → Resume in the menu bar)
-function ServiceActions({ state, onMode }: { state: LiveState | undefined; latched?: boolean; onMode: (m: Mode) => void; onResume?: () => void }) {
-  // a switch: on, it stands out in its own colour; pressed again, the words come back
-  const tips: Record<string, string> = { blank: "Black screens", logo: "The logo on the screens", clear: "Hide the words, keep the background" };
-  const btn = (m: Mode, label: string, icon: string) => {
-    const on = state?.mode === m;
-    return (
-      <button className={`wp-btn wp-mode ${on ? `is-on is-on--${m}` : ""}`} aria-pressed={on} onClick={() => onMode(state?.mode === m ? "live" : m)} title={on ? `${label} is on: press again to bring the words back` : tips[m]}>
-        {on && <span className="wp-mode__dot" aria-hidden="true" />}
-        <Icon name={icon} /> {label}
-        {on && <span className="wp-mode__on">ON</span>}
-      </button>
-    );
-  };
-  return (
-    <div className="wp-service-actions" role="group" aria-label="Screens">
-      {btn("blank", "Blank", "blank")}
-      {btn("logo", "Logo", "logo")}
-      {btn("clear", "Clear", "clear")}
-    </div>
-  );
-}
-
-function TimerChip({ timer, onClick }: { timer: Timer | null; onClick: () => void }) {
-  const now = useNow(!!timer, 500);
-  const left = timer ? timerLeft(timer, now) : 0;
-  return (
-    <button className={`wp-btn wp-btn--quiet wp-num ${timer ? "is-on" : ""} ${timer && left < 0 ? "is-over" : ""}`} onClick={onClick}>
-      <Icon name="timer" /> {timer ? fmtLeft(left) + (timer.paused_left_ms != null ? " paused" : "") : "Timer"}
-    </button>
-  );
-}
-
-function AutoBar({ state, onPause }: { state: LiveState; onPause: (paused: boolean) => void }) {
-  const now = useNow(!state.auto?.paused, 500);
-  const a = state.auto!;
-  const d = a.durations_ms[state.slide_idx] ?? 0;
-  const left = Math.max(0, Math.ceil((d - (now - state.slide_since_ms)) / 1000));
-  const last = state.slide_idx >= a.durations_ms.length - 1 && !a.looping;
-  return (
-    <div className="wp-livebar">
-      <span className="wp-num">{a.paused ? "Paused" : last ? "Last slide" : `Next slide in ${left} s`}</span>
-      {a.looping && <span className="wp-note wp-note--inline">Loops</span>}
-      <span className="wp-spacer" />
-      <button className="wp-btn" onClick={() => onPause(!a.paused)}>
-        {a.paused ? "Resume advancing" : "Pause advancing"}
-      </button>
-    </div>
-  );
-}
-
-function RepeatBar({ state, slides, onSet }: { state: LiveState | undefined; slides: Slide[]; onSet: (label: string | null, total: number, done: number | null) => void }) {
-  const labels = [...new Set(slides.map((s) => s.label))];
-  const [label, setLabel] = useState(labels.find((l) => l.startsWith("C")) ?? labels[0] ?? "C");
-  const [total, setTotal] = useState(3);
-  const r = state?.repeat;
-  if (!labels.length) return null;
-  return (
-    <div className="wp-livebar">
-      {r ? (
-        <>
-          <span className="wp-num wp-livebar__count">
-            {r.label}: {Math.min(r.done, 99)} of {r.total}
-          </span>
-          <button className="wp-icon-btn" aria-label="One fewer" onClick={() => onSet(r.label, r.total, Math.max(0, r.done - 1))}>
-            −
-          </button>
-          <button className="wp-icon-btn" aria-label="One more" onClick={() => onSet(r.label, r.total, r.done + 1)}>
-            +
-          </button>
-          <span className="wp-spacer" />
-          <button className="wp-btn wp-btn--quiet" onClick={() => onSet(null, 1, null)}>
-            Stop counting
-          </button>
-        </>
-      ) : (
-        <>
-          <span>Count</span>
-          <select className="wp-input" aria-label="Section to count" value={label} onChange={(e) => setLabel(e.target.value)}>
-            {labels.map((l) => (
-              <option key={l}>{l}</option>
-            ))}
-          </select>
-          <span>×</span>
-          <select className="wp-input" aria-label="Times" value={total} onChange={(e) => setTotal(Number(e.target.value))}>
-            {[2, 3, 4, 5, 6, 8].map((n) => (
-              <option key={n}>{n}</option>
-            ))}
-          </select>
-          <button className="wp-btn wp-btn--quiet" onClick={() => onSet(label, total, null)} title="The stage display shows the count large for the band">
-            Start counting
-          </button>
-        </>
-      )}
-    </div>
-  );
-}
-
-function Clock() {
-  const now = useNow(true, 1000);
-  return <span className="wp-num">{new Date(now).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>;
-}
-
-function ViewToggle({ value, onChange }: { value: "list" | "thumbs"; onChange: (v: "list" | "thumbs") => void }) {
-  return (
-    <div className="wp-tabs ew-view" role="radiogroup" aria-label="Show slides as">
-      <button role="radio" aria-checked={value === "list"} aria-selected={value === "list"} onClick={() => onChange("list")} title="Text list">
-        List
-      </button>
-      <button role="radio" aria-checked={value === "thumbs"} aria-selected={value === "thumbs"} onClick={() => onChange("thumbs")} title="Pictures">
-        Pictures
-      </button>
-    </div>
-  );
-}
-
-/** A video or sound file in Preview: play, scrub and listen here, muted to begin with. */
-function PreviewMedia({ item }: { item: MediaItem }) {
-  const url = useMediaUrl();
-  const src = url(`media:${item.path}`);
-  return item.kind === "video" ? (
-    <video className="ew-preview-media" src={src} controls muted playsInline preload="metadata" />
-  ) : (
-    <div className="ew-preview-media ew-preview-media--audio">
-      <span>♪ {item.title}</span>
-      <audio src={src} controls preload="metadata" />
-    </div>
-  );
-}

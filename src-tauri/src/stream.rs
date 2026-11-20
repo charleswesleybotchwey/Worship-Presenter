@@ -74,6 +74,8 @@ pub fn ffmpeg_args(w: u32, h: u32, fps: u32, audio_port: Option<u16>, file: Opti
 }
 
 pub struct Running {
+    /// Stream keys and addresses in use: taken out of anything shown or logged.
+    secrets: Vec<String>,
     child: Child,
     stop: Arc<AtomicBool>,
     started: Instant,
@@ -247,7 +249,26 @@ fn start(app: &AppHandle, req: StartRequest) -> Res<String> {
     if !ffmpeg.exists() {
         return Err("FFmpeg is needed once: press Download FFmpeg.".into());
     }
-    let streams: Vec<String> = req.destinations.iter().filter_map(rtmp_url).collect();
+    // the keys come from this computer's protected store, never from the interface
+    let mut secrets: Vec<String> = vec![];
+    let destinations: Vec<Destination> = {
+        let conn = st.db.lock().unwrap();
+        req.destinations
+            .iter()
+            .map(|d| match d.kind.as_str() {
+                "youtube" | "facebook" | "custom" => {
+                    let target = crate::secrets::get(&conn, &format!("stream:{}", d.kind)).unwrap_or_else(|| d.target.clone());
+                    if !target.trim().is_empty() {
+                        secrets.push(target.trim().to_string());
+                    }
+                    Destination { kind: d.kind.clone(), target }
+                }
+                _ => d.clone(),
+            })
+            .collect()
+    };
+    let streams: Vec<String> = destinations.iter().filter_map(rtmp_url).collect();
+    secrets.extend(streams.iter().cloned());
     let file = if req.record {
         let folder = req.folder.filter(|f| !f.trim().is_empty()).map(PathBuf::from).unwrap_or_else(|| dirs_videos().join("Worship Presenter"));
         std::fs::create_dir_all(&folder).map_err(err)?;
@@ -354,7 +375,8 @@ fn start(app: &AppHandle, req: StartRequest) -> Res<String> {
         stop,
         started: Instant::now(),
         file,
-        destinations: req.destinations.iter().filter(|d| rtmp_url(d).is_some()).map(|d| d.kind.clone()).collect(),
+        destinations: destinations.iter().filter(|d| rtmp_url(d).is_some()).map(|d| d.kind.clone()).collect(),
+        secrets,
         log,
         #[cfg(windows)]
         _capture: capture.and_then(|c| c.downcast::<crate::ndi::capture::Running>().ok().map(|b| *b)),
@@ -388,6 +410,17 @@ pub async fn stream_stop(app: AppHandle) -> Res<Option<String>> {
     .map_err(err)?
 }
 
+/// Takes stream keys and addresses out of a message before it is shown or logged.
+pub fn redact(text: &str, secrets: &[String]) -> String {
+    let mut out = text.to_string();
+    let mut s: Vec<&String> = secrets.iter().filter(|x| x.len() >= 4).collect();
+    s.sort_by_key(|x| std::cmp::Reverse(x.len())); // whole addresses before the keys inside them
+    for x in s {
+        out = out.replace(x.as_str(), "[hidden]");
+    }
+    out
+}
+
 #[derive(Serialize)]
 pub struct StreamStatus {
     ffmpeg: bool,
@@ -405,7 +438,7 @@ pub fn stream_status(app: AppHandle, st: State<'_, AppState>) -> StreamStatus {
     let mut g = st.stream.run.lock().unwrap();
     // FFmpeg stopped by itself (a destination refused, the disk is full…)
     let ended = g.as_mut().is_some_and(|r| r.child.try_wait().ok().flatten().is_some());
-    let report = g.as_ref().map(|r| r.log.lock().unwrap().rsplit(['\r', '\n']).find(|l| !l.trim().is_empty()).unwrap_or("").to_string()).unwrap_or_default();
+    let report = g.as_ref().map(|r| redact(r.log.lock().unwrap().rsplit(['\r', '\n']).find(|l| !l.trim().is_empty()).unwrap_or(""), &r.secrets)).unwrap_or_default();
     if ended {
         if let Some(r) = g.take() {
             r.stop.store(true, Ordering::Relaxed);
@@ -451,6 +484,13 @@ mod tests {
     }
 
     #[test]
+    fn keys_are_hidden_in_messages() {
+        let secrets = vec!["abcd-1234".to_string(), "rtmp://a.rtmp.youtube.com/live2/abcd-1234".to_string()];
+        let msg = "[flv @ 0x1] rtmp://a.rtmp.youtube.com/live2/abcd-1234: Connection refused (key abcd-1234)";
+        assert_eq!(redact(msg, &secrets), "[flv @ 0x1] [hidden]: Connection refused (key [hidden])");
+    }
+
+    #[test]
     fn destinations_and_arguments() {
         let yt = Destination { kind: "youtube".into(), target: "abcd-1234".into() };
         assert_eq!(rtmp_url(&yt).unwrap(), "rtmp://a.rtmp.youtube.com/live2/abcd-1234");
@@ -466,4 +506,20 @@ mod tests {
         let silent = ffmpeg_args(1280, 720, 30, None, Some(Path::new("/tmp/a.mp4")), &[]).join(" ");
         assert!(silent.contains("anullsrc") && silent.contains("-shortest"));
     }
+}
+
+/// The recording or stream as a tile on the output dashboard (None: not running).
+pub fn running_summary(app: &AppHandle) -> Option<crate::check::OutputTile> {
+    let st = app.state::<AppState>();
+    let g = st.stream.run.lock().unwrap();
+    let r = g.as_ref()?;
+    let secs = r.started.elapsed().as_secs();
+    let time = format!("{}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60);
+    let online = !r.destinations.is_empty();
+    let what = match (r.file.is_some(), online) {
+        (true, true) => format!("Recording and live on {}", r.destinations.join(", ")),
+        (false, true) => format!("Live on {}", r.destinations.join(", ")),
+        _ => "Recording".to_string(),
+    };
+    Some(crate::check::OutputTile { role: "recording".into(), name: if online { "Online stream".into() } else { "Recording".into() }, kind: "recording".into(), state: if online { "streaming".into() } else { "recording".into() }, detail: format!("{what} · {time}") })
 }
