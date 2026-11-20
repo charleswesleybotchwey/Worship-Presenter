@@ -153,7 +153,9 @@ jobs:
 
   # the interface: unit tests (Vitest) and the operator workflows end to end (Playwright)
   interface-tests:
-    runs-on: ubuntu-latest
+    # pinned: Playwright 1.55 has no browsers for ubuntu-latest (now 26.04); move on with
+    # a Playwright release that supports it
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
