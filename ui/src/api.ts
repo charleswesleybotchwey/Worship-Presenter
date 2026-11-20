@@ -450,10 +450,23 @@ function statusAll(): Promise<StatusAll> {
 // the transcript lines the window already has (only new ones are sent)
 let speechLines: { total: number; lines: [string, string, number | null][] } = { total: -1, lines: [] };
 
+// a request that fails is written to the log once per kind (many are polled quietly, so
+// a refused request, e.g. a wrong argument, would otherwise go unseen)
+const failedOnce = new Set<string>();
+
 async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   if (inTauri) {
     const { invoke } = await import("@tauri-apps/api/core");
-    return invoke<T>(cmd, args);
+    try {
+      return await invoke<T>(cmd, args);
+    } catch (e) {
+      if (cmd !== "log_error" && !failedOnce.has(cmd)) {
+        failedOnce.add(cmd);
+        const where = location.hash.replace(/^#\/?/, "") || "control";
+        void invoke("log_error", { window: where, text: `${cmd} failed: ${String(e instanceof Error ? e.message : e).slice(0, 300)}` }).catch(() => {});
+      }
+      throw e;
+    }
   }
   // the browser preview's stand-in, in its own file (never loaded by the real app)
   const { mock } = await import("./api.mock");
