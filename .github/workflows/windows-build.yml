@@ -64,6 +64,31 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          # tied to the build machine: a cache from another Windows image (another Visual
+          # Studio) holds whisper.cpp build folders that CMake will not reuse
+          prefix-key: v2-windows-2022
+
+      - name: Clear whisper.cpp builds made with another Visual Studio
+        shell: pwsh
+        run: |
+          # CMake refuses to switch generators in one build folder; a cached folder from
+          # another Visual Studio is removed (a normal build keeps its cache)
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $year = & $vswhere -latest -property catalog_productLineVersion
+          $major = (& $vswhere -latest -property installationVersion).Split('.')[0]
+          $want = "Visual Studio $major $year"
+          Write-Host "Visual Studio here: $want"
+          Get-ChildItem -Path target -Recurse -Filter CMakeCache.txt -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match 'whisper-rs-sys' } |
+            ForEach-Object {
+              $gen = (Select-String -Path $_.FullName -Pattern '^CMAKE_GENERATOR:INTERNAL=(.*)$').Matches.Groups[1].Value
+              if ($gen -and $gen -ne $want) {
+                $dir = $_.FullName -replace '\\out\\.*$', ''
+                Write-Host "Removing $dir (made with $gen)"
+                Remove-Item -Recurse -Force $dir
+              }
+            }
 
       - name: LLVM for Whisper's bindings
         shell: pwsh
