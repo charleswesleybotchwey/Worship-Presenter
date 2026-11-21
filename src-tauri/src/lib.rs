@@ -1147,6 +1147,29 @@ async fn sync_take_now(app: AppHandle) -> Res<String> {
 /// asking the updater crashes, so the update commands check this first.
 static UPDATER_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Adds a screen (as ProPresenter): a name and a look; returns its id.
+#[tauri::command(async)]
+fn output_add(app: AppHandle, st: State<'_, AppState>, name: String, look: String) -> Res<String> {
+    let role = wp_core::options::add_output(&st.db.lock().unwrap(), &name, &look).map_err(err)?;
+    use tauri::Emitter;
+    let _ = app.emit("output-config-changed", role.clone());
+    Ok(role)
+}
+
+/// Removes an added screen (closing it first).
+#[tauri::command(async)]
+fn output_remove(app: AppHandle, st: State<'_, AppState>, role: String) -> Res<()> {
+    close_output(app.clone(), st.clone(), role.clone());
+    stop_ndi_output(&app, &role);
+    wp_core::options::remove_output(&st.db.lock().unwrap(), &role).map_err(err)
+}
+
+/// Whether this build can update itself (it carries the update key).
+#[tauri::command]
+fn updates_on() -> bool {
+    UPDATER_ON.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 #[derive(Serialize)]
 struct UpdateInfo {
     version: String,
@@ -1667,7 +1690,7 @@ fn identify_output(app: AppHandle, role: String) {
 }
 
 /// Settings the core uses; only these keys can be written.
-const SETTINGS: &[&str] = &["project_on_restart", "low_spec_mode", "lines_per_slide", "advance_after_go_live", "font_fallback", "speech_engine", "speech_mic", "speech_refs_only", "speech_whisper_model", "scripture_verse_numbers", "stage_layout", "ndi_lower_third", "scripture_verses_per_slide", "scripture_ref_where", "scripture_ref_scope", "scripture_ref_only", "scripture_abbrev", "deepgram_key", "deepgram_model", "quick_hymnal", "logo_media_id", "brand_colors", "brand_font", "brand_heading_font"];
+const SETTINGS: &[&str] = &["project_on_restart", "low_spec_mode", "lines_per_slide", "advance_after_go_live", "font_fallback", "speech_engine", "speech_mic", "speech_refs_only", "speech_whisper_model", "scripture_verse_numbers", "stage_layout", "ndi_lower_third", "media_fade_ms", "scripture_verses_per_slide", "scripture_ref_where", "scripture_ref_scope", "scripture_ref_only", "scripture_abbrev", "deepgram_key", "deepgram_model", "quick_hymnal", "logo_media_id", "brand_colors", "brand_font", "brand_heading_font"];
 
 #[tauri::command(async)]
 fn get_settings(st: State<'_, AppState>) -> Res<std::collections::HashMap<String, String>> {
@@ -1835,6 +1858,107 @@ async fn foreign_theme_import(app: AppHandle, path: String, chosen: Vec<usize>) 
 }
 
 /// A note for the stage display only. Empty clears it.
+/// The media layer on or off (as ProPresenter's Clear Media): the words stay.
+#[tauri::command(async)]
+fn set_media_off(app: AppHandle, st: State<'_, AppState>, off: bool) -> Res<LiveState> {
+    let next = st.live.lock().unwrap().apply(Command::SetMediaOff { off });
+    *st.live.lock().unwrap() = next.clone();
+    broadcast(&app, &st);
+    Ok(next)
+}
+
+/// The props showing (empty: Clear Props).
+#[tauri::command(async)]
+fn set_props(app: AppHandle, st: State<'_, AppState>, props: Vec<i64>) -> Res<LiveState> {
+    let next = st.live.lock().unwrap().apply(Command::SetProps { props });
+    *st.live.lock().unwrap() = next.clone();
+    broadcast(&app, &st);
+    Ok(next)
+}
+
+/// Clear All (as ProPresenter): every layer off — words and media (blank), props, the
+/// alert, and the background music.
+#[tauri::command(async)]
+fn clear_all(app: AppHandle, st: State<'_, AppState>) -> Res<LiveState> {
+    let next = st.live.lock().unwrap().apply(Command::SetMode { mode: Mode::Blank }).apply(Command::SetProps { props: vec![] }).apply(Command::SetAlert { alert: None });
+    *st.live.lock().unwrap() = next.clone();
+    broadcast(&app, &st);
+    music::music_stop(st.clone());
+    applog::write("LIVE", "Clear all");
+    Ok(next)
+}
+
+#[tauri::command(async)]
+fn macros_list(st: State<'_, AppState>) -> Res<Vec<wp_core::macros::Macro>> {
+    wp_core::macros::list(&st.db.lock().unwrap()).map_err(err)
+}
+
+#[tauri::command(async)]
+fn macro_save(app: AppHandle, st: State<'_, AppState>, m: wp_core::macros::Macro) -> Res<i64> {
+    let id = wp_core::macros::save(&st.db.lock().unwrap(), &m).map_err(err)?;
+    use tauri::Emitter;
+    let _ = app.emit("macros-changed", id);
+    Ok(id)
+}
+
+#[tauri::command(async)]
+fn macro_delete(app: AppHandle, st: State<'_, AppState>, id: i64) -> Res<()> {
+    wp_core::macros::delete(&st.db.lock().unwrap(), id).map_err(err)?;
+    use tauri::Emitter;
+    let _ = app.emit("macros-changed", id);
+    Ok(())
+}
+
+/// The slide actions of an item: [(slide key, macro id)].
+#[tauri::command(async)]
+fn slide_actions(st: State<'_, AppState>, kind: String, id: i64) -> Res<Vec<(String, i64)>> {
+    wp_core::macros::slide_actions(&st.db.lock().unwrap(), &kind, id).map_err(err)
+}
+
+#[tauri::command(async)]
+fn slide_action_set(st: State<'_, AppState>, kind: String, id: i64, key: String, macro_id: Option<i64>) -> Res<()> {
+    wp_core::macros::set_slide_action(&st.db.lock().unwrap(), &kind, id, &key, macro_id).map_err(err)
+}
+
+#[tauri::command(async)]
+fn timeline_get(st: State<'_, AppState>, kind: String, id: i64) -> Res<Option<wp_core::timelines::Timeline>> {
+    wp_core::timelines::get(&st.db.lock().unwrap(), &kind, id).map_err(err)
+}
+
+#[tauri::command(async)]
+fn timeline_save(st: State<'_, AppState>, timeline: wp_core::timelines::Timeline) -> Res<()> {
+    wp_core::timelines::save(&st.db.lock().unwrap(), &timeline).map_err(err)
+}
+
+#[tauri::command(async)]
+fn timeline_delete(st: State<'_, AppState>, kind: String, id: i64) -> Res<()> {
+    wp_core::timelines::delete(&st.db.lock().unwrap(), &kind, id).map_err(err)
+}
+
+#[tauri::command(async)]
+fn props_list(st: State<'_, AppState>) -> Res<Vec<wp_core::props::Prop>> {
+    wp_core::props::list(&st.db.lock().unwrap()).map_err(err)
+}
+
+#[tauri::command(async)]
+fn prop_save(app: AppHandle, st: State<'_, AppState>, prop: wp_core::props::Prop) -> Res<i64> {
+    let id = wp_core::props::save(&st.db.lock().unwrap(), &prop).map_err(err)?;
+    use tauri::Emitter;
+    let _ = app.emit("props-changed", id);
+    Ok(id)
+}
+
+#[tauri::command(async)]
+fn prop_delete(app: AppHandle, st: State<'_, AppState>, id: i64) -> Res<()> {
+    wp_core::props::delete(&st.db.lock().unwrap(), id).map_err(err)?;
+    // no longer shown either
+    let showing: Vec<i64> = st.live.lock().unwrap().props.iter().copied().filter(|p| *p != id).collect();
+    let _ = set_props(app.clone(), st.clone(), showing);
+    use tauri::Emitter;
+    let _ = app.emit("props-changed", id);
+    Ok(())
+}
+
 #[tauri::command(async)]
 fn set_stage_message(app: AppHandle, st: State<'_, AppState>, message: Option<String>) -> Res<LiveState> {
     let next = st.live.lock().unwrap().apply(Command::SetStageMessage { message });
@@ -2443,22 +2567,22 @@ fn start_ndi_output(app: &AppHandle, role: &str, f: wp_core::options::NdiFormat)
     if let Some(w) = app.get_webview_window(&format!("output-{role}")) {
         let _ = w.destroy();
     }
-    let name = match role {
-        "main" => "Worship Presenter Main",
-        "alternate" => "Worship Presenter Alternate",
-        _ => "Worship Presenter Foldback",
-    };
+    // the NDI source is named after the screen ("Worship Presenter Livestream")
+    let screen = wp_core::options::output(&st.db.lock().unwrap(), role).ok();
+    let owned_name = format!("Worship Presenter {}", screen.as_ref().map(|c| c.name.clone()).unwrap_or_else(|| role.to_string()));
+    let name = owned_name.as_str();
     let key = format!("out-{role}");
     let (slot, stats, stop) = st.ndi.start_pump(&key, name, None, f.fps)?;
     // like FreeShow: every NDI output sends the real output page (moving video, text
     // animations, transitions, rich text, exactly as on the screens). The lower third is
     // drawn on the key green and keyed to real transparency. The built-in renderer is the
     // fallback (no window capture here), or the choice in Settings (exact transparency).
-    let lower = role == "alternate";
+    let lower = screen.as_ref().map(|c| c.look == "lower").unwrap_or(role == "alternate");
     let builtin_chosen = lower && st.db.lock().unwrap().query_row("SELECT value FROM setting WHERE key = 'ndi_lower_third'", [], |r| r.get::<_, String>(0)).ok().as_deref() == Some("builtin");
     #[cfg(windows)]
     if !builtin_chosen {
-        match ndi_window(app, role, if lower { "ndi" } else { role }, f) {
+        let page = if lower { format!("{role}/keyed") } else { role.to_string() };
+        match ndi_window(app, role, &page, f) {
             Ok(hwnd) => match ndi::capture::start(hwnd, slot.clone(), stats.clone(), lower) {
                 Ok(running) => {
                     if let Some(j) = st.ndi.jobs.lock().unwrap().get_mut(&key) {
@@ -3398,6 +3522,23 @@ pub fn run() {
             theme_gallery,
             quick_song,
             screens_power,
+            set_media_off,
+            set_props,
+            clear_all,
+            props_list,
+            macros_list,
+            timeline_get,
+            timeline_save,
+            timeline_delete,
+            macro_save,
+            macro_delete,
+            slide_actions,
+            slide_action_set,
+            prop_save,
+            prop_delete,
+            output_add,
+            output_remove,
+            updates_on,
             status_all,
             check::dashboard,
             check::system_check,

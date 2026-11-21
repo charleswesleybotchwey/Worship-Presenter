@@ -49,6 +49,9 @@ impl Host for Pretend {
                 Command::GoLivePreview => s.1 = "live",
                 Command::NextItem => *s = (0, "live", Some(s.2.map_or(0, |i| i + 1))),
                 Command::PreviousItem => *s = (0, "live", Some(s.2.map_or(0, |i| i.saturating_sub(1)))),
+                // macros, layers and props: the demo has nothing to run them on
+                Command::Macro { .. } | Command::MediaToggle | Command::PropsClear => {}
+                Command::ClearAll => s.1 = "blank",
             }
         }
         if let Some(r) = self.remote.lock().unwrap().as_ref() {

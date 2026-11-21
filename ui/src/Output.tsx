@@ -1,3 +1,8 @@
+import { defaultLook } from "./live/outputs";
+import { PropsLayer } from "./PropsLayer";
+import { Crossfade, useMediaFadeMs } from "./fade";
+import { blendGradient, pinTransform } from "./live/geometry";
+import type { StageLayout } from "./StageView";
 import { useEffect, useRef, useState } from "react";
 import { api, onCaption, onHeartbeat, onIdentify, onLive, onOutputConfigChanged, onSettingsChanged, type Broadcast, type MediaItem, type OutputConfig } from "./api";
 import { SlideView } from "./SlideView";
@@ -14,7 +19,16 @@ import { AlertOverlay, TimerOverlay } from "./Cues";
 // Going on air plays each layer's in-animation; going blank plays the out-animations
 // on the last picture and then clears; a slide change cross-fades the text only.
 
-const RULES: Record<string, { onLogo: "logo" | "blank" | "transparent"; lowerThird: boolean; keyed: boolean }> = {
+type Rule = { onLogo: "logo" | "blank" | "transparent"; lowerThird: boolean; keyed: boolean };
+/** What each look of a screen shows (as ProPresenter's looks). */
+const LOOK_RULES: Record<string, Rule> = {
+  full: { onLogo: "logo", lowerThird: false, keyed: false },
+  lower: { onLogo: "transparent", lowerThird: true, keyed: true },
+  stage: { onLogo: "blank", lowerThird: false, keyed: false },
+  words: { onLogo: "blank", lowerThird: false, keyed: false },
+  media: { onLogo: "logo", lowerThird: false, keyed: false },
+};
+const RULES: Record<string, Rule> = {
   main: { onLogo: "logo", lowerThird: false, keyed: false },
   alternate: { onLogo: "transparent", lowerThird: true, keyed: true },
   foldback: { onLogo: "blank", lowerThird: false, keyed: false },
@@ -23,8 +37,14 @@ const RULES: Record<string, { onLogo: "logo" | "blank" | "transparent"; lowerThi
   ndi: { onLogo: "transparent", lowerThird: true, keyed: true },
 };
 
-export function Output({ role }: { role: string }) {
-  const rule = RULES[role] ?? RULES.main;
+export function Output({ role, keyed = false }: { role: string; keyed?: boolean }) {
+  const fade = useMediaFadeMs();
+  const [win, setWin] = useState({ w: window.innerWidth, h: window.innerHeight });
+  useEffect(() => {
+    const on = () => setWin({ w: window.innerWidth, h: window.innerHeight });
+    window.addEventListener("resize", on);
+    return () => window.removeEventListener("resize", on);
+  }, []);
   const themes = useThemes();
   const [b, setB] = useState<Broadcast | null>(null);
   const [lost, setLost] = useState(false);
@@ -39,6 +59,10 @@ export function Output({ role }: { role: string }) {
   const [cfg, setCfg] = useState<OutputConfig | null>(null);
   // the NDI lower third follows the alternate output's options (its theme and so on)
   const cfgRole = role === "ndi" ? "alternate" : role;
+  // the screen's look (as ProPresenter): full, lower third, stage, words only, media only
+  const look = role === "ndi" ? "lower" : cfg?.look ?? defaultLook(role);
+  const rule = LOOK_RULES[look] ?? RULES.main;
+  const audience = look === "full" || look === "words" || look === "media";
   useEffect(() => {
     const load = () => api.outputConfig(cfgRole).then(setCfg).catch(() => {});
     load();
@@ -122,19 +146,44 @@ export function Output({ role }: { role: string }) {
   const kindNow = shown?.item?.kind;
   const outputTheme = kindNow === "song" ? cfg?.song_theme_id : kindNow === "scripture" ? cfg?.scripture_theme_id : null;
   // margins correct a physical screen's edges: not for an NDI picture
-  const m = role === "ndi" ? undefined : cfg?.margins;
+  const m = role === "ndi" || keyed ? undefined : cfg?.margins;
   const cam = role === "main" && !lost && !isHeld && (mode === "live" || mode === "clear") ? b?.state.camera ?? null : null;
   // full-screen camera hides the slide's words
   const camFull = cam?.mode === "full";
   const s = shown?.state;
   const slide = phase === "off" ? undefined : shown?.slides[s?.slide_idx ?? 0];
 
-  if (role === "foldback") return <StageView b={b} lost={lost} />;
+  // corner pin (keystone) over the whole window, and this screen's part of a wall
+  const pinCss = pinTransform(cfg?.pin, win.w, win.h);
+  const pinStyle: React.CSSProperties = pinCss ? { transform: pinCss, transformOrigin: "0 0" } : {};
+  const r = cfg?.region;
+  const regionStyle: React.CSSProperties | undefined =
+    r && (r.w < 100 || r.h < 100) ? { position: "absolute", left: `${(-r.x / r.w) * 100}%`, top: `${(-r.y / r.h) * 100}%`, width: `${(100 / r.w) * 100}%`, height: `${(100 / r.h) * 100}%` } : undefined;
+  const blend = cfg?.blend;
+  // a stage screen's own layout (else the shared one from Settings → Stage display)
+  const ownStage = (() => {
+    try {
+      return cfg?.stage_layout ? (JSON.parse(cfg.stage_layout) as StageLayout) : undefined;
+    } catch {
+      return undefined;
+    }
+  })();
+  if (look === "stage")
+    return (
+      <div className="output output--stage" style={pinStyle}>
+        <StageView b={b} lost={lost} layout={ownStage} />
+        {cfg?.grid && <AlignGrid />}
+      </div>
+    );
 
   return (
-    <div className={`output ${rule.keyed || seeThrough ? "output--keyed" : ""}`} style={m ? { padding: `${m.top}px ${m.right}px ${m.bottom}px ${m.left}px` } : undefined}>
+    <div className={`output ${rule.keyed || seeThrough ? "output--keyed" : ""}`} style={{ ...(m ? { padding: `${m.top}px ${m.right}px ${m.bottom}px ${m.left}px` } : {}), ...pinStyle }}>
       <div className={`output__frame ${seeThrough ? "output__frame--alpha" : ""}`}>
+        {/* a projector wall: this screen shows its part of the whole picture */}
+        <div className="output__region" style={regionStyle}>
         {cam && cam.mode !== "corner" && <CameraFeed cam={cam} />}
+        {/* a media item and the slides crossfade into each other (as ProPresenter) */}
+        <Crossfade k={shown?.item?.kind === "media" ? `media:${shown.item.media_id}` : "slides"} ms={lowSpec ? 0 : fade}>
         <SlideView
           slide={slide}
           allSlides={shown?.slides}
@@ -149,14 +198,24 @@ export function Output({ role }: { role: string }) {
           playing={b?.state.media_playing}
           restart={b?.state.media_restart}
           muted={role !== "main"}
-          look={{ lowerThird: rule.lowerThird }}
+          look={{ lowerThird: rule.lowerThird, wordsOnly: look === "words" || !!b?.state.media_off }}
           blank={phase === "off"}
-          hideText={b?.state.mode === "clear" || camFull}
+          hideText={b?.state.mode === "clear" || camFull || look === "media"}
           alpha={seeThrough || (!!cam && cam.mode !== "corner")}
           phase={lowSpec ? "static" : phase === "out" ? "out" : "in"}
           showKey={showKey}
           textKey={`${s?.slide_idx}-${s?.lines_per_slide}-${s?.lang_mode}-${shown?.slides.length}`}
         />
+        </Crossfade>
+        </div>
+        {/* props: graphics over the slides, independently of them */}
+        {!!b?.state.props?.length && <PropsLayer showing={b.state.props} stream={look === "lower"} />}
+        {/* the soft edges where this projector overlaps its neighbours */}
+        {blend && blend.left > 0 && <div className="output__blend" style={{ left: 0, top: 0, bottom: 0, width: `${blend.left}%`, background: blendGradient("left", blend.gamma) }} />}
+        {blend && blend.right > 0 && <div className="output__blend" style={{ right: 0, top: 0, bottom: 0, width: `${blend.right}%`, background: blendGradient("right", blend.gamma) }} />}
+        {blend && blend.top > 0 && <div className="output__blend" style={{ left: 0, right: 0, top: 0, height: `${blend.top}%`, background: blendGradient("top", blend.gamma) }} />}
+        {blend && blend.bottom > 0 && <div className="output__blend" style={{ left: 0, right: 0, bottom: 0, height: `${blend.bottom}%`, background: blendGradient("bottom", blend.gamma) }} />}
+        {cfg?.grid && <AlignGrid />}
       </div>
       {showLogo && (
         <div className="output__logo" aria-label="Logo">
@@ -170,7 +229,7 @@ export function Output({ role }: { role: string }) {
               <span key={c} style={{ background: c }} />
             ))}
           </div>
-          <div className="identify__name">{role === "main" ? "Main" : role === "alternate" ? "Lower third" : "Stage"}</div>
+          <div className="identify__name">{cfg?.name ?? (role === "main" ? "Main" : role === "alternate" ? "Lower third" : "Stage")}</div>
           <div className="identify__size">
             {window.screen.width}×{window.screen.height}
           </div>
@@ -180,8 +239,8 @@ export function Output({ role }: { role: string }) {
         <div className={`cue-layer ${b?.state.alert?.position === "bottom" && (role === "main" ? b.state.alert.on_screens : b.state.alert.on_stream) ? "has-bottom-alert" : ""}`}>
           {role === "main" && b?.state.timer && b.state.timer.on_screens !== "off" && <TimerOverlay t={b.state.timer} full={b.state.timer.on_screens === "full"} />}
           {cam?.mode === "corner" && <CameraFeed cam={cam} corner />}
-          {b?.state.subtitles && ((role === "main" && b.state.subtitles !== "stream") || ((role === "alternate" || role === "ndi") && b.state.subtitles !== "screens")) && <Subtitles />}
-          {b?.state.alert && (role === "main" ? b.state.alert.on_screens : (role === "alternate" || role === "ndi") && b.state.alert.on_stream) && <AlertOverlay a={b.state.alert} />}
+          {b?.state.subtitles && ((audience && b.state.subtitles !== "stream") || (look === "lower" && b.state.subtitles !== "screens")) && <Subtitles />}
+          {b?.state.alert && (audience ? b.state.alert.on_screens : look === "lower" && b.state.alert.on_stream) && <AlertOverlay a={b.state.alert} />}
         </div>
       )}
     </div>
@@ -283,4 +342,22 @@ function useLogoMedia(): MediaItem | null {
     return () => stop();
   }, []);
   return m;
+}
+
+/** A grid over the picture for lining up projectors: tenths, the centre, the edges. */
+function AlignGrid() {
+  return (
+    <svg className="output__grid" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+      {Array.from({ length: 9 }, (_, i) => (i + 1) * 10).map((v) => (
+        <g key={v}>
+          <line x1={v} y1={0} x2={v} y2={100} />
+          <line x1={0} y1={v} x2={100} y2={v} />
+        </g>
+      ))}
+      <rect x={0.2} y={0.2} width={99.6} height={99.6} className="output__grid-edge" />
+      <line x1={0} y1={0} x2={100} y2={100} className="output__grid-x" />
+      <line x1={100} y1={0} x2={0} y2={100} className="output__grid-x" />
+      <circle cx={50} cy={50} r={8} className="output__grid-edge" />
+    </svg>
+  );
 }

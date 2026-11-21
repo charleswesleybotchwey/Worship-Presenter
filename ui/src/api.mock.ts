@@ -1,4 +1,4 @@
-import { inTauri, type Mode, type ProgramItem, type Slide, type MediaItem, type Deck, type SongDoc, type SongHit, type LiveState, type Alert, type TimerShow, type TimerPreset, type ThemeRule, type ServiceInterval, type Schedule, type OutputConfig, type MusicRules, type LangMode, type ForeignDesign, type AlertPreset, type Timer, type SongScope, type PulpitNote, type Profile, type ImportKind, type HeardRef, type DeckSlide, type CameraLive, type Broadcast, type BackupInfo } from "./api";
+import { inTauri, type Macro, type Mode, type Prop, type ProgramItem, type Slide, type MediaItem, type Deck, type SongDoc, type SongHit, type LiveState, type Alert, type TimerShow, type TimerPreset, type ThemeRule, type ServiceInterval, type Schedule, type OutputConfig, type MusicRules, type LangMode, type ForeignDesign, type AlertPreset, type Timer, type SongScope, type PulpitNote, type Profile, type ImportKind, type HeardRef, type DeckSlide, type CameraLive, type Broadcast, type BackupInfo } from "./api";
 import { BUILTIN, type Theme, type ThemeKind, type ThemeRow } from "./theme/types";
 // The browser preview's stand-in for the app (npm run preview, the tests): sample songs,
 // Bibles and state. The real app never loads this file.
@@ -17,6 +17,16 @@ const SONGS: { hit: SongHit; sections: { label: string; en: string[]; fat?: stri
   {
     hit: { id: 2, title: "MHB 50", author: "Isaac Watts", numbers: ["MHB 50"], first_line: "Come, let us join our cheerful songs" },
     sections: [{ label: "V1", en: ["[G]Come, let us [C]join our [D]cheerful [G]songs", "With [Em]angels [A]round the [D]throne;", "[G]Ten thousand [C]thousand [G]are their [D]tongues,", "But [C]all their [D]joys are [G]one."] }],
+  },
+  {
+    // a hymn with a refrain (public domain, 1873): for slide groups and arrangements
+    hit: { id: 3, title: "Blessed Assurance", author: "Fanny J. Crosby, 1820-1915.", numbers: ["MHB 422"], first_line: "Blessed assurance, Jesus is mine!" },
+    sections: [
+      { label: "V1", en: ["Blessed assurance, Jesus is mine!", "O what a foretaste of glory divine!"] },
+      { label: "C", en: ["This is my story, this is my song,", "Praising my Saviour all the day long."] },
+      { label: "V2", en: ["Perfect submission, perfect delight,", "Visions of rapture now burst on my sight;"] },
+      { label: "B", en: ["Perfect submission, all is at rest,", "I in my Saviour am happy and blest;"] },
+    ],
   },
 ];
 
@@ -135,10 +145,32 @@ export function mockPage(token: string, index: number, bytes: Uint8Array, ext: s
   mPages.set(token, list);
 }
 const OUT_DEFAULT = { display_index: null, display_name: null, custom: null, margins: { left: 0, right: 0, top: 0, bottom: 0 }, alpha: false, song_theme_id: null, scripture_theme_id: null, show_on_startup: false };
+// sample macros (as ProPresenter's): the walk-in and the end of the service
+const mMacros: Macro[] = [
+  { id: 1, name: "Walk-in", color: "#22c55e", actions: [{ kind: "logo" }, { kind: "prop_on", value: 3 }, { kind: "countdown", value: 5 }] },
+  { id: 2, name: "Sermon", color: "#3b82f6", actions: [{ kind: "props_clear" }, { kind: "prop_on", value: 1 }, { kind: "resume" }] },
+];
+const mSlideActions: Record<string, Record<string, number>> = {};
+const mTimelines: Record<string, { item_kind: string; item_id: number; media_id: number; cues: [number, number][] }> = {};
+
+// sample props (as ProPresenter's): a LIVE badge, a sermon title band and a clock
+const mProps: Prop[] = [
+  { id: 1, name: "Sermon title", kind: "text", text: "Grace upon grace — John 1:16", media_id: null, position: "bottom", size: 4, opacity: 1, color: "#ffffff", background: "#000000bb", on: "all" },
+  { id: 2, name: "LIVE badge", kind: "text", text: "● LIVE", media_id: null, position: "top-right", size: 3, opacity: 1, color: "#ffffff", background: "#d62828", on: "stream" },
+  { id: 3, name: "Clock", kind: "clock", text: "", media_id: null, position: "top-left", size: 3, opacity: 0.9, color: "#ffffff", background: "", on: "all" },
+];
+
+const SAMPLE_WALL = {
+  role: "screen-wall", name: "Wall left", look: "full", display_index: null, display_name: null, custom: null, margins: { top: 0, right: 0, bottom: 0, left: 0 }, alpha: false,
+  song_theme_id: null, scripture_theme_id: null, on_logo: "logo", on_blank: "blank", show_on_startup: false, ndi: null,
+  pin: [3, 2, 0, 0, 0, 0, 2, 0], region: { x: 0, y: 0, w: 55, h: 100 }, blend: { left: 0, right: 18.2, top: 0, bottom: 0, gamma: 2.2 }, grid: true,
+};
 let mOutputs: OutputConfig[] = [
   { ...OUT_DEFAULT, role: "main", name: "Main", on_logo: "logo", on_blank: "blank" },
   { ...OUT_DEFAULT, role: "alternate", name: "Lower third", on_logo: "transparent", on_blank: "transparent" },
   { ...OUT_DEFAULT, role: "foldback", name: "Stage", on_logo: "blank", on_blank: "blank" },
+  // a sample projector wall screen (the left of two), for the corner and edge tests
+  { ...SAMPLE_WALL } as OutputConfig,
 ];
 let mIntervals: ServiceInterval[] = [];
 const mMusic = { started: false, playing: false, paused: false, index: 0, pos: 0, at: Date.now(), volume: 0.8, ducked: false, ids: [] as number[], rules: { on_live: "fade_out", with_announcements: true, crossfade_ms: 4000, looping: true } as MusicRules };
@@ -913,9 +945,9 @@ export async function mock(cmd: string, a: Record<string, unknown>): Promise<unk
         screens_off: !mScreensOn,
         tiles: mScreensOn
           ? [
-              { role: "main", name: "Main", kind: "monitor", state: mState.item_idx == null ? "idle" : mState.mode === "live" ? "live" : mState.mode, detail: "On DELL P2419H" },
-              { role: "foldback", name: "Stage", kind: "monitor", state: "silent", detail: "Has not answered for 12 s" },
-              { role: "alternate", name: "Lower third", kind: "ndi", state: "live", detail: "Sending over NDI" },
+              { role: "main", look: "full", name: "Main", kind: "monitor", state: mState.item_idx == null ? "idle" : mState.mode === "live" ? "live" : mState.mode, detail: "On DELL P2419H" },
+              { role: "foldback", look: "stage", name: "Stage", kind: "monitor", state: "silent", detail: "Has not answered for 12 s" },
+              { role: "alternate", look: "lower", name: "Lower third", kind: "ndi", state: "live", detail: "Sending over NDI" },
             ]
           : [{ role: "main", name: "Main", kind: "monitor", state: "off", detail: "Screens are switched off" }],
       };
@@ -928,6 +960,20 @@ export async function mock(cmd: string, a: Record<string, unknown>): Promise<unk
         { id: "backup", label: "Backup", status: "warn", detail: "Last backup 12 days ago: make one now.", fix: "backups" },
         { id: "speech", label: "Scripture recognition", status: "bad", detail: "Not ready: the Whisper small model is not downloaded.", fix: "speech" },
       ];
+    case "output_add": {
+      const role = `screen-${mOutputs.length + 2}`;
+      mOutputs.push({ ...mOutputs[0], role, name: String(a.name), look: String(a.look), display_index: null, display_name: null, ndi: null });
+      // as the app does: windows are told a screen was added
+      new BroadcastChannel("wp-live").postMessage({ type: "output-config", role });
+      return role;
+    }
+    case "output_remove": {
+      const i = mOutputs.findIndex((o) => o.role === a.role);
+      if (i > 0) mOutputs.splice(i, 1);
+      return;
+    }
+    case "updates_on":
+      return true;
     case "screens_power":
       mScreensOn = Boolean(a.on);
       return mScreensOn;
@@ -1014,6 +1060,65 @@ export async function mock(cmd: string, a: Record<string, unknown>): Promise<unk
       const l = a.label as string | null;
       const on = mSlides[mState.slide_idx]?.label === l;
       return bump({ repeat: l ? { label: l, total: Math.max(1, a.total as number), done: (a.done as number | null) ?? (on ? 1 : 0) } : null });
+    }
+    case "set_media_off":
+      return bump({ media_off: !!a.off });
+    case "set_props":
+      return bump({ props: [...new Set(a.props as number[])] });
+    case "clear_all":
+      return bump({ mode: "blank", props: [], alert: null });
+    case "timeline_get":
+      return mTimelines[`${a.kind}:${a.id}`] ?? null;
+    case "timeline_save": {
+      const t = a.timeline as { item_kind: string; item_id: number; media_id: number; cues: [number, number][] };
+      mTimelines[`${t.item_kind}:${t.item_id}`] = { ...t, cues: [...t.cues].sort((x, y) => x[0] - y[0]) };
+      return;
+    }
+    case "timeline_delete":
+      delete mTimelines[`${a.kind}:${a.id}`];
+      return;
+    case "macros_list":
+      return mMacros.map((x) => structuredClone(x));
+    case "macro_save": {
+      const m = structuredClone(a.m as Macro);
+      if (m.id == null) m.id = Math.max(0, ...mMacros.map((x) => x.id ?? 0)) + 1;
+      const i = mMacros.findIndex((x) => x.id === m.id);
+      if (i >= 0) mMacros[i] = m;
+      else mMacros.push(m);
+      new BroadcastChannel("wp-live").postMessage({ type: "macros" });
+      return m.id;
+    }
+    case "macro_delete": {
+      const i = mMacros.findIndex((x) => x.id === a.id);
+      if (i >= 0) mMacros.splice(i, 1);
+      new BroadcastChannel("wp-live").postMessage({ type: "macros" });
+      return;
+    }
+    case "slide_actions":
+      return Object.entries(mSlideActions[`${a.kind}:${a.id}`] ?? {});
+    case "slide_action_set": {
+      const k = `${a.kind}:${a.id}`;
+      mSlideActions[k] = { ...(mSlideActions[k] ?? {}) };
+      if (a.macroId == null) delete mSlideActions[k][String(a.key)];
+      else mSlideActions[k][String(a.key)] = Number(a.macroId);
+      return;
+    }
+    case "props_list":
+      return mProps.map((x) => ({ ...x }));
+    case "prop_save": {
+      const pr = { ...(a.prop as Prop) };
+      if (pr.id == null) pr.id = Math.max(0, ...mProps.map((x) => x.id ?? 0)) + 1;
+      const i = mProps.findIndex((x) => x.id === pr.id);
+      if (i >= 0) mProps[i] = pr;
+      else mProps.push(pr);
+      new BroadcastChannel("wp-live").postMessage({ type: "props" });
+      return pr.id;
+    }
+    case "prop_delete": {
+      const i = mProps.findIndex((x) => x.id === a.id);
+      if (i >= 0) mProps.splice(i, 1);
+      new BroadcastChannel("wp-live").postMessage({ type: "props" });
+      return bump({ props: (mState.props ?? []).filter((x) => x !== a.id) });
     }
     case "set_lining_out": {
       const on = !!a.on;

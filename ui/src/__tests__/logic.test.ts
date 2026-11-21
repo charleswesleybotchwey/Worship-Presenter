@@ -110,3 +110,48 @@ describe("two languages line by line", () => {
     expect(pairLines(["one", "two", "three"], ["baako"])).toEqual(["one", PAIRED + "baako", "two", "three"]);
   });
 });
+
+import { blendAlpha, mapPoint, pinMatrix, pinTransform } from "../live/geometry";
+
+describe("screen geometry", () => {
+  it("corner pin moves each corner where it is told and keeps straight lines", () => {
+    const pin = [5, 2, 3, 0, 0, 4, 2, 1];
+    const m = pinMatrix(pin, 1920, 1080)!;
+    const near = (p: number[], q: number[]) => Math.hypot(p[0] - q[0], p[1] - q[1]) < 1e-6;
+    expect(near(mapPoint(m, [0, 0]), [96, 21.6])).toBe(true);
+    expect(near(mapPoint(m, [1920, 0]), [1920 - 57.6, 0])).toBe(true);
+    expect(near(mapPoint(m, [1920, 1080]), [1920, 1080 - 43.2])).toBe(true);
+    expect(near(mapPoint(m, [0, 1080]), [38.4, 1080 - 10.8])).toBe(true);
+    // the middle of the top edge stays on the line between the two top corners
+    const [a, b, c] = [mapPoint(m, [0, 0]), mapPoint(m, [960, 0]), mapPoint(m, [1920, 0])];
+    expect(Math.abs((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]))).toBeLessThan(1e-6);
+    expect(pinTransform([0, 0, 0, 0, 0, 0, 0, 0], 1920, 1080)).toBeNull();
+    expect(pinTransform(pin, 1920, 1080)).toMatch(/^matrix3d\(/);
+  });
+  it("soft edges of two projectors add up to even brightness", () => {
+    const g = 2.2;
+    for (const t of [0, 0.25, 0.5, 0.75, 1]) {
+      // what each projector puts out, back in real brightness, across the overlap
+      const left = Math.pow(1 - blendAlpha(t, g), g);
+      const right = Math.pow(1 - blendAlpha(1 - t, g), g);
+      expect(left + right).toBeCloseTo(1, 6);
+    }
+  });
+});
+
+import { chorusAfterEach, groupColor, parseOrder, sectionsOf } from "../groups";
+
+describe("slide groups and arrangements", () => {
+  it("colours groups by kind", () => {
+    expect(groupColor("V1")).toBe(groupColor("V3"));
+    expect(groupColor("C")).not.toBe(groupColor("V1"));
+    expect(groupColor("Ending")).toBe("#8e8a83");
+  });
+  it("reads a song's sections and arranges them", () => {
+    const body = "[V1]\na\n[C]\nb\n[V2]\nc\n[B]\nd\n[V3]\ne";
+    expect(sectionsOf(body)).toEqual(["V1", "C", "V2", "B", "V3"]);
+    expect(chorusAfterEach(sectionsOf(body))).toEqual(["V1", "C", "V2", "C", "B", "C", "V3", "C"]);
+    expect(chorusAfterEach(["V1", "V2"])).toEqual(["V1", "V2"]);
+    expect(parseOrder(" V1  C V2 ")).toEqual(["V1", "C", "V2"]);
+  });
+});

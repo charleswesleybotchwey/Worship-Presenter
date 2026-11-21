@@ -6,45 +6,46 @@
 :root,
 [data-theme="dark"] {
   color-scheme: dark;
-  --wp-shell: #191918;
-  --wp-canvas: #201f1e;
-  --wp-overlay: #292827;
-  --wp-hover: #2c2b2a;
-  --wp-selected: #343331;
-  --wp-line: #383735;
-  --wp-edge: #85827c;
-  --wp-ink: #f1f0ee;
-  --wp-secondary: #c4c2be;
-  --wp-muted: #a5a29d;
-  --wp-accent: #aec3f4;
-  --wp-on-accent: #182238;
-  --wp-focus: #b4cafa;
-  --wp-live: #8ad6aa;
-  --wp-warn: #f0c07a;
-  --wp-danger: #ffa39f;
+  --wp-shell: #1d1c1a;
+  --wp-canvas: #232220;
+  --wp-overlay: #2b2927;
+  --wp-hover: #302e2b;
+  --wp-selected: #3a3733;
+  --wp-line: #383532;
+  --wp-edge: #7d776f;
+  --wp-ink: #ece7df;
+  --wp-secondary: #c9c3b9;
+  --wp-muted: #a29c92;
+  --wp-accent: #e9e4dc;
+  --wp-on-accent: #1d1c1a;
+  --wp-focus: #f0c86a;
+  --wp-live: #2fb36b;
+  --wp-warn: #e3a13b;
+  --wp-danger: #e0443b;
 }
 [data-theme="light"] {
   color-scheme: light;
-  --wp-shell: #f5f4f2;
-  --wp-canvas: #fcfbfa;
+  --wp-shell: #efece7;
+  --wp-canvas: #f7f5f1;
   --wp-overlay: #ffffff;
-  --wp-hover: #f0efed;
-  --wp-selected: #e7e6e3;
-  --wp-line: #dedddA;
-  --wp-edge: #75736d;
-  --wp-ink: #22211f;
-  --wp-secondary: #4e4c49;
-  --wp-muted: #62605c;
-  --wp-accent: #39558d;
+  --wp-hover: #e9e5df;
+  --wp-selected: #dfdad2;
+  --wp-line: #d6d0c7;
+  --wp-edge: #6f6a62;
+  --wp-ink: #22201d;
+  --wp-secondary: #4a4640;
+  --wp-muted: #625d55;
+  --wp-accent: #2a2724;
   --wp-on-accent: #ffffff;
-  --wp-focus: #385790;
-  --wp-live: #216542;
-  --wp-warn: #80500c;
-  --wp-danger: #973a38;
+  --wp-focus: #a46a00;
+  --wp-live: #1d7a46;
+  --wp-warn: #8a5600;
+  --wp-danger: #b3261e;
 }
 :root {
   /* Windows' own interface font (Segoe UI Variable on Windows 11); slides keep theirs */
-  --wp-font: "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", "Inter Variable", Inter, "Noto Sans", sans-serif;
+  /* IBM Plex Sans: an engineering face, at home in a control room; Noto Sans for ɛ, ɔ… */
+  --wp-font: "IBM Plex Sans", "Noto Sans", "Segoe UI", sans-serif;
   --wp-text: 13px;
   --wp-lead: 20px;
   --wp-small: 12px;
@@ -83,4 +84,13 @@
 @media (forced-colors: active) {
   .wp-control button, .wp-control input, .wp-control select { border: 1px solid ButtonText; }
   .wp-control [aria-pressed="true"], .wp-control [aria-selected="true"], .wp-control [aria-current="true"] { outline: 2px solid Highlight; }
+}
+
+/* the control room's tallies (as on a vision mixer): red is on air, green is ready */
+:root {
+  --wp-onair: #e0443b;
+  --wp-onair-soft: color-mix(in srgb, #e0443b 18%, transparent);
+  --wp-ready: #2fb36b;
+  --wp-ready-soft: color-mix(in srgb, #2fb36b 16%, transparent);
+  --wp-attention: #e3a13b;
 }

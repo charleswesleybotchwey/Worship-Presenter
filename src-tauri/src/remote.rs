@@ -118,6 +118,17 @@ impl Host for Desk {
                 };
                 app.emit_to("main", "control-action", name).map_err(|e| e.to_string())
             }
+            // macros run in the service window (they step through its schedule too)
+            Command::Macro { id } => {
+                use tauri::Emitter;
+                app.emit_to("main", "control-action", format!("macro:{id}")).map_err(|e| e.to_string())
+            }
+            Command::ClearAll => crate::clear_all(app.clone(), st()).map(drop),
+            Command::MediaToggle => {
+                let off = st().live.lock().unwrap().media_off;
+                crate::set_media_off(app.clone(), st(), !off).map(drop)
+            }
+            Command::PropsClear => crate::set_props(app.clone(), st(), vec![]).map(drop),
             Command::GoLiveItem { index } => {
                 let (_, items) = self.service_items();
                 let it = items.get(*index).ok_or("That item is no longer in the service order.")?;

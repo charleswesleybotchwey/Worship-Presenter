@@ -98,12 +98,12 @@ export function SchedulePane({
         </button>
         {onWebPage && (
           <button className="wp-icon-btn" title="Add a web page (shown over the main screen when live)" aria-label="Add a web page" onClick={() => onWebPage(selected ?? null)}>
-            🌐
+            <Icon name="globe" />
           </button>
         )}
         {onHeading && (
-          <button className="wp-icon-btn wp-heading-btn" title="Add a heading (Praise & Worship, Sermon…)" aria-label="Add a heading" onClick={() => onHeading(selected ?? null, false)}>
-            H
+          <button className="wp-icon-btn" title="Add a heading (Praise & Worship, Sermon…)" aria-label="Add a heading" onClick={() => onHeading(selected ?? null, false)}>
+            <Icon name="heading" />
           </button>
         )}
         <button className="wp-icon-btn" title="Open, start or rename a service" aria-label="Service orders" onClick={onMenu}>

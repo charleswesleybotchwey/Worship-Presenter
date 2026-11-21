@@ -100,7 +100,7 @@ export function SmartCollection({ id, name: start, onClose, onSaved }: { id: num
               Cancel
             </button>
             <button className="wp-btn wp-btn--primary" onClick={() => void save()}>
-              OK
+              Save collection
             </button>
           </div>
         </div>

@@ -47,6 +47,24 @@ pub struct OutputConfig {
     /// format instead of opening on a monitor (None = a monitor or custom position).
     #[serde(default)]
     pub ndi: Option<NdiFormat>,
+    /// What the screen shows (as ProPresenter's looks): full | lower | stage | words | media
+    #[serde(default = "full_look")]
+    pub look: String,
+    /// A stage screen's own layout (JSON, as Settings → Stage display); None = the shared one.
+    #[serde(default)]
+    pub stage_layout: Option<String>,
+    /// Corner pin (keystone): how far each corner moves, in % of the width and height —
+    /// [top-left x, y, top-right x, y, bottom-right x, y, bottom-left x, y]; positive is inward.
+    #[serde(default)]
+    pub pin: Option<[f32; 8]>,
+    /// Edge blending: the part of the whole picture this screen shows (a projector wall).
+    #[serde(default)]
+    pub region: Option<Region>,
+    #[serde(default)]
+    pub blend: Option<Blend>,
+    /// An alignment grid over the picture while setting up corners and blends.
+    #[serde(default)]
+    pub grid: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -70,6 +88,53 @@ struct Extra {
     scripture_theme_id: Option<i64>,
     #[serde(default)]
     show_on_startup: bool,
+    #[serde(default)]
+    look: Option<String>,
+    #[serde(default)]
+    stage_layout: Option<String>,
+    #[serde(default)]
+    pin: Option<[f32; 8]>,
+    #[serde(default)]
+    region: Option<Region>,
+    #[serde(default)]
+    blend: Option<Blend>,
+    #[serde(default)]
+    grid: bool,
+}
+
+/// The part of the whole picture a screen shows, in % (left 0, width 55 = the left projector).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Region {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+/// How wide the soft edge is on each side (% of this screen), and the projectors' gamma.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Blend {
+    pub left: f32,
+    pub right: f32,
+    pub top: f32,
+    pub bottom: f32,
+    pub gamma: f32,
+}
+
+fn full_look() -> String {
+    "full".into()
+}
+
+/// The looks a screen can have.
+pub const LOOKS: [&str; 5] = ["full", "lower", "stage", "words", "media"];
+
+/// The look of the first three screens when none is saved (as before screens).
+fn default_look(role: &str) -> &'static str {
+    match role {
+        "alternate" => "lower",
+        "foldback" => "stage",
+        _ => "full",
+    }
 }
 
 fn bad(msg: impl Into<String>) -> Error {
@@ -77,7 +142,8 @@ fn bad(msg: impl Into<String>) -> Error {
 }
 
 pub fn outputs(conn: &Connection) -> Result<Vec<OutputConfig>> {
-    let mut st = conn.prepare("SELECT role, name, display_name, bounds_json, on_logo, on_blank FROM output WHERE role IN ('main','alternate','foldback') ORDER BY CASE role WHEN 'main' THEN 0 WHEN 'alternate' THEN 1 ELSE 2 END")?;
+    // every screen: the first three in their usual order, then the added ones
+    let mut st = conn.prepare("SELECT role, name, display_name, bounds_json, on_logo, on_blank FROM output WHERE role NOT IN ('ndi', 'stage_web') ORDER BY CASE role WHEN 'main' THEN 0 WHEN 'alternate' THEN 1 WHEN 'foldback' THEN 2 ELSE 3 END, id")?;
     let v = st
         .query_map([], |r| {
             let extra: Extra = r.get::<_, Option<String>>(3)?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default();
@@ -95,6 +161,12 @@ pub fn outputs(conn: &Connection) -> Result<Vec<OutputConfig>> {
                 on_blank: r.get(5)?,
                 show_on_startup: extra.show_on_startup,
                 ndi: extra.ndi,
+                look: extra.look.clone().filter(|l| LOOKS.contains(&l.as_str())).unwrap_or_else(|| default_look(&r.get::<_, String>(0).unwrap_or_default()).to_string()),
+                stage_layout: extra.stage_layout.clone(),
+                pin: extra.pin,
+                region: extra.region,
+                blend: extra.blend,
+                grid: extra.grid,
             })
         })?
         .collect::<std::result::Result<_, _>>()?;
@@ -133,7 +205,40 @@ pub fn save_output(conn: &Connection, c: &OutputConfig) -> Result<()> {
         song_theme_id: c.song_theme_id,
         scripture_theme_id: c.scripture_theme_id,
         show_on_startup: c.show_on_startup,
+        look: Some(c.look.clone()),
+        stage_layout: c.stage_layout.clone().filter(|l| !l.trim().is_empty()),
+        pin: c.pin,
+        region: c.region,
+        blend: c.blend,
+        grid: c.grid,
     };
+    if let Some(p) = c.pin {
+        if p.iter().any(|v| !v.is_finite() || v.abs() > 45.0) {
+            return Err(bad("Corner pins move a corner at most 45 % of the screen."));
+        }
+    }
+    if let Some(r) = c.region {
+        let ok = [r.x, r.y, r.w, r.h].iter().all(|v| v.is_finite()) && r.w >= 5.0 && r.h >= 5.0 && r.x >= 0.0 && r.y >= 0.0 && r.x + r.w <= 100.01 && r.y + r.h <= 100.01;
+        if !ok {
+            return Err(bad("The part of the picture must lie inside it (at least 5 % wide and high)."));
+        }
+    }
+    if let Some(b) = c.blend {
+        if [b.left, b.right, b.top, b.bottom].iter().any(|v| !v.is_finite() || *v < 0.0 || *v > 50.0) || !(1.0..=3.0).contains(&b.gamma) {
+            return Err(bad("Blend widths are 0–50 % and the gamma 1.0–3.0 (usually 2.2)."));
+        }
+    }
+    if let Some(l) = &c.stage_layout {
+        if !l.trim().is_empty() && serde_json::from_str::<serde_json::Value>(l).is_err() {
+            return Err(bad("That stage layout is damaged."));
+        }
+    }
+    if !LOOKS.contains(&c.look.as_str()) {
+        return Err(bad("Unknown look for the screen."));
+    }
+    if c.name.trim().is_empty() {
+        return Err(bad("Give the screen a name."));
+    }
     let n = conn.execute(
         "UPDATE output SET name = ?2, display_name = ?3, bounds_json = ?4, on_logo = ?5, on_blank = ?6 WHERE role = ?1",
         params![c.role, c.name.trim(), c.display_name, serde_json::to_string(&extra)?, c.on_logo, c.on_blank],
@@ -141,6 +246,38 @@ pub fn save_output(conn: &Connection, c: &OutputConfig) -> Result<()> {
     if n == 0 {
         return Err(bad(format!("No output called {}.", c.role)));
     }
+    Ok(())
+}
+
+/// Adds a screen (as ProPresenter): a name and a look; returns its id ("screen-4").
+pub fn add_output(conn: &Connection, name: &str, look: &str) -> Result<String> {
+    if !LOOKS.contains(&look) {
+        return Err(bad("Unknown look for the screen."));
+    }
+    if name.trim().is_empty() {
+        return Err(bad("Give the screen a name."));
+    }
+    let next: i64 = conn.query_row("SELECT coalesce(max(id), 0) + 1 FROM output", [], |r| r.get(0))?;
+    let role = format!("screen-{next}");
+    let (on_logo, on_blank) = match look {
+        "lower" => ("transparent", "transparent"),
+        "stage" => ("blank", "blank"),
+        _ => ("logo", "blank"),
+    };
+    let extra = serde_json::json!({ "look": look });
+    conn.execute(
+        "INSERT INTO output (name, role, bounds_json, on_logo, on_blank) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![name.trim(), role, extra.to_string(), on_logo, on_blank],
+    )?;
+    Ok(role)
+}
+
+/// Removes an added screen (the main screen stays).
+pub fn remove_output(conn: &Connection, role: &str) -> Result<()> {
+    if role == "main" {
+        return Err(bad("The main screen cannot be removed."));
+    }
+    conn.execute("DELETE FROM output WHERE role = ?1", [role])?;
     Ok(())
 }
 
@@ -324,6 +461,12 @@ mod tests {
         let mut c = OutputConfig {
             role: "main".into(), name: "Main".into(), display_index: Some(1), display_name: Some("EPSON PJ".into()), custom: None,
             margins: Margins::default(), alpha: false, song_theme_id: None, scripture_theme_id: None, on_logo: "logo".into(), on_blank: "blank".into(), show_on_startup: true,
+            look: "full".into(),
+            stage_layout: None,
+            pin: None,
+            region: None,
+            blend: None,
+            grid: false,
             ndi: None,
         };
         let now = vec!["EPSON PJ".to_string(), "Laptop".to_string()];
@@ -355,5 +498,46 @@ mod tests {
         assert_eq!(rows.iter().filter(|r| r.title == "Way Maker").count(), 2, "one row per service interval");
         let csv = usage_csv(&rows);
         assert!(csv.starts_with("Service,Title") && csv.contains("\"7115744\""));
+    }
+}
+
+#[cfg(test)]
+mod screen_tests {
+    use super::*;
+
+    #[test]
+    fn screens_as_propresenter() {
+        let c = crate::db::open_memory().unwrap();
+        let all = outputs(&c).unwrap();
+        assert_eq!(all.iter().map(|o| (o.role.as_str(), o.look.as_str())).collect::<Vec<_>>(), vec![("main", "full"), ("alternate", "lower"), ("foldback", "stage")], "the first three keep their looks");
+        let r = add_output(&c, "Overflow room", "words").unwrap();
+        let r2 = add_output(&c, "Side screens", "media").unwrap();
+        let all = outputs(&c).unwrap();
+        assert_eq!(all.len(), 5);
+        assert_eq!((all[3].role.as_str(), all[3].name.as_str(), all[3].look.as_str()), (r.as_str(), "Overflow room", "words"));
+        // the look and the name can be changed and are kept
+        let mut o = output(&c, &r2).unwrap();
+        o.look = "lower".into();
+        o.name = "Livestream 2".into();
+        save_output(&c, &o).unwrap();
+        assert_eq!(output(&c, &r2).unwrap().look, "lower");
+        assert!(add_output(&c, "x", "sideways").is_err());
+        // corners, a projector wall's part and its soft edges are kept, and checked
+        let mut o = output(&c, &r).unwrap();
+        o.pin = Some([2.0, 1.0, -1.5, 0.0, 0.0, 0.0, 0.0, 3.0]);
+        o.region = Some(Region { x: 45.0, y: 0.0, w: 55.0, h: 100.0 });
+        o.blend = Some(Blend { left: 18.0, right: 0.0, top: 0.0, bottom: 0.0, gamma: 2.2 });
+        o.stage_layout = Some(r#"{"boxes":[]}"#.into());
+        save_output(&c, &o).unwrap();
+        let back = output(&c, &r).unwrap();
+        assert_eq!((back.pin, back.region, back.blend.map(|b| b.left), back.stage_layout.as_deref()), (o.pin, o.region, Some(18.0), Some(r#"{"boxes":[]}"#)));
+        o.region = Some(Region { x: 60.0, y: 0.0, w: 55.0, h: 100.0 });
+        assert!(save_output(&c, &o).is_err(), "a part outside the picture");
+        o.region = None;
+        o.pin = Some([60.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        assert!(save_output(&c, &o).is_err(), "a corner moved too far");
+        assert!(remove_output(&c, "main").is_err());
+        remove_output(&c, &r).unwrap();
+        assert_eq!(outputs(&c).unwrap().len(), 4);
     }
 }

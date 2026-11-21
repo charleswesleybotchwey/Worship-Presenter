@@ -52,6 +52,12 @@ pub enum Command {
     /// The next / previous item of the service order.
     NextItem,
     PreviousItem,
+    /// Runs a macro (Stream Deck / Companion: /api/v1/macro/N).
+    Macro { id: i64 },
+    /// Clear All, the media layer on/off, and props off (as ProPresenter).
+    ClearAll,
+    MediaToggle,
+    PropsClear,
 }
 
 pub trait Host: Send + Sync + 'static {
@@ -272,6 +278,7 @@ impl Remote {
             .route("/ws", get(ws))
             .route("/api/v1/{action}", get(control).post(control))
             .route("/api/v1/item/{n}", get(control_item).post(control_item))
+            .route("/api/v1/macro/{n}", get(control_macro).post(control_macro))
             .route("/follow", get(follow_page))
             .route("/follow/ws", get(follow_ws))
             .with_state(self.clone())
@@ -483,9 +490,16 @@ async fn control(State(r): State<Arc<Remote>>, ConnectInfo(addr): ConnectInfo<So
         "logo" => Command::Logo,
         "clear" => Command::Clear,
         "resume" => Command::Resume,
-        _ => return fail(StatusCode::NOT_FOUND, "Unknown action. Use go-live, next, previous, next-item, previous-item, blank, logo, clear, resume or item/N."),
+        "clear-all" => Command::ClearAll,
+        "media" => Command::MediaToggle,
+        "props-clear" => Command::PropsClear,
+        _ => return fail(StatusCode::NOT_FOUND, "Unknown action. Use go-live, next, previous, next-item, previous-item, blank, logo, clear, resume, clear-all, media, props-clear, item/N or macro/N."),
     };
     run_control(r, addr, h, q, cmd, &action)
+}
+
+async fn control_macro(State(r): State<Arc<Remote>>, ConnectInfo(addr): ConnectInfo<SocketAddr>, h: HeaderMap, Path(n): Path<i64>, Query(q): Query<KeyQuery>) -> Response {
+    run_control(r, addr, h, q, Command::Macro { id: n }, &format!("macro {n}"))
 }
 
 async fn control_item(State(r): State<Arc<Remote>>, ConnectInfo(addr): ConnectInfo<SocketAddr>, h: HeaderMap, Path(n): Path<usize>, Query(q): Query<KeyQuery>) -> Response {

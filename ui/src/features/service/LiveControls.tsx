@@ -13,18 +13,39 @@ export function ServiceActions({ state, onMode }: { state: LiveState | undefined
   const btn = (m: Mode, label: string, icon: string) => {
     const on = state?.mode === m;
     return (
-      <button className={`wp-btn wp-mode ${on ? `is-on is-on--${m}` : ""}`} aria-pressed={on} onClick={() => onMode(state?.mode === m ? "live" : m)} title={on ? `${label} is on: press again to bring the words back` : tips[m]}>
-        {on && <span className="wp-mode__dot" aria-hidden="true" />}
+      <button className={`wp-btn wp-mode sw-btn ${on ? `is-on is-on--${m}` : ""}`} aria-pressed={on} onClick={() => onMode(state?.mode === m ? "live" : m)} title={on ? `${label} is on: press again to bring the words back` : tips[m]}>
         <Icon name={icon} /> {label}
-        {on && <span className="wp-mode__on">ON</span>}
       </button>
     );
   };
   return (
     <div className="wp-service-actions" role="group" aria-label="Screens">
-      {btn("blank", "Blank", "blank")}
-      {btn("logo", "Logo", "logo")}
-      {btn("clear", "Clear", "clear")}
+      {/* the switcher: what the screens show */}
+      <div className="sw-group" role="group" aria-label="Switcher">
+        {btn("blank", "Blank", "blank")}
+        {btn("logo", "Logo", "logo")}
+        {btn("clear", "Clear", "clear")}
+      </div>
+      {/* layers (as ProPresenter): the media layer, props, macros and clear all */}
+      <div className="sw-group sw-group--layers" role="group" aria-label="Layers">
+      <button
+        className={`wp-btn wp-mode sw-btn ${state?.media_off ? "is-on is-on--blank" : ""}`}
+        aria-pressed={!!state?.media_off}
+        title={state?.media_off ? "Backgrounds, pictures and video are hidden (the words stay): click to show them" : "Hide the backgrounds, pictures and video, keeping the words (Clear Media)"}
+        onClick={() => void api.setMediaOff(!state?.media_off)}
+      >
+        <Icon name="layers" /> {state?.media_off ? "Media off" : "Media"}
+      </button>
+      <button className={`wp-btn sw-btn ${state?.props?.length ? "is-on is-on--props" : ""}`} title="Props: a logo, a LIVE badge, the sermon title, a clock" onClick={() => window.dispatchEvent(new CustomEvent("wp-props"))}>
+        <Icon name="badge" /> Props{state?.props?.length ? ` ${state.props.length}` : ""}
+      </button>
+      <button className="wp-btn sw-btn" title="Macros: one button for several actions" onClick={() => window.dispatchEvent(new CustomEvent("wp-macros"))}>
+        <Icon name="bolt" /> Macros
+      </button>
+      <button className="wp-btn sw-btn" title="Clear all: words, media, props, the alert and the music" onClick={() => void api.clearAll()}>
+        <Icon name="clearall" /> Clear all
+      </button>
+      </div>
       <ScreensSwitch />
       <OutputDots onOpen={() => window.dispatchEvent(new CustomEvent("wp-outputs"))} />
     </div>
@@ -235,8 +256,7 @@ export function ScreensSwitch() {
       title={on ? "Switch every screen off (projector, stage, NDI); press again to bring them back" : "Screens are off: press to switch them back on"}
       onClick={() => void api.screensPower(!on).then(setOn)}
     >
-      {!on && <span className="wp-mode__dot" aria-hidden="true" />}
-      {on ? "Screens" : "Screens off"}
+      <Icon name="monitor" /> {on ? "Screens" : "Screens off"}
     </button>
   );
 }

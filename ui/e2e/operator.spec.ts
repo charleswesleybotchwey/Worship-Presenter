@@ -9,7 +9,8 @@ test("a song goes live and the switches bring the words back", async ({ page, co
   await page.locator(".lt-row--songs").first().click();
   await page.locator(".wp-btn--primary", { hasText: "Go live" }).click();
   await expect(out.locator(".tl-box").first()).toBeVisible();
-  const clear = page.locator(".wp-service-actions button", { hasText: "Clear" });
+  // the Clear switch, not "Clear all" (its label gains an ON tag while on)
+  const clear = page.locator(".wp-service-actions button", { hasText: "Clear" }).filter({ hasNotText: "all" });
   await clear.click();
   await expect(clear).toHaveAttribute("aria-pressed", "true");
   await expect(out.locator(".tl-box")).toHaveCount(0);
@@ -178,4 +179,97 @@ test("the outputs dashboard and Check system point to the fix", async ({ page })
   await expect(page.locator(".opn__sum")).toContainText("1 problem");
   await page.locator(".opn__item", { hasText: "Backup" }).locator("button", { hasText: "Fix" }).click();
   await expect(page.locator("h2", { hasText: "Backups" })).toBeVisible();
+});
+
+test("props show on their screens and Clear all takes everything off", async ({ page, context }) => {
+  const out = await context.newPage();
+  await out.goto("/#/output/main");
+  await page.goto("/#/control");
+  await page.locator(".lt-row--songs").first().click();
+  await page.locator(".wp-btn--primary", { hasText: "Go live" }).click();
+  await expect(out.locator(".tl-box").first()).toBeVisible();
+  await page.locator(".wp-service-actions button", { hasText: "Props" }).click();
+  await page.locator(".prp__row button.wp-mode", { hasText: "Sermon title" }).click();
+  await page.locator(".prp__row button.wp-mode", { hasText: "LIVE badge" }).click();
+  await expect(out.locator(".prop")).toHaveText(["Grace upon grace — John 1:16"]); // the LIVE badge is for the stream only
+  await page.locator(".opn button", { hasText: "Close" }).click();
+  await page.locator(".wp-service-actions button", { hasText: "Clear all" }).click();
+  await expect(out.locator(".prop")).toHaveCount(0);
+  await expect(out.locator(".tl-box")).toHaveCount(0);
+});
+
+test("group buttons jump to a section; the arrangement is built from blocks", async ({ page }) => {
+  await page.goto("/#/control");
+  await page.locator(".lt-row--songs", { hasText: "Blessed Assurance" }).click();
+  await page.locator(".wp-btn--primary", { hasText: "Go live" }).click();
+  await expect(page.locator(".grp-buttons .grp-btn")).toHaveText(["V1", "C", "V2", "B"]);
+  await page.locator(".grp-buttons .grp-btn", { hasText: "B" }).click();
+  await expect(page.locator(".ew-pane[aria-label=Live] .sl-group.is-current .sl-head")).toHaveText("Bridge");
+  await page.locator(".lt-row--songs", { hasText: "Blessed Assurance" }).click({ button: "right" });
+  await page.locator("[data-menu-depth='0'] button", { hasText: "Edit" }).first().click();
+  await page.locator(".arr button", { hasText: "Chorus after each verse" }).click();
+  await expect(page.locator("input[placeholder^='As written']")).toHaveValue("V1 C V2 C B C");
+});
+
+test("a macro runs its steps; a slide action runs a macro when its slide goes live", async ({ page, context }) => {
+  const out = await context.newPage();
+  await out.goto("/#/output/main");
+  await page.goto("/#/control");
+  await page.locator(".lt-row--songs", { hasText: "Blessed Assurance" }).click();
+  await page.locator(".ew-pane[aria-label=Preview] .sl-group", { hasText: "Bridge" }).locator(".sl-slide").first().click({ button: "right" });
+  await page.locator("[role=menuitem]", { hasText: "Walk-in" }).click();
+  await expect(page.locator(".ew-pane[aria-label=Preview] .sl-group", { hasText: "Bridge" }).locator(".sl-action")).toHaveCount(1);
+  await page.locator(".wp-btn--primary", { hasText: "Go live" }).click();
+  await page.locator(".wp-service-actions button", { hasText: "Macros" }).click();
+  await page.locator(".mac__run", { hasText: "Sermon" }).click();
+  await expect(out.locator(".prop")).toHaveText(["Grace upon grace — John 1:16"]);
+  await page.locator(".opn button", { hasText: "Close" }).click();
+  await page.locator(".grp-buttons .grp-btn", { hasText: "B" }).click();
+  await expect(page.locator(".wp-service-actions button", { hasText: "Logo" })).toHaveAttribute("aria-pressed", "true");
+  await expect(out.locator(".prop")).toHaveCount(2);
+});
+
+test("a timeline records slide changes against a track and plays them back", async ({ page }) => {
+  await page.goto("/#/control");
+  await page.locator(".lt-row--songs", { hasText: "Blessed Assurance" }).click();
+  await page.locator(".wp-btn--primary", { hasText: "Go live" }).click();
+  await page.locator(".tlb__track").selectOption({ label: "🎞 Motion loop blue" });
+  await expect(page.locator(".tlb__time")).toContainText("0:04");
+  await page.locator(".tlb button", { hasText: "Record" }).click();
+  const slides = page.locator(".ew-pane[aria-label=Live] .sl-slide");
+  for (const i of [1, 2]) {
+    await page.waitForTimeout(900);
+    await slides.nth(i).click();
+  }
+  await page.locator(".tlb button", { hasText: "Stop" }).click();
+  await expect(page.locator(".tlb__bar")).toHaveAttribute("title", "3 slide changes recorded");
+  await slides.nth(0).click();
+  await page.locator(".tlb button", { hasText: "Play" }).click();
+  await expect(page.locator(".ew-pane[aria-label=Live] .sl-slide.is-current .sl-num")).toContainText("3", { timeout: 6000 });
+});
+
+test("a live video crossfades into the next item, still playing as it fades", async ({ page, context }) => {
+  const out = await context.newPage();
+  await out.goto("/#/output/main");
+  await page.goto("/#/control");
+  await page.locator(".lib-tabs").getByText("Media").click();
+  await page.locator(".wp-row--lib", { hasText: "Motion" }).click();
+  await page.locator(".wp-btn--primary", { hasText: "Go live" }).click();
+  await expect(out.locator("video")).toHaveCount(1);
+  await page.locator(".lib-tabs").getByText("Songs").click();
+  await page.locator(".lt-row--songs", { hasText: "Blessed Assurance" }).click();
+  await page.locator(".wp-btn--primary", { hasText: "Go live" }).click();
+  await expect(out.locator(".xf__out video")).toHaveCount(1); // the outgoing video, fading
+  await expect(out.locator(".xf__out")).toHaveCount(0, { timeout: 3000 }); // then gone
+  await expect(out.locator(".tl-text").first()).toBeVisible();
+});
+
+test("the theme editor's property rows stay in place (no stray styles)", async ({ page }) => {
+  await page.goto("/#/control");
+  await page.locator(".lib-tabs").getByText("Themes").click();
+  await page.locator(".lt-theme").first().dblclick();
+  const rows = page.locator(".te .prop, .prop-group .prop");
+  await expect(rows.first()).toBeVisible();
+  const positions = await rows.evaluateAll((els) => els.slice(0, 8).map((e) => getComputedStyle(e).position));
+  expect(positions.every((p) => p !== "absolute")).toBe(true);
 });

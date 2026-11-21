@@ -98,6 +98,13 @@ pub struct LiveState {
     /// Lining out: one line at a time, next line large on the stage display.
     #[serde(default)]
     pub lining_out: bool,
+    /// The media layer switched off (as ProPresenter's Clear Media): backgrounds, pictures
+    /// and video hidden, the words stay.
+    #[serde(default)]
+    pub media_off: bool,
+    /// The props showing (ids), over the slides, independently of them.
+    #[serde(default)]
+    pub props: Vec<i64>,
     /// Semitones the musicians' chords are moved up (+) or down (−) on the stage view.
     #[serde(default)]
     pub transpose: i8,
@@ -194,6 +201,8 @@ impl Default for LiveState {
             slide_since_ms: 0,
             repeat: None,
             lining_out: false,
+            media_off: false,
+            props: vec![],
             subtitles: None,
             camera: None,
             transpose: 0,
@@ -221,6 +230,8 @@ pub enum Command {
     SetAuto { auto: Option<AutoAdvance> },
     SetRepeat { repeat: Option<Repeat> },
     SetLiningOut { on: bool },
+    SetMediaOff { off: bool },
+    SetProps { props: Vec<i64> },
     SetSubtitles { target: Option<String> },
     SetCamera { camera: Option<Camera> },
     SetTranspose { semitones: i8 },
@@ -267,6 +278,12 @@ impl LiveState {
             Command::SetAuto { auto } => n.auto = auto,
             Command::SetRepeat { repeat } => n.repeat = repeat,
             Command::SetLiningOut { on } => n.lining_out = on,
+            Command::SetMediaOff { off } => n.media_off = off,
+            Command::SetProps { props } => {
+                let mut p = props;
+                p.dedup();
+                n.props = p;
+            }
             Command::SetTranspose { semitones } => n.transpose = semitones.clamp(-11, 11),
             Command::SetTextAdjust { scale, shift } => {
                 n.text_scale = if scale.is_finite() { scale.clamp(0.6, 1.6) } else { 1.0 };

@@ -58,7 +58,7 @@ export function TranscriptPanel({
   return (
     <aside className="trp" aria-label="Live Transcript">
       <header className="trp__head">
-        <strong>Live Transcript</strong>
+        <strong className="trp__title">Live transcript</strong>
         <span className="wp-note wp-note--inline">{s?.listening ?? ""}</span>
         <span className="wp-spacer" />
         <button className="wp-icon-btn" aria-label="Close" onClick={onClose}>
@@ -162,7 +162,7 @@ export function TranscriptPanel({
             <div ref={bottom} />
           </div>
           <div className="trp__det">
-            <div className="trp__det-head">AI detections</div>
+            <div className="trp__det-head">Scriptures heard</div>
             {(s?.recent ?? []).length === 0 && <p className="wp-note">Scriptures heard appear here.</p>}
             {(s?.recent ?? []).map((d) => (
               <div key={d.reference + d.at} className="trp__det-row">

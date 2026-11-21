@@ -1,3 +1,7 @@
+import "@fontsource/ibm-plex-sans/400.css";
+import "@fontsource/ibm-plex-sans/500.css";
+import "@fontsource/ibm-plex-sans/600.css";
+import "@fontsource/ibm-plex-sans/latin-ext-400.css";
 import { StrictMode, Suspense, lazy } from "react";
 import { createRoot } from "react-dom/client";
 // each window loads only its own part: projector, stage and NDI windows do not carry
@@ -25,7 +29,6 @@ import { MediaUrlProvider } from "./theme/media";
 import "./ui/tokens.css";
 import "./styles.css";
 import "./ui/shell.css";
-import "./ui/depth.css";
 import { installNativeGuard } from "./nativeGuard";
 
 installNativeGuard();
@@ -42,9 +45,9 @@ installNativeGuard();
 }
 
 // #/output/<role> renders an output window; anything else is the control window.
-const m = location.hash.match(/^#\/output\/([a-z_]+)/);
+const m = location.hash.match(/^#\/output\/([a-z0-9_-]+)(\/keyed)?/);
 // Operator appearance applies to the control window only; outputs never read it.
-document.documentElement.dataset.depth = localStorage.getItem("wp-depth") || "3d";
+// one look: the control room (the old 3D/flat choice is gone)
 if (!m && !ident) document.documentElement.dataset.theme = (() => {
   const t = localStorage.getItem("wp-ui-theme") || "dark";
   return t === "system" ? (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light") : t;
@@ -56,7 +59,7 @@ if (ident) {
 createRoot(document.getElementById("root")!).render(<StrictMode>
     <MediaUrlProvider>
       <ThemesProvider>
-        <Suspense fallback={null}>{m ? <Output role={m[1]} /> : location.hash === "#/fixture" ? <Fixture /> : <Control />}</Suspense>
+        <Suspense fallback={null}>{m ? <Output role={m[1]} keyed={!!m[2]} /> : location.hash === "#/fixture" ? <Fixture /> : <Control />}</Suspense>
       </ThemesProvider>
     </MediaUrlProvider>
   </StrictMode>);

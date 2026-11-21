@@ -108,16 +108,35 @@ impl Speech {
                 }
             }
         }
+        self.record(found, now, &clock);
+    }
+
+    /// New detections into the list (the same reference within half a minute is the
+    /// preacher repeating it, or a phrase already caught while it was being said).
+    fn record(&self, found: Vec<speech_ref::Heard>, now: u64, clock: &str) {
         let mut recent = self.recent.lock().unwrap();
         for h in found {
-            // the same reference again within half a minute is the preacher repeating it
             if recent.iter().any(|d| d.heard.reference == h.reference && now.saturating_sub(d.at) < 30) {
                 continue;
             }
-            self.log_refs.lock().unwrap().push((clock.clone(), h.reference.clone()));
+            self.log_refs.lock().unwrap().push((clock.to_string(), h.reference.clone()));
             recent.push_front(Detection { heard: h, at: now });
             recent.truncate(20);
         }
+    }
+
+    /// While a sentence is still being said (Deepgram's words so far): a complete reference
+    /// (book, chapter and verse) is offered at once, not at the end of the sentence. A
+    /// fresh tracker reads only what is said here; the finished sentence goes through the
+    /// usual path, and its repeat of this reference is not offered twice.
+    pub(crate) fn heard_early(&self, text: &str, aliases: &[wp_core::reference::Alias]) {
+        let found: Vec<speech_ref::Heard> = speech_ref::Tracker::new().feed(text, aliases).into_iter().filter(|h| h.verse_from.is_some()).collect();
+        if found.is_empty() {
+            return;
+        }
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let secs = now % 86_400;
+        self.record(found, now, &format!("{:02}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60));
     }
 
     /// Sends what is being said to the outputs as subtitles, when they are switched on.
@@ -659,6 +678,8 @@ fn run_vosk(app: &AppHandle, dir: &Path, mic: Option<&str>, references_only: boo
             if !t.is_empty() {
                 speech.caption(&t);
                 Speech::subtitle(app, &t, false);
+                // a complete reference is offered as soon as it has been said
+                speech.heard_early(&t, aliases);
             }
             last_partial = Instant::now();
         }
@@ -1062,6 +1083,7 @@ fn run_whisper(app: &AppHandle, model: &Path, mic: Option<&str>, aliases: &[wp_c
     let mut voiced = 0usize; // samples of speech in buf
     let mut quiet = 0usize; // samples of silence since the last speech
     let mut floor = 0.004f32; // background noise level, learnt as we go
+    let mut slow_runs = 0u32; // pieces in a row that took longer than the speech
     while !stop.load(Ordering::Relaxed) {
         let Ok(chunk) = rx.recv_timeout(Duration::from_millis(200)) else { continue };
         let f: Vec<f32> = chunk.iter().map(|s| *s as f32 / 32768.0).collect();
@@ -1079,14 +1101,29 @@ fn run_whisper(app: &AppHandle, model: &Path, mic: Option<&str>, aliases: &[wp_c
         if voiced == 0 && buf.len() > 16_000 * 3 {
             buf.drain(..buf.len() - 16_000);
         }
-        // transcribe at a pause (0.6 s) after enough speech, or every 7 s in a long run
-        let pause = quiet > 16_000 * 6 / 10 && voiced > 16_000 * 8 / 10;
-        if !(pause || buf.len() > 16_000 * 7) {
+        // transcribe at a short pause (0.45 s) after enough speech, or every 5 s in a long
+        // run (shorter pieces come back sooner)
+        let pause = quiet > 16_000 * 45 / 100 && voiced > 16_000 * 7 / 10;
+        if !(pause || buf.len() > 16_000 * 5) {
             continue;
         }
         let audio = std::mem::take(&mut buf);
         voiced = 0;
-        let (text, conf) = match worker.transcribe(&audio) {
+        let took = std::time::Instant::now();
+        let result = worker.transcribe(&audio);
+        // slower than speech on this computer: say once what would help
+        let ratio = took.elapsed().as_secs_f32() / (audio.len() as f32 / 16_000.0).max(0.5);
+        if ratio > 1.0 {
+            slow_runs += 1;
+            if slow_runs == 3 {
+                let name = model.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                crate::applog::write("SPEECH", &format!("Whisper ({name}) takes {ratio:.1}× as long as the speech on this computer"));
+                speech.caption(if name.contains("small") { "Whisper is slow on this computer: choose base.en or Deepgram (Settings → Scripture recognition)" } else { "Whisper is slow on this computer: Deepgram (online) would be faster" });
+            }
+        } else {
+            slow_runs = 0;
+        }
+        let (text, conf) = match result {
             Ok(t) => t,
             Err(e) => {
                 // the helper ended (a crash in Whisper): the app carries on; start it again
@@ -1128,6 +1165,9 @@ fn run_deepgram(app: &AppHandle, key: &str, model: &str, mic: Option<&str>, alia
             Speech::subtitle(app, text, done);
             if done {
                 speech.heard_with(app, text, conf, aliases);
+            } else {
+                // a complete reference is offered as soon as it has been said
+                speech.heard_early(text, aliases);
             }
         });
         match end {
@@ -1463,5 +1503,20 @@ mod sha1_tests {
         assert_eq!(super::file_sha1(&p).unwrap(), "a9993e364706816aba3e25717850c26c9cd0d89d");
         let _ = std::fs::remove_file(&p);
         assert!(super::WHISPER_SHA1.iter().all(|(m, h)| super::WHISPER_MODELS.iter().any(|(n, _, _)| n == m) && h.len() == 40));
+    }
+}
+
+#[cfg(test)]
+mod early_tests {
+    #[test]
+    fn a_reference_is_offered_before_the_sentence_ends() {
+        let s = super::Speech::default();
+        let aliases = wp_core::library::aliases(&wp_core::db::open_memory().unwrap()).unwrap();
+        s.heard_early("turn with me to John chapter three", &aliases);
+        assert!(s.recent.lock().unwrap().is_empty(), "no verse yet: wait");
+        s.heard_early("turn with me to John chapter three verse sixteen", &aliases);
+        assert_eq!(s.recent.lock().unwrap().len(), 1, "offered while still speaking");
+        s.heard_early("turn with me to John chapter three verse sixteen where Jesus", &aliases);
+        assert_eq!(s.recent.lock().unwrap().len(), 1, "not offered twice");
     }
 }

@@ -12,24 +12,45 @@ import type { OutputView } from "../../live/outputs";
 // rows with short explanations.
 
 type Cat = "appearance" | "brand" | "import" | "backups" | "profiles" | "sync" | "scripture" | "stage" | "buttons" | "keyboard" | "projection" | "outputs" | "intervals" | "speech" | "remote" | "library" | "about";
-const CATS: { id: Cat; label: string }[] = [
-  { id: "appearance", label: "Appearance" },
-  { id: "brand", label: "Brand kit" },
-  { id: "import", label: "Import" },
-  { id: "backups", label: "Backups" },
-  { id: "profiles", label: "Profiles" },
-  { id: "sync", label: "Sync" },
-  { id: "scripture", label: "Scripture display" },
-  { id: "stage", label: "Stage display" },
-  { id: "keyboard", label: "Keyboard" },
-  { id: "buttons", label: "Buttons and MIDI" },
-  { id: "projection", label: "Projection" },
-  { id: "outputs", label: "Outputs" },
-  { id: "intervals", label: "Service intervals" },
-  { id: "speech", label: "Scripture recognition" },
-  { id: "remote", label: "Phone remote" },
-  { id: "library", label: "Library" },
-  { id: "about", label: "About" },
+// grouped as an operator thinks of them
+const GROUPS: { name: string; cats: { id: Cat; label: string }[] }[] = [
+  {
+    name: "Screens",
+    cats: [
+      { id: "outputs", label: "Outputs" },
+      { id: "projection", label: "Projection" },
+      { id: "stage", label: "Stage display" },
+      { id: "scripture", label: "Scripture display" },
+    ],
+  },
+  {
+    name: "During the service",
+    cats: [
+      { id: "speech", label: "Scripture recognition" },
+      { id: "remote", label: "Phone remote" },
+      { id: "buttons", label: "Buttons and MIDI" },
+      { id: "keyboard", label: "Keyboard" },
+      { id: "intervals", label: "Service intervals" },
+    ],
+  },
+  {
+    name: "Library",
+    cats: [
+      { id: "library", label: "Library" },
+      { id: "import", label: "Import" },
+      { id: "backups", label: "Backups" },
+      { id: "sync", label: "Sync" },
+      { id: "profiles", label: "Profiles" },
+    ],
+  },
+  {
+    name: "Look",
+    cats: [
+      { id: "appearance", label: "Appearance" },
+      { id: "brand", label: "Brand kit" },
+    ],
+  },
+  { name: "", cats: [{ id: "about", label: "About" }] },
 ];
 
 function Row({ name, hint, children }: { name: string; hint?: string; children: React.ReactNode }) {
@@ -69,7 +90,6 @@ export function Settings({
   useEffect(() => {
     if (initial) setCat(initial as Cat);
   }, [initial]);
-  const [depth, setDepth] = useState(() => localStorage.getItem("wp-depth") || "3d");
   const [prefs, setPrefs] = usePrefs();
   const [core, setCore] = useState<Record<string, string>>({});
   const [capturing, setCapturing] = useState<Action | null>(null);
@@ -116,10 +136,15 @@ export function Settings({
     <div className="wp-page wp-settings">
       <nav className="wp-settings__nav" aria-label="Settings">
         <h1 className="wp-editor-title">Settings</h1>
-        {CATS.map((c) => (
-          <button key={c.id} className={`wp-settings__cat ${cat === c.id ? "is-selected" : ""}`} aria-current={cat === c.id} onClick={() => setCat(c.id)}>
-            {c.label}
-          </button>
+        {GROUPS.map((g) => (
+          <div key={g.name || "end"} className="wp-settings__group">
+            {g.name && <div className="wp-settings__groupname">{g.name}</div>}
+            {g.cats.map((c) => (
+              <button key={c.id} className={`wp-settings__cat ${cat === c.id ? "is-selected" : ""}`} aria-current={cat === c.id} onClick={() => setCat(c.id)}>
+                {c.label}
+              </button>
+            ))}
+          </div>
         ))}
       </nav>
       <main className="wp-settings__main">
@@ -139,21 +164,6 @@ export function Settings({
                   {(["dark", "light", "system"] as const).map((t) => (
                     <button key={t} role="radio" aria-checked={uiTheme === t} aria-selected={uiTheme === t} onClick={() => setUiTheme(t)}>
                       {t === "dark" ? "Dark" : t === "light" ? "Light" : "Follow Windows"}
-                    </button>
-                  ))}
-                </div>
-              </Row>
-              <Row name="Look" hint="3D gives buttons, cards and screens depth. Flat is plainer and a little lighter on old laptops.">
-                <div className="wp-tabs" role="radiogroup" aria-label="Look">
-                  {(["3d", "flat"] as const).map((v) => (
-                    <button
-                      key={v}
-                      role="radio"
-                      aria-checked={depth === v}
-                      aria-selected={depth === v}
-                      onClick={() => (localStorage.setItem("wp-depth", v), (document.documentElement.dataset.depth = v), setDepth(v))}
-                    >
-                      {v === "3d" ? "3D" : "Flat"}
                     </button>
                   ))}
                 </div>
@@ -210,6 +220,21 @@ export function Settings({
               </Row>
               <Row name="Advance the schedule after Go live" hint="When an item from the schedule goes live, the next item comes into Preview, ready for the next Go live.">
                 <input type="checkbox" checked={core.advance_after_go_live === "true"} onChange={(e) => void setCoreKey("advance_after_go_live", String(e.target.checked))} />
+              </Row>
+              <Row name="Fade between videos and pictures" hint="As ProPresenter: the outgoing video keeps playing while it fades into the next (0: a cut)">
+                <select className="wp-input" value={core.media_fade_ms ?? "700"} onChange={(e) => void setCoreKey("media_fade_ms", e.target.value)} aria-label="Fade between videos">
+                  {[
+                    ["0", "No fade (cut)"],
+                    ["300", "Quick (0.3 s)"],
+                    ["700", "Smooth (0.7 s)"],
+                    ["1200", "Slow (1.2 s)"],
+                    ["2000", "Very slow (2 s)"],
+                  ].map(([v, l]) => (
+                    <option key={v} value={v}>
+                      {l}
+                    </option>
+                  ))}
+                </select>
               </Row>
               <Row name="Font fallback list" hint="Fonts tried, in order, for any letter a theme's font does not have. Keep Noto Sans in the list: it has ɛ, ɔ, ŋ and the tone marks.">
                 <input
@@ -770,9 +795,7 @@ function SpeechPanel({ core, setCoreKey }: { core: Record<string, string>; setCo
     <>
       <h2>Scripture recognition (experimental)</h2>
       <p className="wp-note">
-        Listens to the preacher's microphone and suggests the Bible references it hears, above the Live pane. It follows the preacher (“verse seventeen”, “the next verse”, “chapter four”, a reference
-        spread over two sentences) and, when listening to everything, recognises a verse read aloud without its reference. It never puts anything on the screens: you choose Preview or Go live. English now; Twi and Fante when speech models for them exist. Start and stop it with Listen in the service bar.
-      </p>
+        Listens to the preacher and suggests the scriptures it hears, above the Live pane. It never puts anything on the screens by itself: you choose Preview or Go live.</p>
       <Row name="Speech engine" hint="Which program turns speech into words.">
         <div className="speech-engines" role="radiogroup" aria-label="Speech engine">
           {engines.map(([id, name, hint, ok]) => (

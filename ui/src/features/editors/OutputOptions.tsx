@@ -1,12 +1,22 @@
 import { useEffect, useState } from "react";
 import { api, type Display, type OutputConfig } from "../../api";
 import type { ThemeRow } from "../../theme/types";
-import { ROLE_NAMES, outputLabel, type OutputView } from "../../live/outputs";
+import { ROLE_NAMES, defaultLook, outputLabel, type OutputView } from "../../live/outputs";
+
+/** A screen's looks (as ProPresenter's). */
+const LOOK_NAMES: Record<string, string> = { full: "Full slides", lower: "Lower third", stage: "Stage display", words: "Words only", media: "Media only" };
+const LOOK_NOTES: Record<string, string> = {
+  full: "Everything: backgrounds, videos, words and the logo (the congregation's screens).",
+  lower: "The words in a lower-third band, see-through elsewhere: for the livestream and keying.",
+  stage: "The stage display for the pulpit and the band (Settings → Stage display).",
+  words: "The words on black: no backgrounds, pictures or video (overflow rooms, confidence monitors).",
+  media: "Backgrounds and videos without the words (side screens, walls).",
+};
 
 // EasyWorship's Options dialog for the outputs: Main, Alternate (lower third) and
 // Foldback (stage), each with General, Themes and Logo & Blank settings.
 
-type Tab = "general" | "themes" | "modes";
+type Tab = "general" | "themes" | "modes" | "geometry";
 
 function Num({ label, value, onChange }: { label: string; value: number; onChange: (n: number) => void }) {
   return (
@@ -68,10 +78,32 @@ export function OutputOptions({ views, mainLive }: { views: (role: string) => Ou
       <aside className="oo-list">
         {all.map((o) => (
           <button key={o.role} className={`oo-item ${o.role === role ? "is-selected" : ""}`} onClick={() => (!dirty || confirm("Leave without saving these changes?")) && setRole(o.role)}>
-            <span>{o.role === "alternate" ? "Alternate (lower third)" : o.role === "foldback" ? "Foldback (stage)" : "Main output"}</span>
-            <small>{outputLabel(views(o.role), undefined)}</small>
+            <span>
+              {o.name} <em className="oo-look">{LOOK_NAMES[o.look ?? defaultLook(o.role)] ?? o.look}</em>
+            </span>
+            <small>{outputLabel(views(o.role), undefined).replace(ROLE_NAMES[o.role] ?? o.role, o.name)}</small>
           </button>
         ))}
+        <button
+          className="oo-item oo-item--add"
+          onClick={async () => {
+            // a new screen, as ProPresenter: a name and a look
+            const name = prompt("Name of the new screen (e.g. Overflow room, Livestream, Side screens)");
+            if (!name?.trim()) return;
+            const look = prompt("Its look: full, lower (lower third), stage, words (words only) or media (media only)", "full")?.trim().toLowerCase();
+            if (!look) return;
+            const key = Object.keys(LOOK_NAMES).find((k) => k === look || LOOK_NAMES[k].toLowerCase().startsWith(look)) ?? look;
+            try {
+              const r = await api.outputAdd(name, key);
+              await load();
+              setRole(r);
+            } catch (e) {
+              alert(String(e instanceof Error ? e.message : e));
+            }
+          }}
+        >
+          <span>+ Add screen</span>
+        </button>
         <div className="oo-sketch" aria-label="How the margins sit on this output" style={{ aspectRatio: `${W} / ${H}` }}>
           <div className="oo-sketch__safe" style={{ left: `${(m.left / W) * 100}%`, right: `${(m.right / W) * 100}%`, top: `${(m.top / H) * 100}%`, bottom: `${(m.bottom / H) * 100}%` }}>
             verse 1<br />
@@ -87,6 +119,7 @@ export function OutputOptions({ views, mainLive }: { views: (role: string) => Ou
               ["general", "General"],
               ["themes", "Themes"],
               ["modes", "Logo and Blank"],
+              ["geometry", "Corners and walls"],
             ] as [Tab, string][]
           ).map(([t, l]) => (
             <button key={t} role="tab" aria-selected={tab === t} onClick={() => setTab(t)}>
@@ -97,6 +130,37 @@ export function OutputOptions({ views, mainLive }: { views: (role: string) => Ou
 
         {tab === "general" && (
           <>
+            <fieldset className="oo-set">
+              <legend>Screen</legend>
+              <label className="oo-row">
+                <span>Name</span>
+                <input className="wp-input" value={draft.name} onChange={(e) => set({ name: e.target.value })} aria-label="Screen name" />
+              </label>
+              <label className="oo-row">
+                <span>Look</span>
+                <select className="wp-input" value={draft.look ?? defaultLook(draft.role)} onChange={(e) => set({ look: e.target.value })} aria-label="Look">
+                  {Object.entries(LOOK_NAMES).map(([k, l]) => (
+                    <option key={k} value={k}>
+                      {l}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <p className="oo-note">{LOOK_NOTES[draft.look ?? defaultLook(draft.role)]}</p>
+              {draft.role !== "main" && (
+                <button
+                  className="btn-quiet btn-danger"
+                  onClick={async () => {
+                    if (!confirm(`Remove the screen “${draft.name}”?`)) return;
+                    await api.outputRemove(draft.role);
+                    setRole("main");
+                    await load();
+                  }}
+                >
+                  Remove this screen
+                </button>
+              )}
+            </fieldset>
             <fieldset className="oo-set">
               <legend>Output monitor</legend>
               <select
@@ -146,7 +210,7 @@ export function OutputOptions({ views, mainLive }: { views: (role: string) => Ou
                       )}
                     </select>
                   </label>
-                  {draft.role === "alternate" && (
+                  {(draft.look ?? (draft.role === "alternate" ? "lower" : "full")) === "lower" && (
                     <label className="oo-row">
                       <span>Lower third over NDI</span>
                       <select
@@ -165,7 +229,7 @@ export function OutputOptions({ views, mainLive }: { views: (role: string) => Ou
                     </label>
                   )}
                   <p className="oo-note">
-                    Sent over NDI as “{draft.role === "main" ? "Worship Presenter Main" : draft.role === "alternate" ? "Worship Presenter Alternate" : "Worship Presenter Foldback"}”, with no window
+                    Sent over NDI as “Worship Presenter {draft.name}”, with no window
                     on any monitor{draft.role === "alternate" ? " (the lower-third look, see-through for keying)" : ""}. As in FreeShow, the real output page is sent: moving video, text
                     animations and transitions exactly as on the screens. In OBS add an NDI source (DistroAV plugin); vMix lists it under NDI. Needs the NDI Runtime (Settings → Outputs → NDI).
                     {draft.role === "alternate" ? " A change of the lower-third choice applies when the NDI output is next started (Apply)." : ""}
@@ -261,6 +325,117 @@ export function OutputOptions({ views, mainLive }: { views: (role: string) => Ou
           </fieldset>
         )}
 
+        {tab === "geometry" && (
+          <>
+            <fieldset className="oo-set">
+              <legend>Alignment</legend>
+              <label className="wp-check">
+                <input type="checkbox" checked={!!draft.grid} onChange={(e) => set({ grid: e.target.checked })} /> Show the alignment grid on this screen (Apply), to line up corners and edges
+              </label>
+            </fieldset>
+            <fieldset className="oo-set">
+              <legend>Corner pin (keystone)</legend>
+              <p className="oo-note">When the projector is not square to the screen: move each corner inward (in % of the width and height) until the picture fits the screen exactly.</p>
+              <div className="oo-pin">
+                {(["Top left", "Top right", "Bottom right", "Bottom left"] as const).map((corner, k) => (
+                  <div key={corner} className="oo-pin__corner">
+                    <strong>{corner}</strong>
+                    {(["across", "down"] as const).map((axis, a) => (
+                      <label key={axis}>
+                        {axis === "across" ? "Across" : "Up/down"}
+                        <input
+                          className="wp-input"
+                          type="number"
+                          step={0.25}
+                          min={-45}
+                          max={45}
+                          value={draft.pin?.[k * 2 + a] ?? 0}
+                          onChange={(e) => {
+                            const p = [...(draft.pin ?? [0, 0, 0, 0, 0, 0, 0, 0])];
+                            p[k * 2 + a] = Number(e.target.value) || 0;
+                            set({ pin: p.every((v) => v === 0) ? null : p });
+                          }}
+                          aria-label={`${corner} ${axis}`}
+                        />
+                      </label>
+                    ))}
+                  </div>
+                ))}
+              </div>
+              <button className="btn-quiet" onClick={() => set({ pin: null })}>
+                Reset the corners
+              </button>
+            </fieldset>
+            <fieldset className="oo-set">
+              <legend>Projector wall (edge blending)</legend>
+              <p className="oo-note">Several projectors making one wide picture: each screen shows its part, and the overlap gets soft edges so the seam disappears.</p>
+              <div className="oo-row oo-quick">
+                <span>Quick set-up</span>
+                {[
+                  ["2 side by side: left", { x: 0, y: 0, w: 55, h: 100 }, { left: 0, right: 18.2, top: 0, bottom: 0, gamma: 2.2 }],
+                  ["2 side by side: right", { x: 45, y: 0, w: 55, h: 100 }, { left: 18.2, right: 0, top: 0, bottom: 0, gamma: 2.2 }],
+                  // three screens of 37.33 % overlapping by 6 % of the picture = 16.1 % of each
+                  ["3 side by side: left", { x: 0, y: 0, w: 37.33, h: 100 }, { left: 0, right: 16.1, top: 0, bottom: 0, gamma: 2.2 }],
+                  ["3: middle", { x: 31.33, y: 0, w: 37.33, h: 100 }, { left: 16.1, right: 16.1, top: 0, bottom: 0, gamma: 2.2 }],
+                  ["3: right", { x: 62.67, y: 0, w: 37.33, h: 100 }, { left: 16.1, right: 0, top: 0, bottom: 0, gamma: 2.2 }],
+                  ["Whole picture", null, null],
+                ].map(([label, region, blend]) => (
+                  <button key={label as string} className="btn-quiet" onClick={() => set({ region: region as OutputConfig["region"], blend: blend as OutputConfig["blend"] })}>
+                    {label as string}
+                  </button>
+                ))}
+              </div>
+              <div className="oo-grid4">
+                {(["x", "y", "w", "h"] as const).map((k) => (
+                  <label key={k}>
+                    {{ x: "From the left", y: "From the top", w: "Width", h: "Height" }[k]} (%)
+                    <input
+                      className="wp-input"
+                      type="number"
+                      step={0.5}
+                      min={0}
+                      max={100}
+                      value={draft.region?.[k] ?? (k === "w" || k === "h" ? 100 : 0)}
+                      onChange={(e) => set({ region: { ...(draft.region ?? { x: 0, y: 0, w: 100, h: 100 }), [k]: Number(e.target.value) || 0 } })}
+                      aria-label={`Region ${k}`}
+                    />
+                  </label>
+                ))}
+              </div>
+              <div className="oo-grid4">
+                {(["left", "right", "top", "bottom"] as const).map((k) => (
+                  <label key={k}>
+                    Soft edge {k} (%)
+                    <input
+                      className="wp-input"
+                      type="number"
+                      step={0.5}
+                      min={0}
+                      max={50}
+                      value={draft.blend?.[k] ?? 0}
+                      onChange={(e) => set({ blend: { ...(draft.blend ?? { left: 0, right: 0, top: 0, bottom: 0, gamma: 2.2 }), [k]: Number(e.target.value) || 0 } })}
+                      aria-label={`Blend ${k}`}
+                    />
+                  </label>
+                ))}
+                <label>
+                  Gamma (usually 2.2)
+                  <input
+                    className="wp-input"
+                    type="number"
+                    step={0.1}
+                    min={1}
+                    max={3}
+                    value={draft.blend?.gamma ?? 2.2}
+                    onChange={(e) => set({ blend: { ...(draft.blend ?? { left: 0, right: 0, top: 0, bottom: 0, gamma: 2.2 }), gamma: Number(e.target.value) || 2.2 } })}
+                    aria-label="Blend gamma"
+                  />
+                </label>
+              </div>
+              <p className="oo-note">The soft edge is in % of this screen: two projectors each showing 55 % overlap by 10 % of the picture, which is 18.2 % of each screen.</p>
+            </fieldset>
+          </>
+        )}
         {tab === "modes" && (
           <fieldset className="oo-set">
             <legend>When the operator presses</legend>

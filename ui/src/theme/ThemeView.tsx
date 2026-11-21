@@ -1,4 +1,5 @@
 import { renderRich, stripRich } from "../rich";
+import { Crossfade, useMediaFadeMs } from "../fade";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { resolveBrand, useBrand } from "./brand";
 import { useMediaUrl } from "./media";
@@ -330,6 +331,7 @@ export function ThemeView({
   editor?: EditorHooks;
   children?: ReactNode;
 }) {
+  const xfMs = useMediaFadeMs();
   // brand references ("brand:2", font "brand") become the church's colours and fonts
   const brand = useBrand();
   const theme = useMemo(() => resolveBrand(themeIn, brand), [themeIn, brand]);
@@ -364,14 +366,18 @@ export function ThemeView({
           : { background: bg.kind === "color" ? bg.color : bg.kind === "transparent" ? "transparent" : bg.kind === "gradient" && bg.gradient ? gradientCss(bg.gradient) : "#000" }
       }
     >
-      {bg.kind === "image" && bg.image && <img className="tv__bg" src={url(bg.image)} alt="" style={bgLook} />}
-      {bg.kind === "video" && vid?.video && (still ? (
-        vid.poster ? <img className="tv__bg" src={url(vid.poster)} alt="" style={bgLook} /> : null
-      ) : (
-        // muted, looping, never restarted by slide changes (the element stays mounted;
-        // a new item may pick another video from the set)
-        <BgVideo key={vid.video} src={url(vid.video)} poster={vid.poster ? url(vid.poster) : undefined} style={bgLook} volume={data.sound ? bg.volume ?? 0 : 0} />
-      ))}
+      {/* the background crossfades when it changes (a new song's video); the outgoing
+          video keeps playing while it fades */}
+      <Crossfade k={bg.kind === "image" ? `i${bg.image}` : bg.kind === "video" ? `v${vid?.video}` : "none"} ms={still || editor ? 0 : xfMs} className="tv__bgfade">
+        {bg.kind === "image" && bg.image && <img className="tv__bg" src={url(bg.image)} alt="" style={bgLook} />}
+        {bg.kind === "video" && vid?.video && (still ? (
+          vid.poster ? <img className="tv__bg" src={url(vid.poster)} alt="" style={bgLook} /> : null
+        ) : (
+          // muted, looping, never restarted by slide changes (the element stays mounted;
+          // a new item may pick another video from the set)
+          <BgVideo key={vid.video} src={url(vid.video)} poster={vid.poster ? url(vid.poster) : undefined} style={bgLook} volume={data.sound ? bg.volume ?? 0 : 0} />
+        ))}
+      </Crossfade>
       {(bg.kind === "image" || bg.kind === "video") && bg.dim > 0 && <div className="tv__dim" style={{ opacity: bg.dim }} />}
       {theme.layers.map((l0) => {
         if (l0.hidden) return null;

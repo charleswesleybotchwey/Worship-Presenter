@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { ArrangementEditor } from "./features/editors/ArrangementEditor";
+import { sectionsOf } from "./groups";
 import { capitaliseLines, dropBlankLines, tidySpaces, trimLineEnds } from "./songTidy";
 import { api, type Slide, type SongDoc } from "./api";
 import { SlideView } from "./SlideView";
@@ -223,8 +225,8 @@ export function SongEditor({
         </div>
         <div className="editor__body">
           <div className="editor__form">
-            <div className="fields">
-              <label className="field field--wide">
+            <div className="fields fields--meta">
+              <label className="field field--wide field--title">
                 <span>Title</span>
                 <input value={doc.title} spellCheck lang="en" onChange={(e) => update({ title: e.target.value })} autoFocus={doc.id == null} />
               </label>
@@ -269,7 +271,7 @@ export function SongEditor({
                     setTab(doc.lyrics.length);
                   }}
                 >
-                  <option value="">+ Second language</option>
+                  <option value="">Add a language…</option>
                   {unused.map((l) => (
                     <option key={l.code} value={l.code}>
                       {l.name}
@@ -368,6 +370,9 @@ export function SongEditor({
                 <span>Play order</span>
                 <input value={doc.sequence} placeholder="As written. Or e.g. V1 C V2 C" onChange={(e) => update({ sequence: e.target.value })} />
               </label>
+              <div className="field field--wide">
+                <ArrangementEditor sections={sectionsOf(doc.lyrics[0]?.body ?? "")} order={doc.sequence} onChange={(sequence) => update({ sequence })} />
+              </div>
               <label className="field">
                 <span>Lines per slide</span>
                 <select value={doc.lines_per_slide ?? ""} onChange={(e) => update({ lines_per_slide: e.target.value ? Number(e.target.value) : null })}>
@@ -465,7 +470,7 @@ export function SongEditor({
               </button>
             </>
           )}
-          <button className="btn" onClick={save} disabled={saving || !!problem || !doc.title.trim()} title="Save for every service. Never changes what is on the screens.">
+          <button className="wp-btn wp-btn--primary se-save" onClick={save} disabled={saving || !!problem || !doc.title.trim()} title="Save for every service. Never changes what is on the screens.">
             {saving ? "Saving…" : "Save to library"} <kbd>Ctrl+S</kbd>
           </button>
         </div>

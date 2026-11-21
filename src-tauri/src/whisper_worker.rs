@@ -81,6 +81,12 @@ pub fn worker_main(model: &str, prompt: &str) -> ! {
         params.set_n_threads(threads);
         params.set_no_context(true);
         params.set_single_segment(true);
+        // speed: analyse only the audio there is (not a padded 30 s), no timestamps, and
+        // no re-decoding at higher temperatures when unsure (one careful pass)
+        params.set_audio_ctx(audio_ctx_for(audio.len()));
+        params.set_no_timestamps(true);
+        params.set_temperature_inc(0.0);
+        params.set_max_tokens(96);
         params.set_suppress_blank(true);
         params.set_print_special(false);
         params.set_print_progress(false);
@@ -197,5 +203,22 @@ mod tests {
         assert_eq!(back, audio);
         let huge = (16_000u32 * 120).to_le_bytes();
         assert!(super::decode(&mut std::io::Cursor::new(huge.to_vec())).is_err(), "a damaged length is refused");
+    }
+}
+
+/// Whisper's encoder covers 30 s in 1500 steps; a short piece needs only its own length
+/// (plus a margin): several times faster on a computer's processor.
+pub(crate) fn audio_ctx_for(samples: usize) -> i32 {
+    let secs = samples as f32 / 16_000.0;
+    ((secs * 50.0).ceil() as i32 + 64).clamp(256, 1500)
+}
+
+#[cfg(test)]
+mod audio_ctx_tests {
+    #[test]
+    fn audio_context_fits_the_audio() {
+        assert_eq!(super::audio_ctx_for(16_000 * 4), 264, "4 s of speech: 264 steps, not 1500");
+        assert_eq!(super::audio_ctx_for(16_000), 256, "never below 256");
+        assert_eq!(super::audio_ctx_for(16_000 * 40), 1500, "never above Whisper's 30 s");
     }
 }

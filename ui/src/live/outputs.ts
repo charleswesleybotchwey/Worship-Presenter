@@ -15,6 +15,9 @@ export interface OutputView {
   confirmedAt: number | null;
 }
 
+/** The first three screens' looks before screens had looks. */
+export const defaultLook = (role: string) => (role === "alternate" || role === "ndi" ? "lower" : role === "foldback" ? "stage" : "full");
+
 export const ROLE_NAMES: Record<string, string> = { main: "Main", alternate: "Lower third", foldback: "Stage" };
 
 export function useLive() {

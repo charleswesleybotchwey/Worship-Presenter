@@ -36,6 +36,10 @@ export interface LiveState {
   slide_since_ms: number;
   repeat: { label: string; total: number; done: number } | null;
   lining_out: boolean;
+  /** the media layer off (backgrounds, pictures and video hidden; the words stay) */
+  media_off?: boolean;
+  /** the props showing (ids) */
+  props?: number[];
   subtitles?: "stream" | "screens" | "both" | null;
   transpose?: number;
   text_scale?: number;
@@ -325,7 +329,44 @@ export interface FontFamily {
   styles: number;
 }
 
+/** A macro (as ProPresenter): one button that runs several actions in order. */
+export interface MacroAction {
+  kind: string;
+  value?: unknown;
+}
+export interface Macro {
+  id: number | null;
+  name: string;
+  color: string;
+  actions: MacroAction[];
+}
+
+/** A prop (as ProPresenter): a graphic shown independently of the slides. */
+export interface Prop {
+  id: number | null;
+  name: string;
+  kind: "image" | "text" | "clock";
+  text: string;
+  media_id: number | null;
+  position: "top-left" | "top-right" | "bottom-left" | "bottom-right" | "top" | "bottom" | "centre";
+  size: number;
+  opacity: number;
+  color: string;
+  background: string;
+  on: "all" | "screens" | "stream";
+}
+
 export interface OutputConfig {
+  /** full | lower | stage | words | media (as ProPresenter's looks) */
+  look?: string;
+  /** a stage screen's own layout (JSON); null: the shared one */
+  stage_layout?: string | null;
+  /** corner pin: [tl x, y, tr x, y, br x, y, bl x, y] in %, positive inward */
+  pin?: number[] | null;
+  /** edge blending: this screen's part of the whole picture, and its soft edges */
+  region?: { x: number; y: number; w: number; h: number } | null;
+  blend?: { left: number; right: number; top: number; bottom: number; gamma: number } | null;
+  grid?: boolean;
   role: string;
   name: string;
   display_index: number | null;
@@ -489,6 +530,8 @@ export const api = {
   displays: () => call<Display[]>("list_displays"),
   openOutput: (role: string, displayIndex: number | null) => call<void>("open_output", { role, displayIndex }),
   closeOutput: (role: string) => call<void>("close_output", { role }),
+  outputAdd: (name: string, look: string) => call<string>("output_add", { name, look }),
+  outputRemove: (role: string) => call<void>("output_remove", { role }),
   screensPower: (on: boolean) => call<boolean>("screens_power", { on }),
   dashboard: () => call<{ tiles: { role: string; name: string; kind: string; state: string; detail: string }[]; screens_off: boolean }>("dashboard"),
   systemCheck: () => call<{ id: string; label: string; status: "ok" | "warn" | "bad"; detail: string; fix: string | null }[]>("system_check"),
@@ -552,6 +595,7 @@ export const api = {
   onlineOpen: (url: string) => call<void>("online_open", { url }),
   streamKeySet: (kind: string, value: string) => call<void>("stream_key_set", { kind, value }),
   streamKeysSaved: () => call<Record<string, boolean>>("stream_keys_saved"),
+  updatesOn: () => call<boolean>("updates_on"),
   updateCheck: () => call<{ version: string; notes: string | null } | null>("update_check"),
   updateInstall: () => call<void>("update_install"),
   logError: (window: string, text: string) => call<void>("log_error", { window, text }),
@@ -605,6 +649,20 @@ export const api = {
   previewAnnouncement: (id: number) => call<Slide[]>("preview_announcement", { id }),
   setAutoPaused: (paused: boolean) => call<LiveState>("set_auto_paused", { paused }),
   setRepeat: (label: string | null, total: number, done: number | null = null) => call<LiveState>("set_repeat", { label, total, done }),
+  setMediaOff: (off: boolean) => call<LiveState>("set_media_off", { off }),
+  setProps: (props: number[]) => call<LiveState>("set_props", { props }),
+  clearAll: () => call<LiveState>("clear_all"),
+  timelineGet: (kind: string, id: number) => call<{ item_kind: string; item_id: number; media_id: number; cues: [number, number][] } | null>("timeline_get", { kind, id }),
+  timelineSave: (timeline: { item_kind: string; item_id: number; media_id: number; cues: [number, number][] }) => call<void>("timeline_save", { timeline }),
+  timelineDelete: (kind: string, id: number) => call<void>("timeline_delete", { kind, id }),
+  macrosList: () => call<Macro[]>("macros_list"),
+  macroSave: (m: Macro) => call<number>("macro_save", { m }),
+  macroDelete: (id: number) => call<void>("macro_delete", { id }),
+  slideActions: (kind: string, id: number) => call<[string, number][]>("slide_actions", { kind, id }),
+  slideActionSet: (kind: string, id: number, key: string, macroId: number | null) => call<void>("slide_action_set", { kind, id, key, macroId }),
+  propsList: () => call<Prop[]>("props_list"),
+  propSave: (prop: Prop) => call<number>("prop_save", { prop }),
+  propDelete: (id: number) => call<void>("prop_delete", { id }),
   setLiningOut: (on: boolean) => call<LiveState>("set_lining_out", { on }),
   listFonts: () => call<FontFamily[]>("list_fonts"),
   foreignThemeReview: (path: string) => call<ForeignDesign[]>("foreign_theme_review", { path }),
@@ -773,6 +831,28 @@ export async function pickBackup(): Promise<string | null> {
   const { open } = await import("@tauri-apps/plugin-dialog");
   const r = await open({ title: "Choose a Worship Presenter backup", filters: [{ name: "Library backup", extensions: ["db"] }] });
   return typeof r === "string" ? r : null;
+}
+
+/** Macros were added, changed or removed. */
+export async function onMacrosChanged(cb: () => void): Promise<() => void> {
+  if (!inTauri) {
+    const ch = new BroadcastChannel("wp-live");
+    ch.onmessage = (e) => e.data.type === "macros" && cb();
+    return () => ch.close();
+  }
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen("macros-changed", () => cb());
+}
+
+/** Props were added, changed or removed. */
+export async function onPropsChanged(cb: () => void): Promise<() => void> {
+  if (!inTauri) {
+    const ch = new BroadcastChannel("wp-live");
+    ch.onmessage = (e) => e.data.type === "props" && cb();
+    return () => ch.close();
+  }
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen("props-changed", () => cb());
 }
 
 export async function onOutputConfigChanged(cb: (role: string) => void): Promise<() => void> {

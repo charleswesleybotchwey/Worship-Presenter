@@ -1,6 +1,7 @@
 import type { MediaItem, Slide } from "./api";
 import { sectionName } from "./features/service/SlideList";
 import { MediaView } from "./MediaView";
+import { Crossfade, useMediaFadeMs } from "./fade";
 import { useTheme } from "./theme/store";
 import { ThemeView, type Phase } from "./theme/ThemeView";
 import { useMediaUrl } from "./theme/media";
@@ -20,6 +21,8 @@ function PictureSlide({ path }: { path: string }) {
 export interface SlideLook {
   /** Lower-third theme (alternate output) instead of the full-screen one. */
   lowerThird?: boolean;
+  /** Words only (a screen's look): black, no backgrounds, pictures or video. */
+  wordsOnly?: boolean;
 }
 
 const BLACK = { kind: "color" as const, color: "#000000", image: null, fit: "cover" as const, dim: 0 };
@@ -77,10 +80,12 @@ export function SlideView({
   /** Alpha channel: the theme's background is left out so the output is see-through. */
   alpha?: boolean;
 }) {
+  const fade = useMediaFadeMs();
   const base = useTheme(look?.lowerThird ? "lower_third" : kind === "scripture" ? "scripture" : kind === "announcement" ? "announcement" : "song", themeId);
-  const theme = alpha ? { ...base, background: CLEAR } : base;
+  const plain = look?.wordsOnly ? { ...base, background: BLACK, layers: base.layers.filter((l) => l.kind !== "image") } : base;
+  const theme = alpha ? { ...plain, background: CLEAR } : plain;
 
-  if (blank || !slide) {
+  if (blank || !slide || (look?.wordsOnly && (kind === "media" || slide.image))) {
     // Blank: black on screens, see-through on keyed outputs. No background video.
     return <ThemeView theme={{ ...theme, background: look?.lowerThird || alpha ? CLEAR : BLACK, layers: [] }} data={{ primary: [], second: [] }} />;
   }
@@ -93,7 +98,11 @@ export function SlideView({
   if (kind === "media") {
     // Pictures and videos are for the screens, not the lower third.
     if (look?.lowerThird || !media) return <ThemeView theme={{ ...theme, background: CLEAR, layers: [] }} data={{ primary: [], second: [] }} />;
-    return <MediaView item={media} playing={playing} restart={restart} muted={muted} still={still} />;
+    return (
+      <Crossfade k={`m${media.id}`} ms={still ? 0 : fade}>
+        <MediaView item={media} playing={playing} restart={restart} muted={muted} still={still} />
+      </Crossfade>
+    );
   }
   const data = { sound, allPrimary: allSlides?.map((x) => x.primary), allSecond: allSlides?.map((x) => x.second), primary: slide.primary, second: slide.second, reference: kind === "scripture" ? (slide.reference != null ? slide.reference || null : caption) : null, title: kind === "song" ? caption : null, section: kind === "song" ? sectionName(slide.label) : null, first: position?.first, last: position?.last, textScale: adjust?.scale, textShift: adjust?.shift, rotateKey: caption ?? slide.label, copyright: kind === "song" ? copyright ?? null : null };
   return <ThemeView theme={theme} data={data} phase={phase} showKey={showKey} textKey={textKey} hideText={hideText} still={still} />;

@@ -1,5 +1,13 @@
 // One line-icon set: 16px grid, 1.5px stroke, round joins. Drawn for this app.
 const PATHS: Record<string, string> = {
+  globe: "M8 1.5a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13M1.5 8h13M8 1.5c1.9 1.9 2.7 4.2 2.7 6.5S9.9 12.6 8 14.5M8 1.5C6.1 3.4 5.3 5.7 5.3 8S6.1 12.6 8 14.5",
+  heading: "M2.5 4h11M2.5 8h7M2.5 12h11",
+  layers: "M8 2l6 3.2-6 3.2-6-3.2zM2 8.4l6 3.2 6-3.2M2 11.4l6 3.2 6-3.2",
+  badge: "M2.5 3.5h11v7h-11zM5.5 13.5h5M8 10.5v3",
+  bolt: "M9 1.5L3.5 9H8l-1 5.5L12.5 7H8z",
+  take: "M2.5 8h10M8.5 4l4 4-4 4",
+  clearall: "M3 3l10 10M13 3L3 13M8 1.5v2M8 12.5v2",
+
   search: "M7 12.5a5.5 5.5 0 1 0 0-11 5.5 5.5 0 0 0 0 11ZM11 11l3.5 3.5",
   plus: "M8 3v10M3 8h10",
   close: "M4 4l8 8M12 4l-8 8",

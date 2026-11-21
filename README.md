@@ -87,6 +87,14 @@ interface rather than a laptop microphone.
 The app checks for a new version once a day and offers **Install and restart**. It never
 installs while something is live. You can also use **Settings → About → Check for updates**.
 
+## Live tools (as ProPresenter)
+
+Beside Blank / Logo / Clear: **Media** (hide backgrounds and video, keep the words),
+**Props** (a logo, a LIVE badge, the sermon title, a clock, on screens or stream),
+**Macros** (one button for several actions; Stream Deck: `/api/v1/macro/N`) and **Clear
+all**. Songs have coloured groups, group buttons on Live and a drag-and-drop arrangement
+editor; right-click a slide in Preview to make it run a macro when it goes live.
+
 ## Before the service
 
 The dots beside Blank / Logo / Clear show every output at a glance (green live, blue

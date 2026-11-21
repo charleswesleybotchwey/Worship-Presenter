@@ -1,4 +1,5 @@
 import { stripRich } from "../../rich";
+import { groupColor } from "../../groups";
 import { useEffect, useRef } from "react";
 import type { Slide } from "../../api";
 import { Icon } from "../../Icon";
@@ -22,7 +23,13 @@ export function SlideList({
   live,
   confirmed = true,
   empty,
+  marked,
+  onMenu,
 }: {
+  /** slides with a slide action (⚡) */
+  marked?: (i: number) => boolean;
+  /** right-click on a slide */
+  onMenu?: (i: number, x: number, y: number) => void;
   slides: Slide[];
   current: number;
   onPick: (i: number) => void;
@@ -47,7 +54,7 @@ export function SlideList({
       {groups.map((g) => {
         const on = g.items.some((x) => x.i === current);
         return (
-          <section key={g.head} className={`sl-group ${on ? "is-current" : ""}`}>
+          <section key={g.head} className={`sl-group ${on ? "is-current" : ""}`} style={{ "--grp": groupColor(g.items[0].s.label) } as React.CSSProperties}>
             <div className="sl-head">{sectionName(g.items[0].s.label)}</div>
             {g.items.map(({ s, i }) => (
               <div
@@ -57,9 +64,17 @@ export function SlideList({
                 className={`sl-slide ${i === current ? "is-current" : ""}`}
                 onClick={() => onPick(i)}
                 onDoubleClick={onActivate ? () => onActivate(i) : undefined}
+                onContextMenu={onMenu ? (e) => (e.preventDefault(), onMenu(i, e.clientX, e.clientY)) : undefined}
                 title={live ? "Show this slide on the screens" : onActivate ? "Click to stage, double-click to go live" : undefined}
               >
-                <span className="sl-num wp-num">{i + 1}</span>
+                <span className="sl-num wp-num">
+                  {i + 1}
+                  {marked?.(i) && (
+                    <span className="sl-action" title="This slide runs a macro when it goes live">
+                      ⚡
+                    </span>
+                  )}
+                </span>
                 <span className="sl-text">
                   {s.image ? <em>Picture</em> : s.primary.map((l, k) => <span key={k}>{stripRich(l)}</span>)}
                   {s.second.map((l, k) => (

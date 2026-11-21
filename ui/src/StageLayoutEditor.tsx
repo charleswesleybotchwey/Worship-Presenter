@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { api } from "./api";
+import { api, type OutputConfig } from "./api";
+import { defaultLook } from "./live/outputs";
 import { STAGE_PARTS, STAGE_PRESETS, StageView, type StageBox, type StageLayout, type StagePart } from "./StageView";
 
 // Settings → Stage display: the standard stage screen, or a custom one made of boxes
@@ -12,20 +13,33 @@ export function StageLayoutEditor() {
   const [saved, setSaved] = useState<string>("");
   const [sel, setSel] = useState<number | null>(null);
   const area = useRef<HTMLDivElement>(null);
+  // which layout: every stage screen's shared one, or one stage screen's own
+  const [forScreen, setForScreen] = useState<string>("");
+  const [stageScreens, setStageScreens] = useState<OutputConfig[]>([]);
   useEffect(() => {
+    api.outputConfigs().then((all) => setStageScreens(all.filter((o) => (o.look ?? defaultLook(o.role)) === "stage"))).catch(() => {});
+  }, []);
+  const show = (raw: string | null | undefined) => {
+    setSaved(raw ?? "");
+    setSel(null);
+    try {
+      const v = raw ? (JSON.parse(raw) as StageLayout) : null;
+      setDraft(v?.boxes?.length ? v : null);
+    } catch {
+      setDraft(null);
+    }
+  };
+  useEffect(() => {
+    if (forScreen) {
+      show(stageScreens.find((o) => o.role === forScreen)?.stage_layout);
+      return;
+    }
     api
       .getSettings()
-      .then((x) => {
-        setSaved(x.stage_layout ?? "");
-        try {
-          const v = x.stage_layout ? (JSON.parse(x.stage_layout) as StageLayout) : null;
-          setDraft(v?.boxes?.length ? v : null);
-        } catch {
-          setDraft(null);
-        }
-      })
+      .then((x) => show(x.stage_layout))
       .catch(() => {});
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [forScreen]);
   const custom = draft != null;
   const set = (i: number, p: Partial<StageBox>) => setDraft((d) => d && { boxes: d.boxes.map((b, k) => (k === i ? { ...b, ...p } : b)) });
   // drag to move, drag the corner to resize (in % of the preview)
@@ -47,12 +61,37 @@ export function StageLayoutEditor() {
     window.addEventListener("pointerup", up);
   };
   const json = draft ? JSON.stringify(draft) : "";
-  const save = () => void api.setSetting("stage_layout", json).then(() => setSaved(json));
+  const save = async () => {
+    if (!forScreen) await api.setSetting("stage_layout", json);
+    else {
+      // this screen's own layout (empty: it follows the shared one again)
+      const o = stageScreens.find((x) => x.role === forScreen);
+      if (!o) return;
+      const next = { ...o, stage_layout: json || null };
+      await api.saveOutputConfig(next);
+      setStageScreens((all) => all.map((x) => (x.role === forScreen ? next : x)));
+    }
+    setSaved(json);
+  };
   const b = sel != null ? draft?.boxes[sel] : undefined;
   return (
     <section className="sle">
       <h2>Stage display</h2>
       <p className="wp-note">What the pulpit and the band see on the stage (foldback) screen. Changes show on stage screens as soon as you save.</p>
+      {stageScreens.length > 0 && (
+        <label className="sle__for">
+          Layout for
+          <select className="wp-input" value={forScreen} onChange={(e) => setForScreen(e.target.value)} aria-label="Layout for">
+            <option value="">Every stage screen (shared)</option>
+            {stageScreens.map((o) => (
+              <option key={o.role} value={o.role}>
+                {o.name} only
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+      {forScreen && <p className="wp-note">This screen's own layout. Choose “Standard” and save to make it follow the shared layout again.</p>}
       <div className="sle__mode">
         <label className="wp-check">
           <input type="radio" checked={!custom} onChange={() => (setDraft(null), setSel(null))} /> Standard
@@ -144,7 +183,7 @@ export function StageLayoutEditor() {
         )}
       </div>
       <div className="ps__foot">
-        <button className="wp-btn wp-btn--primary" disabled={json === saved} onClick={save}>
+        <button className="wp-btn wp-btn--primary" disabled={json === saved} onClick={() => void save()}>
           {json === saved ? "Saved" : "Save"}
         </button>
       </div>
