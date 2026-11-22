@@ -855,7 +855,6 @@ input, textarea, select, [contenteditable="true"], .trp__lines, .selectable { us
 .lib-pane[hidden] { display: none !important; }
 
 /* what is on the screens and in Preview, in the library (as EasyWorship marks them) */
-.lt-row { position: relative; }
 .lt-row.is-on-air { background: var(--wp-onair-soft); box-shadow: inset 3px 0 0 var(--wp-onair); }
 .lt-row.is-in-preview { background: var(--wp-ready-soft); box-shadow: inset 3px 0 0 var(--wp-ready); }
 .lt-row[data-state]::after { content: attr(data-state); position: absolute; right: 10px; top: 50%; transform: translateY(-50%); padding: 1px 6px; border-radius: 3px; font-size: 11px; font-weight: 600; color: #fff; pointer-events: none; }
@@ -874,3 +873,10 @@ input, textarea, select, [contenteditable="true"], .trp__lines, .selectable { us
 .tool-chip { display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; border-radius: 999px; border: 0; font: 500 12px var(--wp-font); background: var(--wp-ready-soft); color: var(--wp-ink); white-space: nowrap; cursor: default; }
 button.tool-chip { cursor: pointer; }
 .wp-search--quick { min-width: 200px; flex: 0 1 300px; }
+/* the song's languages in the Live header: always in sight; amber when not both */
+.lang-switch { display: inline-flex; border-radius: 5px; overflow: hidden; box-shadow: inset 0 0 0 1px var(--wp-line); margin-right: 8px; }
+.lang-switch button { border: 0; background: transparent; color: var(--wp-muted); font: 500 12px var(--wp-font); padding: 3px 9px; cursor: pointer; }
+.lang-switch button:hover { color: var(--wp-ink); }
+.lang-switch button.is-on { background: var(--wp-selected); color: var(--wp-ink); }
+.lang-switch.is-limited { box-shadow: inset 0 0 0 1px var(--wp-attention); }
+.lang-switch.is-limited button.is-on { background: var(--wp-attention); color: #1d1c1a; }

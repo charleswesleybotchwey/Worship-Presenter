@@ -1275,6 +1275,20 @@ export function Control() {
         <span className="wp-pane__sub" title={liveTitle}>
           {liveTitle}
         </span>
+        {/* the song's languages, always in sight (amber when not both) */}
+        {live?.item?.kind === "song" && !rehearsal && (
+          <div className={`lang-switch ${(state?.lang_mode ?? "both") !== "both" ? "is-limited" : ""}`} role="group" aria-label="Languages on the screens">
+            {([
+              ["primary", LANG_NAMES.en],
+              ["both", "Both"],
+              ["second", LANG_NAMES.fat],
+            ] as const).map(([m, l]) => (
+              <button key={m} className={(state?.lang_mode ?? "both") === m ? "is-on" : ""} aria-pressed={(state?.lang_mode ?? "both") === m} onClick={() => void run(api.setLayout(undefined, m as LangMode))}>
+                {l}
+              </button>
+            ))}
+          </div>
+        )}
         <ViewToggle value={liveView} onChange={setLiveView} />
       </header>
       {heardChip}
@@ -1460,16 +1474,7 @@ export function Control() {
             </select>
           </label>
         )}
-        {live?.item?.kind === "song" && (
-          <label className="wp-inline-select">
-            <span>Language</span>
-            <select value={state?.lang_mode ?? "both"} onChange={(e) => void run(api.setLayout(undefined, e.target.value as LangMode))}>
-              <option value="primary">{LANG_NAMES.en}</option>
-              <option value="both">Both</option>
-              <option value="second">{LANG_NAMES.fat}</option>
-            </select>
-          </label>
-        )}
+
       </div>
       {!rehearsal && state?.auto && live?.item?.kind === "announcement" && <AutoBar state={state} onPause={(p) => void run(api.setAutoPaused(p))} />}
       {!rehearsal && live?.item?.kind === "song" && <RepeatBar state={state} slides={liveSlides} onSet={(label, total, done) => void run(api.setRepeat(label, total, done))} />}

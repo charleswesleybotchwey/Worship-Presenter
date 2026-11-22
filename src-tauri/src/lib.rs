@@ -427,6 +427,12 @@ fn go_live(app: AppHandle, st: State<'_, AppState>, item: ProgramItem, slide_idx
     // from Blank, Logo, Clear or a restart, Go live shows the new item (as EasyWorship does)
     let live0 = st.live.lock().unwrap().clone();
     let (slides, caption) = build_slides(&st.db.lock().unwrap(), &item, &live0)?;
+    // a song's languages, in the log: where a second language goes missing is then plain
+    if let ProgramItem::Song { song_id, title, .. } = &item {
+        let langs = library::song_langs(&st.db.lock().unwrap(), *song_id).unwrap_or_default();
+        let with_second = slides.iter().filter(|s| !s.second.is_empty()).count();
+        applog::write("LIVE", &format!("song \"{title}\": languages {:?}, showing {:?}, second-language lines on {with_second} of {} slides", langs, live0.lang_mode, slides.len()));
+    }
     let idx = slide_idx.min(slides.len().saturating_sub(1));
     let pos = slides.get(idx).map(splitter::position_of);
     let mut next = live0.apply(Command::GoLive { item_idx: 0, slide_idx: idx, position: pos });
@@ -3778,5 +3784,37 @@ mod song_option_tests {
         let s = build_slides(&c, &item, &LiveState::default()).unwrap().0;
         assert_eq!(s[0].label, "Title");
         assert_eq!(s[0].primary, vec!["MHB 422 · Blessed Assurance".to_string(), "Fanny J. Crosby".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod bilingual_order_tests {
+    use super::*;
+
+    #[test]
+    fn two_languages_survive_a_play_order() {
+        let c = wp_core::db::open_memory().unwrap();
+        let doc = wp_core::songs::SongDoc {
+            id: None,
+            title: "MHB 1, ENG&FANTE".into(),
+            author: None,
+            copyright: None,
+            ccli: None,
+            numbers: vec![],
+            lyrics: vec![
+                wp_core::songs::Lyric { lang: "en".into(), body: "[V1]\nO for a thousand tongues\nMy great Redeemer's praise\n\n[V2]\nJesus the name".into() },
+                wp_core::songs::Lyric { lang: "fat".into(), body: "[V1]\nMeenya ngyiramá\nMeyi mo Pomfò\n\n[V2]\nYesu edzin".into() },
+            ],
+            sequence: String::new(),
+            lines_per_slide: None,
+            key: None,
+        };
+        let id = wp_core::songs::save(&c, &doc).unwrap();
+        let item = ProgramItem::Song { song_id: id, title: doc.title.clone(), lyrics: None, theme_id: None };
+        let second = |c: &Connection| build_slides(c, &item, &LiveState::default()).unwrap().0.iter().map(|s| s.second.len()).collect::<Vec<_>>();
+        println!("as written: {:?}", second(&c));
+        c.execute("UPDATE song SET default_sequence = 'V1 V2' WHERE id = ?1", [id]).unwrap();
+        println!("with an order: {:?}", second(&c));
+        assert!(second(&c).iter().all(|n| *n > 0), "the second language is on every slide with an order too");
     }
 }
