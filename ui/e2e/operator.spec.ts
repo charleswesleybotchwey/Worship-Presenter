@@ -22,7 +22,8 @@ test("the Transcript panel opens and listening starts without a crash", async ({
   const errors: string[] = [];
   page.on("pageerror", (e) => errors.push(e.message));
   await page.goto("/#/control");
-  await page.locator("button[title^='The live transcript']").click();
+  await page.locator("button", { hasText: "Tools" }).click();
+  await page.locator(".tools-menu__pop button[title^='The live transcript']").click();
   await page.locator(".trp button", { hasText: "Start transcribing" }).click();
   await expect(page.locator(".trp__line").first()).toBeVisible();
   expect(errors).toEqual([]);
@@ -92,7 +93,7 @@ test("several media items and search results go to the schedule together", async
   await page.locator("[data-menu-depth='0'] button", { hasText: "Add 2 items" }).click();
   await expect(page.locator(".wp-pane--schedule li")).toHaveCount(2);
   await page.locator(".lib-tabs").getByText("Scriptures").click();
-  await page.locator(".lt-tree input").fill("God");
+  await page.locator(".lib-pane:not([hidden]) .lt-tree input").fill("God");
   const hits = page.locator(".lt-body .lt-row--verses");
   await expect(hits).toHaveCount(2);
   await hits.nth(0).click();
@@ -272,4 +273,22 @@ test("the theme editor's property rows stay in place (no stray styles)", async (
   await expect(rows.first()).toBeVisible();
   const positions = await rows.evaluateAll((els) => els.slice(0, 8).map((e) => getComputedStyle(e).position));
   expect(positions.every((p) => p !== "absolute")).toBe(true);
+});
+
+test("the library keeps its place, marks what is live, and the window never scrolls", async ({ page }) => {
+  await page.goto("/#/control");
+  const vis = ".lib-pane:not([hidden]) ";
+  await page.locator(".lt-row--songs", { hasText: "Blessed Assurance" }).click();
+  await page.locator(".wp-btn--primary", { hasText: "Go live" }).click();
+  await page.locator(".lt-row--songs", { hasText: "MHB 50" }).click();
+  await expect(page.locator(".lt-row--songs.is-on-air")).toContainText("Blessed Assurance");
+  await expect(page.locator(".lt-row--songs.is-in-preview")).toContainText("MHB 50");
+  await page.locator(".lib-tabs").getByText("Scriptures").click();
+  await page.locator(vis + ".lt-node", { hasText: "TK" }).click();
+  await page.locator(".lib-tabs").getByText("Songs").click();
+  await expect(page.locator(vis + ".lt-row--songs.is-selected")).toContainText("MHB 50"); // still where it was
+  await page.locator(".lib-tabs").getByText("Scriptures").click();
+  await expect(page.locator(vis + ".lt-node.is-selected").first()).toContainText("TK"); // the same Bible
+  await page.mouse.wheel(0, 3000);
+  expect(await page.evaluate(() => document.scrollingElement!.scrollTop)).toBe(0);
 });

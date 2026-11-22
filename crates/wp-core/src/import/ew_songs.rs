@@ -311,24 +311,7 @@ pub fn import(conn: &Connection, songs_db: &Path, words_db: &Path, collection_na
 pub fn import_filtered(conn: &Connection, songs_db: &Path, words_db: &Path, collection_name: &str, skip: Option<&std::collections::HashSet<String>>) -> Result<Report> {
     let s = Connection::open_with_flags(songs_db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     s.create_collation("UTF8_U_CI", |a: &str, b: &str| a.to_lowercase().cmp(&b.to_lowercase()))?;
-    let w = Connection::open_with_flags(words_db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let mut words: HashMap<i64, String> = HashMap::new();
-    {
-        let mut q = w.prepare("SELECT song_id, words FROM word")?;
-        let rows = q.query_map([], |r| {
-            let v: rusqlite::types::Value = r.get(1)?;
-            let text = match v {
-                rusqlite::types::Value::Text(t) => t,
-                rusqlite::types::Value::Blob(b) => String::from_utf8_lossy(&b).into_owned(),
-                _ => String::new(),
-            };
-            Ok((r.get::<_, i64>(0)?, text))
-        })?;
-        for r in rows {
-            let (id, t) = r?;
-            words.insert(id, t);
-        }
-    }
+    let words = read_words(words_db)?;
 
     let tx = conn.unchecked_transaction()?;
     let cid = create_collection(&tx, &Collection {
@@ -367,23 +350,10 @@ pub fn import_filtered(conn: &Connection, songs_db: &Path, words_db: &Path, coll
             rep.skipped += 1;
             continue;
         };
-        let mut slides = parse_rtf(rtf);
-        let mut all_fixes: Vec<crate::text::Fix> = Vec::new();
-        for sl in slides.iter_mut() {
-            for line in sl.lines.iter_mut() {
-                let (t, f) = clean(&line.text);
-                line.text = t;
-                for x in f {
-                    match all_fixes.iter_mut().find(|a| a.from == x.from) {
-                        Some(a) => a.count += x.count,
-                        None => all_fixes.push(x),
-                    }
-                }
-            }
-        }
+        let (slides, all_fixes) = clean_slides(rtf);
         rep.fixed_chars += log_fixes(&tx, cid, &title, &all_fixes)?;
         let tag = tags.clone().unwrap_or_default();
-        let bilingual = tag.to_lowercase().contains("eng&fante") || tag.contains('+');
+        let bilingual = is_bilingual(&tag, &title, &slides);
         let primary = if bilingual { "en" } else { lang_from_tag(&tag) };
         let second = bilingual.then_some("fat");
         let sections = build_sections(&slides, &title, primary, second);
@@ -426,25 +396,7 @@ pub fn import_filtered(conn: &Connection, songs_db: &Path, words_db: &Path, coll
                 }
             }
         }
-        for (si, sec) in sections.iter().enumerate() {
-            tx.execute("INSERT INTO song_section (song_id, label, idx) VALUES (?1, ?2, ?3)", params![song_id, sec.label, si as i64])?;
-            let sec_id = tx.last_insert_rowid();
-            let mut per_lang: HashMap<&str, i64> = HashMap::new();
-            for (lang, text, key) in &sec.segments {
-                let idx = per_lang.entry(lang.as_str()).or_insert(0);
-                tx.execute(
-                    "INSERT INTO song_segment (section_id, lang, idx, text, align_key) VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![sec_id, lang, *idx, text, key],
-                )?;
-                *idx += 1;
-            }
-        }
-        for lang in std::iter::once(primary).chain(second) {
-            let body = lyric_body(&sections, lang);
-            if !body.is_empty() {
-                tx.execute("INSERT INTO song_lyric (song_id, lang, body) VALUES (?1, ?2, ?3)", params![song_id, lang, body])?;
-            }
-        }
+        write_lyrics(&tx, song_id, &sections, primary, second)?;
         crate::songs::reindex(&tx, song_id)?;
         rep.imported += 1;
     }
@@ -453,11 +405,135 @@ pub fn import_filtered(conn: &Connection, songs_db: &Path, words_db: &Path, coll
     Ok(rep)
 }
 
+
+/// The EasyWorship words records (RTF), by song.
+fn read_words(words_db: &Path) -> Result<HashMap<i64, String>> {
+    let w = Connection::open_with_flags(words_db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut words: HashMap<i64, String> = HashMap::new();
+    let mut q = w.prepare("SELECT song_id, words FROM word")?;
+    let rows = q.query_map([], |r| {
+        let v: rusqlite::types::Value = r.get(1)?;
+        let text = match v {
+            rusqlite::types::Value::Text(t) => t,
+            rusqlite::types::Value::Blob(b) => String::from_utf8_lossy(&b).into_owned(),
+            _ => String::new(),
+        };
+        Ok((r.get::<_, i64>(0)?, text))
+    })?;
+    for r in rows {
+        let (id, t) = r?;
+        words.insert(id, t);
+    }
+    Ok(words)
+}
+
+/// The slides of a words record, with legacy characters repaired.
+fn clean_slides(rtf: &str) -> (Vec<RtfSlide>, Vec<crate::text::Fix>) {
+    let mut slides = parse_rtf(rtf);
+    let mut all_fixes: Vec<crate::text::Fix> = Vec::new();
+    for sl in slides.iter_mut() {
+        for line in sl.lines.iter_mut() {
+            let (t, f) = clean(&line.text);
+            line.text = t;
+            for x in f {
+                match all_fixes.iter_mut().find(|a| a.from == x.from) {
+                    Some(a) => a.count += x.count,
+                    None => all_fixes.push(x),
+                }
+            }
+        }
+    }
+    (slides, all_fixes)
+}
+
+/// Two languages: the tag or the title says so ("MHB 1, ENG&FANTE"), or lines are in the
+/// second language's colour (English white, Fante yellow).
+pub fn is_bilingual(tag: &str, title: &str, slides: &[RtfSlide]) -> bool {
+    let says = |t: &str| {
+        let t = t.to_lowercase().replace(' ', "");
+        t.contains("eng&fante") || t.contains("english&fante")
+    };
+    says(tag) || tag.contains('+') || says(title) || slides.iter().flat_map(|s| &s.lines).any(|l| l.color.as_deref().map_or(false, |c| SECOND_LANG_COLOURS.contains(&c)))
+}
+
+/// A song's sections, segments and lyrics, written for each language.
+fn write_lyrics(tx: &Connection, song_id: i64, sections: &[Section], primary: &str, second: Option<&str>) -> Result<()> {
+    for (si, sec) in sections.iter().enumerate() {
+        tx.execute("INSERT INTO song_section (song_id, label, idx) VALUES (?1, ?2, ?3)", params![song_id, sec.label, si as i64])?;
+        let sec_id = tx.last_insert_rowid();
+        let mut per_lang: HashMap<&str, i64> = HashMap::new();
+        for (lang, text, key) in &sec.segments {
+            let idx = per_lang.entry(lang.as_str()).or_insert(0);
+            tx.execute(
+                "INSERT INTO song_segment (section_id, lang, idx, text, align_key) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![sec_id, lang, *idx, text, key],
+            )?;
+            *idx += 1;
+        }
+    }
+    for lang in std::iter::once(primary).chain(second) {
+        let body = lyric_body(sections, lang);
+        if !body.is_empty() {
+            tx.execute("INSERT INTO song_lyric (song_id, lang, body) VALUES (?1, ?2, ?3)", params![song_id, lang, body])?;
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Default, Clone, Serialize)]
+pub struct RepairReport {
+    /// two-language songs found in the EasyWorship files
+    pub bilingual: usize,
+    /// library songs rebuilt with both languages
+    pub repaired: usize,
+    /// two-language songs with no one-language match in the library
+    pub not_found: usize,
+}
+
+/// Rebuilds library songs that were imported as one language although EasyWorship has them
+/// in two: the same title, one language now. The song keeps its id (services still find it).
+pub fn repair_bilingual(conn: &Connection, songs_db: &Path, words_db: &Path) -> Result<RepairReport> {
+    let s = Connection::open_with_flags(songs_db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    s.create_collation("UTF8_U_CI", |a: &str, b: &str| a.to_lowercase().cmp(&b.to_lowercase()))?;
+    let words = read_words(words_db)?;
+    let mut rep = RepairReport::default();
+    let tx = conn.unchecked_transaction()?;
+    let mut q = s.prepare("SELECT rowid, title, tags FROM song ORDER BY rowid")?;
+    let rows: Vec<(i64, String, Option<String>)> = q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.filter_map(|r| r.ok()).collect();
+    for (sid, title, tags) in rows {
+        let Some(rtf) = words.get(&sid) else { continue };
+        let (slides, _) = clean_slides(rtf);
+        let tag = tags.unwrap_or_default();
+        if !is_bilingual(&tag, &title, &slides) {
+            continue;
+        }
+        rep.bilingual += 1;
+        let sections = build_sections(&slides, &title, "en", Some("fat"));
+        // library songs of this title that have one language now
+        let mut find = tx.prepare("SELECT s.id FROM song s WHERE lower(trim(s.title)) = lower(trim(?1)) AND (SELECT count(*) FROM song_lyric l WHERE l.song_id = s.id) = 1")?;
+        let ids: Vec<i64> = find.query_map([&title], |r| r.get(0))?.filter_map(|r| r.ok()).collect();
+        drop(find);
+        if ids.is_empty() {
+            rep.not_found += 1;
+            continue;
+        }
+        for id in ids {
+            tx.execute("DELETE FROM song_section WHERE song_id = ?1", [id])?;
+            tx.execute("DELETE FROM song_lyric WHERE song_id = ?1", [id])?;
+            write_lyrics(&tx, id, &sections, "en", Some("fat"))?;
+            crate::songs::reindex(&tx, id)?;
+            rep.repaired += 1;
+        }
+    }
+    tx.commit()?;
+    Ok(rep)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const SAMPLE: &str = r"{\rtf1\ansi\deff0\sdeasyworship2
+    pub(super) const SAMPLE: &str = r"{\rtf1\ansi\deff0\sdeasyworship2
 {\fonttbl{\f0 Tahoma;}}
 {\colortbl ;\red255\green255\blue255;\red255\green255\blue0;}
 {\pard\qc\plain\fs64{\*\sdfsreal 32.4}\sdfsauto MHB 1\par}
@@ -513,5 +589,51 @@ mod tests {
         assert_eq!(short_label("Verse 12"), "V12");
         assert_eq!(short_label("Chorus Fante Only"), "C");
         assert_eq!(short_label("Bridge"), "B");
+    }
+}
+
+#[cfg(test)]
+mod repair_tests {
+    use super::*;
+
+    /// An EasyWorship pair of files with one song: MHB 1, English white and Fante yellow,
+    /// tagged "MHB (English)" (the tag alone does not say two languages).
+    fn ew_files(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        let songs = dir.join("Songs.db");
+        let words = dir.join("SongWords.db");
+        let s = Connection::open(&songs).unwrap();
+        s.execute_batch("CREATE TABLE song (rowid INTEGER PRIMARY KEY, title TEXT, author TEXT, copyright TEXT, reference_number TEXT, tags TEXT, song_item_uid TEXT);").unwrap();
+        s.execute("INSERT INTO song VALUES (1, 'MHB 1, ENG&FANTE', 'Charles Wesley', 'Public Domain', '1', 'MHB (English)', 'u1')", []).unwrap();
+        let w = Connection::open(&words).unwrap();
+        w.execute_batch("CREATE TABLE word (song_id INTEGER, words TEXT);").unwrap();
+        w.execute("INSERT INTO word VALUES (1, ?1)", [super::tests::SAMPLE]).unwrap();
+        (songs, words)
+    }
+
+    #[test]
+    fn two_language_songs_are_found_and_repaired() {
+        let dir = std::env::temp_dir().join(format!("wp-ew-repair-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (songs, words) = ew_files(&dir);
+        let slides = parse_rtf(super::tests::SAMPLE);
+        assert!(is_bilingual("MHB (English)", "MHB 1, ENG&FANTE", &slides), "the title says two languages");
+        assert!(is_bilingual("MHB (English)", "MHB 1", &slides), "the yellow lines say two languages");
+        // a song imported the old way: one language, Fante mixed into the English
+        let c = crate::db::open_memory().unwrap();
+        c.execute("INSERT INTO song (title) VALUES ('MHB 1, ENG&FANTE')", []).unwrap();
+        let id = c.last_insert_rowid();
+        let one = build_sections(&slides, "MHB 1, ENG&FANTE", "en", None);
+        write_lyrics(&c, id, &one, "en", None).unwrap();
+        assert_eq!(crate::library::song_langs(&c, id).unwrap(), vec!["en"]);
+        let rep = repair_bilingual(&c, &songs, &words).unwrap();
+        assert_eq!((rep.bilingual, rep.repaired, rep.not_found), (1, 1, 0));
+        assert_eq!(crate::library::song_langs(&c, id).unwrap(), vec!["en", "fat"], "the same song, now in two languages");
+        let fat: String = c.query_row("SELECT body FROM song_lyric WHERE song_id = ?1 AND lang = 'fat'", [id], |r| r.get(0)).unwrap();
+        assert!(fat.contains("Meenya ngyiram"), "the Fante lines are the second language");
+        let en: String = c.query_row("SELECT body FROM song_lyric WHERE song_id = ?1 AND lang = 'en'", [id], |r| r.get(0)).unwrap();
+        assert!(!en.contains("Meenya"), "and no longer mixed into the English");
+        // run again: nothing left to repair
+        assert_eq!(repair_bilingual(&c, &songs, &words).unwrap().repaired, 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1,5 +1,6 @@
 import { StageLayoutEditor } from "../../StageLayoutEditor";
 import { useEffect, useState } from "react";
+import { pickPath } from "../../api";
 import { api, pickCsvSave, pickFolder, pickRecording, pickTextSave, type SpeechStatus, type NdiStatus, type RemoteStatus, type ServiceInterval, type UsageRow } from "../../api";
 import { OutputOptions } from "./OutputOptions";
 import { printUsage } from "../../print";
@@ -221,6 +222,12 @@ export function Settings({
               <Row name="Advance the schedule after Go live" hint="When an item from the schedule goes live, the next item comes into Preview, ready for the next Go live.">
                 <input type="checkbox" checked={core.advance_after_go_live === "true"} onChange={(e) => void setCoreKey("advance_after_go_live", String(e.target.checked))} />
               </Row>
+              <Row name="Chorus after every verse" hint="For songs without a play order of their own: the chorus is sung after each verse (and after a bridge). A song's own order always wins.">
+                <input type="checkbox" checked={core.song_chorus_after_verse === "true"} onChange={(e) => void setCoreKey("song_chorus_after_verse", String(e.target.checked))} aria-label="Chorus after every verse" />
+              </Row>
+              <Row name="Title slide first" hint="Every song starts with a slide showing its hymn number and title, and the author.">
+                <input type="checkbox" checked={core.song_title_slide === "true"} onChange={(e) => void setCoreKey("song_title_slide", String(e.target.checked))} aria-label="Title slide first" />
+              </Row>
               <Row name="Fade between videos and pictures" hint="As ProPresenter: the outgoing video keeps playing while it fades into the next (0: a cut)">
                 <select className="wp-input" value={core.media_fade_ms ?? "700"} onChange={(e) => void setCoreKey("media_fade_ms", e.target.value)} aria-label="Fade between videos">
                   {[
@@ -356,6 +363,23 @@ export function Settings({
               <h2>Library</h2>
               <Row name="Main hymnbook" hint="A number typed alone in the quick box (“555”) opens this hymnbook's song. Other hymnbooks: “NCAN 12”.">
                 <HymnalPick value={core.quick_hymnal ?? ""} onChange={(v) => void setCoreKey("quick_hymnal", v)} />
+              </Row>
+              <Row name="Repair two-language songs" hint="Songs from EasyWorship with English and Fante (e.g. “MHB 1, ENG&FANTE”) that came in as one language. Choose the EasyWorship folder holding Songs.db and SongWords.db; those songs are rebuilt with both languages. A backup is made first.">
+                <button
+                  className="wp-btn"
+                  onClick={async () => {
+                    const path = await pickPath("ew-songs");
+                    if (!path) return;
+                    try {
+                      const r = await api.songsRepairBilingual(path);
+                      setMsg({ text: r.repaired ? `${r.repaired.toLocaleString()} songs now have both languages (of ${r.bilingual.toLocaleString()} two-language songs in EasyWorship).` : `Nothing to repair: ${r.bilingual.toLocaleString()} two-language songs found, all already in two languages${r.not_found ? ` or not in the library (${r.not_found})` : ""}.` });
+                    } catch (e) {
+                      setMsg({ text: String(e instanceof Error ? e.message : e), bad: true });
+                    }
+                  }}
+                >
+                  Repair…
+                </button>
               </Row>
               <Row name="Rebuild search keys" hint="If a song you know is there does not come up when searching, this rewrites every song's search entry. Takes a few seconds.">
                 <button className="wp-btn" onClick={async () => { try { const n = await api.rebuildSearch(); setMsg({ text: `Search keys rebuilt for ${n.toLocaleString()} songs.` }); } catch (e) { setMsg({ text: String(e), bad: true }); } }}>

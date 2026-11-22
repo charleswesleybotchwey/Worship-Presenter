@@ -351,6 +351,7 @@ export function Control() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state?.slide_idx, state?.mode, liveItemKey, liveActions]);
   const [slideMenu, setSlideMenu] = useState<{ x: number; y: number; i: number } | null>(null);
+  const [toolsOpen, setToolsOpen] = useState(false);
   const previewItemKey = preview?.item ? JSON.stringify(slideKey(preview.item, [], 0)?.slice(0, 2) ?? null) : "";
   useEffect(() => {
     const k = slideKey(preview?.item, [], 0);
@@ -1082,6 +1083,8 @@ export function Control() {
       void load(item, start);
     }}>
     <LibraryDock
+      onAir={{ item: rehearsal ? null : live?.item, label: liveSlides[state?.slide_idx ?? -1]?.label }}
+      inPreview={{ item: preview?.item, label: preview?.slides[previewIdx]?.label }}
       tab={libTab}
       setTab={setLibTab}
       version={libraryVersion}
@@ -1288,7 +1291,7 @@ export function Control() {
       {/* timelines: a song in time with a backing track */}
       {!rehearsal && <TimelineBar item={live?.item} slideIdx={state?.slide_idx ?? 0} slides={liveSlides} onShow={show} />}
       {/* ProPresenter's group buttons: straight to the chorus, the bridge… */}
-      {!rehearsal && <GroupButtons slides={gridSlides} current={state?.slide_idx ?? -1} onGo={(i) => show(i)} />}
+      {!rehearsal && live?.item?.kind === "song" && <GroupButtons slides={gridSlides} current={state?.slide_idx ?? -1} onGo={(i) => show(i)} />}
       <div className="ew-list">
         {liveView === "list" ? (
           <SlideList
@@ -1562,51 +1565,75 @@ export function Control() {
             />
           </label>
           <span className="wp-spacer" />
-          <label className={`wp-switch ${rehearsal ? "is-on" : ""}`} title="Practise the service without sending anything to the screens">
-            <input type="checkbox" checked={rehearsal} onChange={(e) => (setRehearsal(e.target.checked), setReh(null))} /> Rehearsal
-          </label>
           <button className={`wp-btn wp-btn--quiet wp-listen ${speech?.listening ? "is-on" : ""}`} onClick={toggleListening} title={speech?.listening ? "Stop listening for Bible references" : "Listen to the preacher's microphone for Bible references (experimental)"} aria-pressed={!!speech?.listening}>
             <Icon name="mic" /> {speech?.starting ? "Starting…" : speech?.listening ? "Listening" : "Listen"}
-          </button>
-          <button className={`wp-btn wp-btn--quiet ${transcriptOpen ? "is-on" : ""} ${speech?.warning ? "is-warn" : ""}`} onClick={() => setTranscriptOpen((x) => !x)} title="The live transcript, the microphone level and the scriptures detected">
-            Transcript{speech?.warning ? " ⚠" : ""}
-          </button>
-          <button className={`wp-btn wp-btn--quiet wp-cam ${state?.camera ? "is-on" : ""}`} onClick={() => setLayer(layer === "camera" ? null : "camera")} title="A camera on the main screen">
-            <Icon name="video" /> {state?.camera ? "Camera on" : "Camera"}
-          </button>
-          <select
-            className={`wp-subs ${state?.subtitles ? "is-on" : ""}`}
-            value={state?.subtitles ?? ""}
-            title="Live sermon subtitles (experimental): what the preacher says, as captions"
-            aria-label="Subtitles"
-            onChange={async (e) => {
-              const t = (e.target.value || null) as "stream" | "screens" | "both" | null;
-              await run(api.setSubtitles(t));
-              // captions need the whole sermon, not only Bible references
-              if (t && (!speech?.listening || speechCfg.refsOnly)) {
-                try {
-                  await api.speechStart(speechCfg.engine, speechCfg.mic || null, false);
-                  say("Subtitles on. Listening to everything the preacher says.");
-                } catch (err) {
-                  say(String(err instanceof Error ? err.message : err), true);
-                }
-              }
-            }}
-          >
-            <option value="">Subtitles off</option>
-            <option value="stream">Subtitles: stream</option>
-            <option value="screens">Subtitles: screens</option>
-            <option value="both">Subtitles: both</option>
-          </select>
-          <button className={`wp-btn wp-btn--quiet wp-music-chip ${music?.status.playing ? "is-on" : ""}`} onClick={() => setLayer(layer === "music" ? null : "music")} title={music?.status.title ?? "Background music"}>
-            <Icon name="music" /> {music?.status.playing ? (music.status.paused ? "Paused" : music.status.ducked ? "Music (quiet)" : music.status.title ?? "Music") : "Music"}
           </button>
           <button className={`wp-btn wp-btn--quiet ${rec?.running ? "rec-on" : ""}`} onClick={() => setLayer(layer === "record" ? null : "record")} title="Record the service, or go live on YouTube, Facebook or StreamRelay">
             {rec?.running ? <span className="rec__dot" aria-hidden="true" /> : <Icon name="video" />} {rec?.running ? `${Math.floor(rec.seconds / 60)}:${String(rec.seconds % 60).padStart(2, "0")}` : "Record"}
           </button>
-          <button className={`wp-btn wp-btn--quiet ${preService ? "is-on" : ""}`} onClick={() => setLayer(layer === "preservice" ? null : "preservice")} title="Countdown, announcements and music before the service; the first item goes live on time">
-            <Icon name="timer" /> {preService ? `Pre-service · ${preService.startsAt}` : "Pre-service"}
-          </button>
+          {/* the tools used less often, in one menu; any that is on shows as a chip */}
+          {rehearsal && <span className="tool-chip is-on">Rehearsal</span>}
+          {state?.camera && <span className="tool-chip is-on">Camera on</span>}
+          {state?.subtitles && <span className="tool-chip is-on">Subtitles</span>}
+          {music?.status.playing && (
+            <button className="tool-chip is-on" onClick={() => setLayer("music")}>
+              <Icon name="music" /> {music.status.paused ? "Paused" : music.status.title ?? "Music"}
+            </button>
+          )}
+          {preService && <span className="tool-chip is-on">Pre-service · {preService.startsAt}</span>}
+          <div className="tools-menu">
+            <button className={`wp-btn wp-btn--quiet ${toolsOpen ? "is-on" : ""}`} aria-expanded={toolsOpen} aria-haspopup="true" onClick={() => setToolsOpen((x) => !x)} title="Rehearsal, transcript, camera, subtitles, music, pre-service">
+              Tools ▾
+            </button>
+            {toolsOpen && (
+              <>
+                <div className="tools-menu__away" onMouseDown={() => setToolsOpen(false)} />
+                <div className="tools-menu__pop" role="menu" onClick={(e) => (e.target as HTMLElement).closest("button") && setToolsOpen(false)}>
+              <label className={`wp-switch ${rehearsal ? "is-on" : ""}`} title="Practise the service without sending anything to the screens">
+                <input type="checkbox" checked={rehearsal} onChange={(e) => (setRehearsal(e.target.checked), setReh(null))} /> Rehearsal
+              </label>
+
+              <button className={`wp-btn wp-btn--quiet ${transcriptOpen ? "is-on" : ""} ${speech?.warning ? "is-warn" : ""}`} onClick={() => setTranscriptOpen((x) => !x)} title="The live transcript, the microphone level and the scriptures detected">
+                Transcript{speech?.warning ? " ⚠" : ""}
+              </button>
+              <button className={`wp-btn wp-btn--quiet wp-cam ${state?.camera ? "is-on" : ""}`} onClick={() => setLayer(layer === "camera" ? null : "camera")} title="A camera on the main screen">
+                <Icon name="video" /> {state?.camera ? "Camera on" : "Camera"}
+              </button>
+              <select
+                className={`wp-subs ${state?.subtitles ? "is-on" : ""}`}
+                value={state?.subtitles ?? ""}
+                title="Live sermon subtitles (experimental): what the preacher says, as captions"
+                aria-label="Subtitles"
+                onChange={async (e) => {
+                  const t = (e.target.value || null) as "stream" | "screens" | "both" | null;
+                  await run(api.setSubtitles(t));
+                  // captions need the whole sermon, not only Bible references
+                  if (t && (!speech?.listening || speechCfg.refsOnly)) {
+                    try {
+                      await api.speechStart(speechCfg.engine, speechCfg.mic || null, false);
+                      say("Subtitles on. Listening to everything the preacher says.");
+                    } catch (err) {
+                      say(String(err instanceof Error ? err.message : err), true);
+                    }
+                  }
+                }}
+              >
+                <option value="">Subtitles off</option>
+                <option value="stream">Subtitles: stream</option>
+                <option value="screens">Subtitles: screens</option>
+                <option value="both">Subtitles: both</option>
+              </select>
+              <button className={`wp-btn wp-btn--quiet wp-music-chip ${music?.status.playing ? "is-on" : ""}`} onClick={() => setLayer(layer === "music" ? null : "music")} title={music?.status.title ?? "Background music"}>
+                <Icon name="music" /> {music?.status.playing ? (music.status.paused ? "Paused" : music.status.ducked ? "Music (quiet)" : music.status.title ?? "Music") : "Music"}
+              </button>
+
+              <button className={`wp-btn wp-btn--quiet ${preService ? "is-on" : ""}`} onClick={() => setLayer(layer === "preservice" ? null : "preservice")} title="Countdown, announcements and music before the service; the first item goes live on time">
+                <Icon name="timer" /> {preService ? `Pre-service · ${preService.startsAt}` : "Pre-service"}
+              </button>
+                </div>
+              </>
+            )}
+          </div>
           <TimerChip timer={state?.timer ?? null} onClick={() => setLayer(layer === "timer" ? null : "timer")} />
           <button className={`wp-btn wp-btn--quiet ${state?.alert ? "is-on" : ""}`} onClick={() => setLayer(layer === "alert" ? null : "alert")}>
             <Icon name="alert" /> {state?.alert ? "Alert on" : "Alert"}

@@ -225,15 +225,40 @@ fn build_slides(conn: &Connection, item: &ProgramItem, live: &LiveState) -> Res<
                 _ => (library::song_sections(conn, *song_id).map_err(err)?, library::song_langs(conn, *song_id).map_err(err)?),
             };
             let primary = langs.first().cloned().unwrap_or_else(|| "en".into());
+            let set = |k: &str| conn.query_row("SELECT value FROM setting WHERE key = ?1", [k], |r| r.get::<_, String>(0)).ok().unwrap_or_default();
+            let row: Option<(Option<String>, Option<String>)> = conn.query_row("SELECT default_sequence, author FROM song WHERE id = ?1", [song_id], |r| Ok((r.get(0)?, r.get(1)?))).ok();
+            let (saved_order, author) = row.unwrap_or((None, None));
+            // the song's own play order; else, if chosen in Settings, the chorus after every verse
+            let labels: Vec<String> = sections.iter().map(|x| x.label.clone()).filter(|l| l != "TITLE").collect();
+            let mut sequence: Vec<String> = saved_order.unwrap_or_default().split(|c: char| c.is_whitespace() || c == ',').filter(|x| !x.is_empty() && labels.iter().any(|l| l == x)).map(String::from).collect();
+            if sequence.is_empty() && set("song_chorus_after_verse") == "true" {
+                sequence = wp_core::songs::chorus_after_each(&labels);
+            }
             let opts = Options {
                 lines_per_slide: live.lines_per_slide,
                 lang_mode: if langs.len() > 1 { live.lang_mode } else { LangMode::Primary },
                 primary,
                 second: langs.get(1).cloned(),
-                sequence: vec![],
+                sequence,
                 include_title: false,
             };
-            Ok((splitter::split(&sections, &opts), Some(title.clone())))
+            let mut slides = splitter::split(&sections, &opts);
+            // a first slide with the hymn number, the title and the author (Settings)
+            if set("song_title_slide") == "true" {
+                let number: Option<String> = conn
+                    .query_row("SELECT h.code || ' ' || n.number FROM song_number n JOIN hymnal h ON h.id = n.hymnal_id WHERE n.song_id = ?1 ORDER BY n.rowid LIMIT 1", [song_id], |r| r.get(0))
+                    .ok();
+                let first = match number {
+                    Some(n) if !title.to_lowercase().starts_with(&n.to_lowercase()) => format!("{n} · {title}"),
+                    _ => title.clone(),
+                };
+                let mut lines = vec![first];
+                if let Some(a) = author.filter(|a| !a.trim().is_empty()) {
+                    lines.push(a.trim().to_string());
+                }
+                slides.insert(0, Slide { reference: None, label: "Title".into(), occurrence: 0, first_key: 0, last_key: 0, primary: lines, second: vec![], image: None, chords: vec![] });
+            }
+            Ok((slides, Some(title.clone())))
         }
         ProgramItem::Announcement { presentation_id, title } => {
             let d = wp_core::announcements::get(conn, *presentation_id).map_err(err)?;
@@ -1690,7 +1715,7 @@ fn identify_output(app: AppHandle, role: String) {
 }
 
 /// Settings the core uses; only these keys can be written.
-const SETTINGS: &[&str] = &["project_on_restart", "low_spec_mode", "lines_per_slide", "advance_after_go_live", "font_fallback", "speech_engine", "speech_mic", "speech_refs_only", "speech_whisper_model", "scripture_verse_numbers", "stage_layout", "ndi_lower_third", "media_fade_ms", "scripture_verses_per_slide", "scripture_ref_where", "scripture_ref_scope", "scripture_ref_only", "scripture_abbrev", "deepgram_key", "deepgram_model", "quick_hymnal", "logo_media_id", "brand_colors", "brand_font", "brand_heading_font"];
+const SETTINGS: &[&str] = &["project_on_restart", "low_spec_mode", "lines_per_slide", "advance_after_go_live", "font_fallback", "speech_engine", "speech_mic", "speech_refs_only", "speech_whisper_model", "scripture_verse_numbers", "stage_layout", "ndi_lower_third", "media_fade_ms", "song_chorus_after_verse", "song_title_slide", "scripture_verses_per_slide", "scripture_ref_where", "scripture_ref_scope", "scripture_ref_only", "scripture_abbrev", "deepgram_key", "deepgram_model", "quick_hymnal", "logo_media_id", "brand_colors", "brand_font", "brand_heading_font"];
 
 #[tauri::command(async)]
 fn get_settings(st: State<'_, AppState>) -> Res<std::collections::HashMap<String, String>> {
@@ -1933,6 +1958,21 @@ fn timeline_save(st: State<'_, AppState>, timeline: wp_core::timelines::Timeline
 #[tauri::command(async)]
 fn timeline_delete(st: State<'_, AppState>, kind: String, id: i64) -> Res<()> {
     wp_core::timelines::delete(&st.db.lock().unwrap(), &kind, id).map_err(err)
+}
+
+/// Songs imported as one language although EasyWorship has them in two: rebuilt with both
+/// (a backup first). `path` is the EasyWorship folder holding Songs.db and SongWords.db.
+#[tauri::command(async)]
+fn songs_repair_bilingual(st: State<'_, AppState>, path: String) -> Res<wp_core::import::ew_songs::RepairReport> {
+    let p = std::path::Path::new(&path);
+    if !p.join("Songs.db").exists() || !p.join("SongWords.db").exists() {
+        return Err("That folder does not hold Songs.db and SongWords.db (EasyWorship's Databases\\Data folder).".into());
+    }
+    let conn = st.db.lock().unwrap();
+    wp_core::backup::create(&conn, &st.backups(), "before-repair").map_err(err)?;
+    let rep = wp_core::import::ew_songs::repair_bilingual(&conn, &p.join("Songs.db"), &p.join("SongWords.db")).map_err(err)?;
+    applog::write("LIBRARY", &format!("two-language repair: {} found, {} repaired, {} not in the library", rep.bilingual, rep.repaired, rep.not_found));
+    Ok(rep)
 }
 
 #[tauri::command(async)]
@@ -3526,6 +3566,7 @@ pub fn run() {
             set_props,
             clear_all,
             props_list,
+            songs_repair_bilingual,
             macros_list,
             timeline_get,
             timeline_save,
@@ -3691,5 +3732,51 @@ mod ews_tests {
         assert_eq!(body, "[V1]\nJesus, ’nye W’ Asɔr\nYɛ n’ Agyenkwa\nWɔrosɔ ne gyedzi\n\n[C]\nAmen\n\n[V2]\nTsew ne bra");
         assert_eq!(wp_core::songs::parse_body(&body).len(), 3, "the editor reads it as three sections");
         assert!(super::ews_body(&[sl(None, &["no names at all"])]).starts_with("[V1]\n"));
+    }
+}
+
+#[cfg(test)]
+mod song_option_tests {
+    use super::*;
+
+    /// A song with V1, C, V2 and a hymn number, through the real Preview/Live path.
+    fn song(c: &Connection) -> i64 {
+        let doc = wp_core::songs::SongDoc {
+            id: None,
+            title: "Blessed Assurance".into(),
+            author: Some("Fanny J. Crosby".into()),
+            copyright: None,
+            ccli: None,
+            numbers: vec![wp_core::songs::Number { hymnal: "MHB".into(), number: "422".into() }],
+            lyrics: vec![wp_core::songs::Lyric { lang: "en".into(), body: "[V1]\nverse one\n\n[C]\nthe chorus\n\n[V2]\nverse two".into() }],
+            sequence: String::new(),
+            lines_per_slide: None,
+            key: None,
+        };
+        wp_core::songs::save(c, &doc).unwrap()
+    }
+    fn labels(c: &Connection, id: i64) -> Vec<String> {
+        let item = ProgramItem::Song { song_id: id, title: "Blessed Assurance".into(), lyrics: None, theme_id: None };
+        build_slides(c, &item, &LiveState::default()).unwrap().0.into_iter().map(|s| s.label).collect()
+    }
+    fn set(c: &Connection, k: &str, v: &str) {
+        c.execute("INSERT OR REPLACE INTO setting (key, value) VALUES (?1, ?2)", [k, v]).unwrap();
+    }
+
+    #[test]
+    fn chorus_after_each_verse_and_a_title_slide() {
+        let c = wp_core::db::open_memory().unwrap();
+        let id = song(&c);
+        assert_eq!(labels(&c, id), vec!["V1", "C", "V2"], "as written");
+        set(&c, "song_chorus_after_verse", "true");
+        assert_eq!(labels(&c, id), vec!["V1", "C", "V2", "C"], "the chorus after every verse");
+        // the song's own play order wins over the setting
+        c.execute("UPDATE song SET default_sequence = 'V1 V2 C' WHERE id = ?1", [id]).unwrap();
+        assert_eq!(labels(&c, id), vec!["V1", "V2", "C"], "the song's own order (was ignored on the screens before)");
+        set(&c, "song_title_slide", "true");
+        let item = ProgramItem::Song { song_id: id, title: "Blessed Assurance".into(), lyrics: None, theme_id: None };
+        let s = build_slides(&c, &item, &LiveState::default()).unwrap().0;
+        assert_eq!(s[0].label, "Title");
+        assert_eq!(s[0].primary, vec!["MHB 422 · Blessed Assurance".to_string(), "Fanny J. Crosby".to_string()]);
     }
 }

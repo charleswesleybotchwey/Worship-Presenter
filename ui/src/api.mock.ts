@@ -1077,6 +1077,8 @@ export async function mock(cmd: string, a: Record<string, unknown>): Promise<unk
     case "timeline_delete":
       delete mTimelines[`${a.kind}:${a.id}`];
       return;
+    case "songs_repair_bilingual":
+      return { bilingual: 1, repaired: 0, not_found: 0 };
     case "macros_list":
       return mMacros.map((x) => structuredClone(x));
     case "macro_save": {

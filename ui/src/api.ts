@@ -655,6 +655,7 @@ export const api = {
   timelineGet: (kind: string, id: number) => call<{ item_kind: string; item_id: number; media_id: number; cues: [number, number][] } | null>("timeline_get", { kind, id }),
   timelineSave: (timeline: { item_kind: string; item_id: number; media_id: number; cues: [number, number][] }) => call<void>("timeline_save", { timeline }),
   timelineDelete: (kind: string, id: number) => call<void>("timeline_delete", { kind, id }),
+  songsRepairBilingual: (path: string) => call<{ bilingual: number; repaired: number; not_found: number }>("songs_repair_bilingual", { path }),
   macrosList: () => call<Macro[]>("macros_list"),
   macroSave: (m: Macro) => call<number>("macro_save", { m }),
   macroDelete: (id: number) => call<void>("macro_delete", { id }),

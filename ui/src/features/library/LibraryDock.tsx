@@ -68,6 +68,8 @@ function SongsTab({
   onAdd,
   onEdit,
   onNew,
+  liveSong,
+  previewSong,
 }: {
   searchRef: React.RefObject<HTMLInputElement>;
   version: number;
@@ -75,6 +77,9 @@ function SongsTab({
   onAdd: (i: ProgramItem) => void;
   onEdit: (id: number) => void;
   onNew: () => void;
+  /** the song on the screens, and the one in Preview (as EasyWorship marks them) */
+  liveSong?: number | null;
+  previewSong?: number | null;
 }) {
   const live = useGoLive();
   const [tree, setTree] = useState<SongTree | null>(null);
@@ -221,7 +226,8 @@ function SongsTab({
                 key={r.id}
                 role="row"
                 aria-selected={picked(r.id)}
-                className={`lt-row lt-row--songs ${picked(r.id) ? "is-selected" : ""}`}
+                className={`lt-row lt-row--songs ${picked(r.id) ? "is-selected" : ""} ${r.id === liveSong ? "is-on-air" : r.id === previewSong ? "is-in-preview" : ""}`}
+                data-state={r.id === liveSong ? "Live" : r.id === previewSong ? "Preview" : undefined}
                 style={{ top: (win.range.from + k) * ROW_H }}
                 draggable
                 onDragStart={(e) => dragItem(e, multi.size > 1 && multi.has(r.id) ? sorted.filter((x) => multi.has(x.id)).map(item) : item(r))}
@@ -352,7 +358,9 @@ function SongsTab({
 
 // ---------- Scriptures ----------
 
-function ScripturesTab({ refInput, onPreview, onAdd }: { refInput: React.RefObject<HTMLInputElement>; onPreview: (i: ProgramItem, start?: string) => void; onAdd: (i: ProgramItem) => void }) {
+type Showing = { item: ProgramItem | null | undefined; label: string | null | undefined };
+
+function ScripturesTab({ refInput, onPreview, onAdd, onAir, inPreview }: { refInput: React.RefObject<HTMLInputElement>; onPreview: (i: ProgramItem, start?: string) => void; onAdd: (i: ProgramItem) => void; onAir?: Showing; inPreview?: Showing }) {
   const [versions, setVersions] = useState<Version[]>([]);
   const [primary, setPrimary] = useState<string>("");
   const [second, setSecond] = useState<string>("");
@@ -362,7 +370,27 @@ function ScripturesTab({ refInput, onPreview, onAdd }: { refInput: React.RefObje
   const [range, setRange] = useState<{ from: number; to: number } | null>(null);
   const anchor = useRef<number | null>(null);
 
-  const reloadVersions = () => api.versions().then((v) => (setVersions(v), setPrimary((p) => p || v[0]?.code || ""))).catch(() => {});
+  // the Bible chosen last time (kept between sessions), else the first
+  const reloadVersions = () =>
+    api
+      .versions()
+      .then((v) => {
+        setVersions(v);
+        const saved = localStorage.getItem("wp-bible-primary");
+        setPrimary((p) => p || (saved && v.some((x) => x.code === saved) ? saved : v[0]?.code || ""));
+      })
+      .catch(() => {});
+  useEffect(() => {
+    if (primary) localStorage.setItem("wp-bible-primary", primary);
+  }, [primary]);
+  // the verse on the screens / in Preview, when it is in this chapter
+  const verseOf = (w?: Showing) => {
+    if (!view || w?.item?.kind !== "scripture" || !w.item.reference.startsWith(`${view.book} ${view.chapter}:`)) return null;
+    const m = /^(\d+):(\d+)$/.exec(w.label ?? "");
+    return m && Number(m[1]) === view.chapter ? Number(m[2]) : null;
+  };
+  const liveVerse = verseOf(onAir);
+  const previewVerse = verseOf(inPreview);
   useEffect(() => {
     void reloadVersions();
   }, []);
@@ -600,7 +628,8 @@ function ScripturesTab({ refInput, onPreview, onAdd }: { refInput: React.RefObje
               <div
                 role="row"
                 aria-selected={!!range && r.verse >= range.from && r.verse <= range.to}
-                className={`lt-row lt-row--verses lt-row--flow ${range && r.verse >= range.from && r.verse <= range.to ? "is-selected" : ""}`}
+                className={`lt-row lt-row--verses lt-row--flow ${range && r.verse >= range.from && r.verse <= range.to ? "is-selected" : ""} ${r.verse === liveVerse ? "is-on-air" : r.verse === previewVerse ? "is-in-preview" : ""}`}
+                data-state={r.verse === liveVerse ? "Live" : r.verse === previewVerse ? "Preview" : undefined}
                 draggable
                 onDragStart={(e) => dragItem(e, { kind: "scripture", reference: refFor(r.verse, r.verse), versions: vers })}
                 onClick={(e) => {
@@ -1002,7 +1031,14 @@ export function LibraryDock(p: {
   onUseTheme: (id: number) => void;
   onEditThemes: (req?: ThemeEditRequest) => void;
   extraTab?: { label: string; node: React.ReactNode };
+  /** what is on the screens and in Preview (item and current slide label) */
+  onAir?: Showing;
+  inPreview?: Showing;
 }) {
+  // tabs once opened stay alive (hidden), keeping their scroll, selection, chapter and Bible
+  const [visited, setVisited] = useState<Set<LibTab>>(() => new Set([p.tab]));
+  useEffect(() => setVisited((v) => (v.has(p.tab) ? v : new Set([...v, p.tab]))), [p.tab]);
+  const songId = (w?: Showing) => (w?.item?.kind === "song" ? w.item.song_id : null);
   const tabs: [LibTab, string][] = [
     ["songs", "Songs"],
     ["scripture", "Scriptures"],
@@ -1028,27 +1064,36 @@ export function LibraryDock(p: {
       <div className="lib-body">
         {extra && p.extraTab ? (
           p.extraTab.node
-        ) : p.tab === "songs" ? (
-          <SongsTab searchRef={p.songSearch} version={p.version} onPreview={p.onPreview} onAdd={p.onAdd} onEdit={p.onEditSong} onNew={p.onNewSong} />
-        ) : p.tab === "scripture" ? (
-          <ScripturesTab refInput={p.refInput} onPreview={p.onPreview} onAdd={p.onAdd} />
-        ) : p.tab === "media" ? (
-          <div className="lt lt--single">
-            <MediaLibrary version={p.version} onPreview={p.onMediaPreview} onAdd={(m) => p.onAdd({ kind: "media", media_id: m.id, title: m.title })} />
-          </div>
-        ) : p.tab === "presentations" ? (
-          <div className="lt lt--single">
-            <AnnouncementList
-              version={p.version}
-              onPreview={(d) => p.onPreview({ kind: "announcement", presentation_id: d.id, title: d.title })}
-              onAdd={(d) => p.onAdd({ kind: "announcement", presentation_id: d.id, title: d.title })}
-              onEdit={p.onEditDeck}
-              onNew={p.onNewDeck}
-            />
-          </div>
-        ) : (
-          <ThemesTab version={p.version} previewKind={p.previewKind} onUseForItem={p.onUseTheme} onEdit={p.onEditThemes} />
-        )}
+        ) : null}
+        {[
+          ["songs", <SongsTab key="songs" searchRef={p.songSearch} version={p.version} onPreview={p.onPreview} onAdd={p.onAdd} onEdit={p.onEditSong} onNew={p.onNewSong} liveSong={songId(p.onAir)} previewSong={songId(p.inPreview)} />],
+          ["scripture", <ScripturesTab key="scripture" refInput={p.refInput} onPreview={p.onPreview} onAdd={p.onAdd} onAir={p.onAir} inPreview={p.inPreview} />],
+          [
+            "media",
+            <div key="media" className="lt lt--single">
+              <MediaLibrary version={p.version} onPreview={p.onMediaPreview} onAdd={(m) => p.onAdd({ kind: "media", media_id: m.id, title: m.title })} />
+            </div>,
+          ],
+          [
+            "presentations",
+            <div key="presentations" className="lt lt--single">
+              <AnnouncementList
+                version={p.version}
+                onPreview={(d) => p.onPreview({ kind: "announcement", presentation_id: d.id, title: d.title })}
+                onAdd={(d) => p.onAdd({ kind: "announcement", presentation_id: d.id, title: d.title })}
+                onEdit={p.onEditDeck}
+                onNew={p.onNewDeck}
+              />
+            </div>,
+          ],
+          ["themes", <ThemesTab key="themes" version={p.version} previewKind={p.previewKind} onUseForItem={p.onUseTheme} onEdit={p.onEditThemes} />],
+        ]
+          .filter(([t]) => visited.has(t as LibTab))
+          .map(([t, node]) => (
+            <div key={t as string} className="lib-pane" hidden={extra || p.tab !== t}>
+              {node}
+            </div>
+          ))}
       </div>
     </section>
   );

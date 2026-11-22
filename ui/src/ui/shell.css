@@ -841,3 +841,36 @@ input[type="color"] { width: 34px; height: 24px; padding: 0; border: 1px solid v
 .wp-empty p { max-width: 36ch; margin: 0; }
 .wp-empty .wp-btn { background: var(--wp-overlay); color: var(--wp-ink); }
 .wp-empty--inline { justify-items: start; text-align: left; padding: 12px 16px; }
+
+/* ---------- from testing on Windows ---------- */
+/* the app is a window, not a web page: it never scrolls or rubber-bands as a whole */
+html, body, #root { height: 100%; overflow: hidden; overscroll-behavior: none; }
+/* interface text is not selectable by accident; typing and reading areas still are */
+body { user-select: none; -webkit-user-select: none; }
+input, textarea, select, [contenteditable="true"], .trp__lines, .selectable { user-select: text; -webkit-user-select: text; }
+
+/* the library keeps each visited tab alive, hidden */
+.lib-pane { flex: 1; min-width: 0; min-height: 0; display: flex; }
+.lib-pane > * { flex: 1; min-width: 0; }
+.lib-pane[hidden] { display: none !important; }
+
+/* what is on the screens and in Preview, in the library (as EasyWorship marks them) */
+.lt-row { position: relative; }
+.lt-row.is-on-air { background: var(--wp-onair-soft); box-shadow: inset 3px 0 0 var(--wp-onair); }
+.lt-row.is-in-preview { background: var(--wp-ready-soft); box-shadow: inset 3px 0 0 var(--wp-ready); }
+.lt-row[data-state]::after { content: attr(data-state); position: absolute; right: 10px; top: 50%; transform: translateY(-50%); padding: 1px 6px; border-radius: 3px; font-size: 11px; font-weight: 600; color: #fff; pointer-events: none; }
+.lt-row.is-on-air[data-state]::after { background: var(--wp-onair); }
+.lt-row.is-in-preview[data-state]::after { background: var(--wp-ready); }
+
+/* the top row: the service name and quick box keep their room */
+.wp-bar__where { flex: 0 0 auto; min-width: 0; }
+.wp-bar__where + label, .wp-quick { min-width: 220px; }
+/* tools used less often, in one menu; chips for any that is on */
+.tools-menu { position: relative; }
+.tools-menu__away { position: fixed; inset: 0; z-index: 60; }
+.tools-menu__pop { position: absolute; right: 0; top: calc(100% + 4px); z-index: 61; display: grid; gap: 2px; min-width: 230px; padding: 6px; background: var(--wp-overlay); border: 1px solid var(--wp-line); border-radius: 6px; box-shadow: 0 10px 28px rgba(0, 0, 0, .45); }
+.tools-menu__pop > * { justify-content: flex-start; width: 100%; }
+.tools-menu__pop .wp-switch { padding: 6px 8px; }
+.tool-chip { display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; border-radius: 999px; border: 0; font: 500 12px var(--wp-font); background: var(--wp-ready-soft); color: var(--wp-ink); white-space: nowrap; cursor: default; }
+button.tool-chip { cursor: pointer; }
+.wp-search--quick { min-width: 200px; flex: 0 1 300px; }

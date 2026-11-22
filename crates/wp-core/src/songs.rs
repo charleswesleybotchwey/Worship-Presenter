@@ -431,3 +431,34 @@ mod tests {
         assert!(save(&c, &d).is_err());
     }
 }
+
+/// The chorus after every verse (and after a bridge): V1 C V2 C B C. Without a chorus, as written.
+pub fn chorus_after_each(labels: &[String]) -> Vec<String> {
+    let is_chorus = |l: &str| l.starts_with('C') && l[1..].chars().all(|c| c.is_ascii_digit());
+    let Some(chorus) = labels.iter().find(|l| is_chorus(l)).cloned() else { return labels.to_vec() };
+    let mut out = Vec::new();
+    for l in labels {
+        if *l == chorus {
+            continue;
+        }
+        out.push(l.clone());
+        let verse_or_bridge = (l.starts_with('V') || l.starts_with('B')) && l[1..].chars().all(|c| c.is_ascii_digit());
+        if verse_or_bridge {
+            out.push(chorus.clone());
+        }
+    }
+    if !out.contains(&chorus) {
+        out.push(chorus);
+    }
+    out
+}
+
+#[cfg(test)]
+mod order_tests {
+    #[test]
+    fn the_chorus_comes_after_every_verse() {
+        let l = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(super::chorus_after_each(&l(&["V1", "C", "V2", "B", "V3"])), l(&["V1", "C", "V2", "C", "B", "C", "V3", "C"]));
+        assert_eq!(super::chorus_after_each(&l(&["V1", "V2"])), l(&["V1", "V2"]), "no chorus: as written");
+    }
+}
