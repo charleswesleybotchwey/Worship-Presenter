@@ -109,25 +109,41 @@ pub fn compile(lyrics: &[Lyric]) -> Result<Vec<SplitSection>> {
         return Err(invalid("A song needs at least one line of lyrics."));
     }
     let others: Vec<(String, Vec<ParsedSection>)> = lyrics[1..].iter().map(|l| (l.lang.clone(), parse_body(&l.body))).collect();
-    for (lang, secs) in &others {
-        for s in secs {
-            if !main.iter().any(|m| m.label == s.label) {
-                return Err(invalid(format!("The {lang} lyrics have a [{}] section the first language does not have.", s.label)));
+    // the sections in order: the first language's, then any only another language has
+    // (a verse a translation kept and the first language dropped), each after the section
+    // it follows in that language
+    let mut order: Vec<String> = Vec::new();
+    for m in &main {
+        if order.contains(&m.label) {
+            return Err(invalid(format!("[{}] appears twice. Use the play order to repeat a section.", m.label)));
+        }
+        order.push(m.label.clone());
+    }
+    for (_, secs) in &others {
+        for (k, s) in secs.iter().enumerate() {
+            if order.contains(&s.label) {
+                continue;
+            }
+            // after the section it follows in its language, else before the one it precedes,
+            // else at the end
+            let after = secs[..k].iter().rev().find_map(|p| order.iter().position(|o| *o == p.label));
+            let before = secs[k + 1..].iter().find_map(|q| order.iter().position(|o| *o == q.label));
+            match (after, before) {
+                (Some(i), _) => order.insert(i + 1, s.label.clone()),
+                (None, Some(i)) => order.insert(i, s.label.clone()),
+                (None, None) => order.push(s.label.clone()),
             }
         }
     }
+    let empty = ParsedSection { label: String::new(), lines: vec![] };
     let mut key = 0i64;
     let mut out = Vec::new();
-    let mut seen: Vec<String> = Vec::new();
-    for (i, m) in main.iter().enumerate() {
-        if seen.contains(&m.label) {
-            return Err(invalid(format!("[{}] appears twice. Use the play order to repeat a section.", m.label)));
-        }
-        seen.push(m.label.clone());
+    for (i, label) in order.iter().enumerate() {
+        let m = main.iter().find(|m| &m.label == label).unwrap_or(&empty);
         let mut segs: Vec<Segment> = Vec::new();
         let mut n = m.lines.len();
         for (_, secs) in &others {
-            if let Some(s) = secs.iter().find(|s| s.label == m.label) {
+            if let Some(s) = secs.iter().find(|s| &s.label == label) {
                 n = n.max(s.lines.len());
             }
         }
@@ -137,7 +153,7 @@ pub fn compile(lyrics: &[Lyric]) -> Result<Vec<SplitSection>> {
             segs.push(Segment { lang: primary.lang.clone(), text, align_key: spread(j, m.lines.len()), chords });
         }
         for (lang, secs) in &others {
-            if let Some(s) = secs.iter().find(|s| s.label == m.label) {
+            if let Some(s) = secs.iter().find(|s| &s.label == label) {
                 for (j, l) in s.lines.iter().enumerate() {
                     let (text, chords) = crate::chords::split_line(l);
                     segs.push(Segment { lang: lang.clone(), text, align_key: spread(j, s.lines.len()), chords });
@@ -145,7 +161,7 @@ pub fn compile(lyrics: &[Lyric]) -> Result<Vec<SplitSection>> {
             }
         }
         key += n as i64;
-        out.push(SplitSection { id: i as i64, label: m.label.clone(), segments: segs });
+        out.push(SplitSection { id: i as i64, label: label.clone(), segments: segs });
     }
     Ok(out)
 }
@@ -422,9 +438,11 @@ mod tests {
         let mut d = doc();
         d.sequence = "V1 B".into();
         assert!(preview(&d, 2).unwrap_err().to_string().contains("no [B] section"));
+        // a section only the second language has is kept (a verse a translation kept), not refused
         let mut d = doc();
         d.lyrics[1].body = "[B]\nOnly in Twi".into();
-        assert!(compile(&d.lyrics).unwrap_err().to_string().contains("[B]"));
+        let secs = compile(&d.lyrics).unwrap();
+        assert_eq!(secs.last().map(|s| s.label.as_str()), Some("B"), "with nothing to follow, at the end");
         let mut d = doc();
         d.title = "  ".into();
         let c = crate::db::open_memory().unwrap();
@@ -460,5 +478,112 @@ mod order_tests {
         let l = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
         assert_eq!(super::chorus_after_each(&l(&["V1", "C", "V2", "B", "V3"])), l(&["V1", "C", "V2", "C", "B", "C", "V3", "C"]));
         assert_eq!(super::chorus_after_each(&l(&["V1", "V2"])), l(&["V1", "V2"]), "no chorus: as written");
+    }
+}
+
+#[cfg(test)]
+mod uneven_tests {
+    use super::*;
+
+    fn doc(first: &str, second: &str) -> Vec<Lyric> {
+        vec![Lyric { lang: "gaa".into(), body: first.into() }, Lyric { lang: "en".into(), body: second.into() }]
+    }
+
+    #[test]
+    fn a_verse_only_the_translation_has_is_kept_in_its_place() {
+        // the Ga has five verses, the English six (a hymnal's translation kept a verse)
+        let ga: String = (1..=5).map(|v| format!("[V{v}]\nGa verse {v}\n\n")).collect();
+        let en: String = (1..=6).map(|v| format!("[V{v}]\nEnglish verse {v}\n\n")).collect();
+        let secs = compile(&doc(&ga, &en)).unwrap();
+        assert_eq!(secs.iter().map(|s| s.label.as_str()).collect::<Vec<_>>(), vec!["V1", "V2", "V3", "V4", "V5", "V6"]);
+        let v6 = &secs[5];
+        assert!(v6.segments.iter().all(|g| g.lang == "en") && !v6.segments.is_empty(), "verse 6 in English only");
+        // a verse missing in the middle comes back where it belongs
+        let secs = compile(&doc("[V1]\na\n\n[V2]\nb\n\n[V4]\nd", "[V1]\nA\n\n[V2]\nB\n\n[V3]\nC\n\n[V4]\nD")).unwrap();
+        assert_eq!(secs.iter().map(|s| s.label.as_str()).collect::<Vec<_>>(), vec!["V1", "V2", "V3", "V4"]);
+        // and it saves (this was refused before)
+        let c = crate::db::open_memory().unwrap();
+        let d = SongDoc { id: None, title: "PH 1".into(), author: None, copyright: None, ccli: None, numbers: vec![], lyrics: doc(&ga, &en), sequence: String::new(), lines_per_slide: None, key: None };
+        let id = save(&c, &d).unwrap();
+        assert!(load(&c, id).unwrap().lyrics[1].body.contains("English verse 6"));
+        let slides = preview(&d, 2).unwrap();
+        assert_eq!(slides.len(), 6);
+        assert!(slides[5].primary.is_empty() && slides[5].second == vec!["English verse 6".to_string()]);
+    }
+}
+
+/// The title slide's lines from a theme's pattern ("{number} · {title}\n{author}"). A detail
+/// the song lacks goes with its separator; a line left empty goes. Details: number ("MHB 422"),
+/// hymnal ("MHB"), no ("422"), title, author, copyright, ccli, key.
+pub fn fill_title(pattern: &str, fields: &std::collections::HashMap<&str, String>) -> Vec<String> {
+    const SEP: &[char] = &[' ', '·', '-', '–', '—', ',', '|', ':', '/'];
+    let mut out = Vec::new();
+    for line in pattern.lines() {
+        // the line as text and {tokens}
+        let mut parts: Vec<(bool, String)> = Vec::new();
+        let mut rest = line;
+        while let Some(i) = rest.find('{') {
+            match rest[i..].find('}') {
+                Some(j) => {
+                    parts.push((false, rest[..i].to_string()));
+                    parts.push((true, rest[i + 1..i + j].trim().to_lowercase()));
+                    rest = &rest[i + j + 1..];
+                }
+                None => break,
+            }
+        }
+        parts.push((false, rest.to_string()));
+        // fill; an empty detail takes the separator before it (or, first, the one after)
+        let mut vals: Vec<Option<String>> = parts.iter().map(|(tok, t)| if *tok { Some(fields.get(t.as_str()).cloned().unwrap_or_default()) } else { None }).collect();
+        let mut texts: Vec<String> = parts.iter().map(|(_, t)| t.clone()).collect();
+        let mut seen_value = false;
+        for k in 0..parts.len() {
+            if let Some(v) = &vals[k] {
+                if v.trim().is_empty() {
+                    let only_sep = |s: &str| s.chars().all(|c| SEP.contains(&c));
+                    if seen_value && k > 0 && only_sep(&texts[k - 1]) {
+                        texts[k - 1].clear();
+                    } else if k + 1 < parts.len() && only_sep(&texts[k + 1]) {
+                        texts[k + 1].clear();
+                    }
+                } else {
+                    seen_value = true;
+                }
+            }
+        }
+        let mut l = String::new();
+        for k in 0..parts.len() {
+            match vals[k].take() {
+                Some(v) => l.push_str(v.trim()),
+                None => l.push_str(&texts[k]),
+            }
+        }
+        let l = l.trim_matches(SEP).trim().to_string();
+        if !l.is_empty() {
+            out.push(l);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod title_tests {
+    use super::fill_title;
+    use std::collections::HashMap;
+
+    fn f(pairs: &[(&'static str, &str)]) -> HashMap<&'static str, String> {
+        pairs.iter().map(|(k, v)| (*k, v.to_string())).collect()
+    }
+
+    #[test]
+    fn a_theme_lays_out_its_title_slide() {
+        let all = f(&[("number", "MHB 422"), ("hymnal", "MHB"), ("no", "422"), ("title", "Blessed Assurance"), ("author", "Fanny J. Crosby"), ("key", "D")]);
+        assert_eq!(fill_title("{number} · {title}\n{author}", &all), vec!["MHB 422 · Blessed Assurance", "Fanny J. Crosby"]);
+        assert_eq!(fill_title("Hymn {no}\n{title}\nWords: {author} | Key {key}", &all), vec!["Hymn 422", "Blessed Assurance", "Words: Fanny J. Crosby | Key D"]);
+        // a song without a number or author: no stray separators, no empty lines
+        let few = f(&[("title", "Amazing Grace")]);
+        assert_eq!(fill_title("{number} · {title}\n{author}", &few), vec!["Amazing Grace"]);
+        assert_eq!(fill_title("{title} - {author}", &few), vec!["Amazing Grace"]);
+        assert_eq!(fill_title("{title}\n{copyright}", &few), vec!["Amazing Grace"]);
     }
 }

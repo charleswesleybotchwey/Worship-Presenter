@@ -14,6 +14,7 @@ import { PopupMenu, type MenuEntry } from "../../PopupMenu";
 import { printChordChart, printSongWords } from "../../print";
 import { AnnouncementList, ContextMenu } from "../service/panes";
 import { langName } from "../../languages";
+import { onListKey } from "../../listKeys";
 import { SAMPLE as THEME_SAMPLES } from "../../theme/Gallery";
 import { ThemeView } from "../../theme/ThemeView";
 import { KIND_NAMES, type ThemeKind, type ThemeRow } from "../../theme/types";
@@ -221,7 +222,43 @@ function SongsTab({
           {head("author", "Author")}
           {head("copyright", "Copyright")}
         </div>
-        <div className="lt-body" ref={win.ref} onScroll={win.onScroll} role="grid" aria-rowcount={sorted.length}>
+        <div
+          className="lt-body"
+          ref={win.ref}
+          onScroll={win.onScroll}
+          role="grid"
+          aria-rowcount={sorted.length}
+          aria-multiselectable
+          tabIndex={0}
+          onKeyDown={onListKey({
+            ids: sorted.map((x) => x.id),
+            sel,
+            multi,
+            setSel,
+            setMulti,
+            anchor: anchorIdx,
+            onOpen: (id) => {
+              const r = sorted.find((x) => x.id === id);
+              if (r) onPreview(item(r));
+            },
+            onAdd: (ids) => sorted.filter((x) => ids.includes(x.id)).forEach((r) => onAdd(item(r))),
+            onDelete: (ids) => {
+              const names = sorted.filter((x) => ids.includes(x.id)).map((x) => x.title);
+              if (!confirm(ids.length === 1 ? `Delete “${names[0]}” from the library? A backup is made first.` : `Delete these ${ids.length} songs from the library? A backup is made first.`)) return;
+              void act(async () => {
+                await api.backupNow();
+                for (const id of ids) await api.deleteSong(id);
+                setMulti(new Set());
+              }, ids.length === 1 ? `“${names[0]}” deleted.` : `${ids.length} songs deleted.`);
+            },
+            reveal: (i) => {
+              const el = win.ref.current;
+              if (!el) return;
+              if (i * ROW_H < el.scrollTop) el.scrollTop = i * ROW_H;
+              else if ((i + 1) * ROW_H > el.scrollTop + el.clientHeight) el.scrollTop = (i + 1) * ROW_H - el.clientHeight;
+            },
+          })}
+        >
           <div style={{ height: sorted.length * ROW_H, position: "relative" }}>
             {sorted.slice(win.range.from, win.range.to).map((r, k) => (
               <div
@@ -583,7 +620,21 @@ function ScripturesTab({ refInput, onPreview, onAdd, onAir, inPreview }: { refIn
           <span className="lt-th">Reference</span>
           <span className="lt-th">Scripture</span>
         </div>
-        <div className="lt-body" role="grid">
+        <div
+          className="lt-body"
+          role="grid"
+          tabIndex={0}
+          onKeyDown={onListKey({
+            ids: (shownHits ?? []).map((_, k) => k),
+            sel: hitSel.size === 1 ? [...hitSel][0] : null,
+            multi: hitSel.size > 1 ? hitSel : new Set(),
+            setSel: (k) => setHitSel(k == null ? new Set() : new Set([k])),
+            setMulti: (m) => setHitSel(m),
+            anchor: hitAnchor,
+            onOpen: (k) => shownHits?.[k] && onPreview(hitItem(shownHits[k])),
+            onAdd: (ks) => ks.forEach((k) => shownHits?.[k] && onAdd(hitItem(shownHits[k]))),
+          })}
+        >
           {shownHits?.map((h, hi) => (
             <div
               key={h.version + h.reference}
@@ -927,6 +978,26 @@ function ThemesTab({ version, previewKind, onUseForItem, onEdit }: { version: nu
       <div className="lt-main">
         <div
           className={`lt-themes ${view === "list" ? "lt-themes--list" : ""}`}
+          tabIndex={0}
+          onKeyDown={onListKey({
+            ids: list.map((r) => r.id),
+            sel,
+            multi,
+            setSel,
+            setMulti,
+            anchor,
+            onOpen: (id) => onEdit({ id }),
+            onDelete: (ids) => {
+              const rs = list.filter((r) => ids.includes(r.id));
+              if (rs.length === 1) {
+                const r = rs[0];
+                if (r.is_default) return setNote(`“${r.name}” is the default theme: choose another default first.`);
+                if (confirm(`Delete the theme “${r.name}”?`)) void api.deleteTheme(r.id).then(() => (setNote(`“${r.name}” deleted.`), load()), (e) => setNote(String(e instanceof Error ? e.message : e)));
+                return;
+              }
+              if (confirm(`Delete ${rs.length} themes? Default themes are kept.`)) void batch(rs, "Deleted", (r) => api.deleteTheme(r.id), (r) => (r.is_default ? "the default theme" : null));
+            },
+          })}
           onContextMenu={(e) => {
             if ((e.target as HTMLElement).closest(".lt-theme")) return;
             e.preventDefault();

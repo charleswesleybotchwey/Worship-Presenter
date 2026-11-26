@@ -245,17 +245,37 @@ fn build_slides(conn: &Connection, item: &ProgramItem, live: &LiveState) -> Res<
             let mut slides = splitter::split(&sections, &opts);
             // a first slide with the hymn number, the title and the author (Settings)
             if set("song_title_slide") == "true" {
-                let number: Option<String> = conn
-                    .query_row("SELECT h.code || ' ' || n.number FROM song_number n JOIN hymnal h ON h.id = n.hymnal_id WHERE n.song_id = ?1 ORDER BY n.rowid LIMIT 1", [song_id], |r| r.get(0))
+                // the theme's own layout for it (Theme editor → Title slide), else the usual
+                let number: Option<(String, String)> = conn
+                    .query_row("SELECT h.code, n.number FROM song_number n JOIN hymnal h ON h.id = n.hymnal_id WHERE n.song_id = ?1 ORDER BY n.rowid LIMIT 1", [song_id], |r| Ok((r.get(0)?, r.get(1)?)))
                     .ok();
-                let first = match number {
-                    Some(n) if !title.to_lowercase().starts_with(&n.to_lowercase()) => format!("{n} · {title}"),
-                    _ => title.clone(),
-                };
-                let mut lines = vec![first];
-                if let Some(a) = author.filter(|a| !a.trim().is_empty()) {
-                    lines.push(a.trim().to_string());
+                let extra: Option<(Option<String>, Option<String>, Option<String>)> = conn.query_row("SELECT copyright, ccli, song_key FROM song WHERE id = ?1", [song_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).ok();
+                let (copyright, ccli, key) = extra.unwrap_or((None, None, None));
+                let full = number.as_ref().map(|(h, n)| format!("{h} {n}")).unwrap_or_default();
+                // a title that starts with its number ("MHB 1, ENG&FANTE") does not repeat it
+                let repeat = !full.is_empty() && title.to_lowercase().starts_with(&full.to_lowercase());
+                let mut fields: std::collections::HashMap<&str, String> = std::collections::HashMap::new();
+                fields.insert("number", if repeat { String::new() } else { full.clone() });
+                fields.insert("hymnal", number.as_ref().map(|x| x.0.clone()).unwrap_or_default());
+                fields.insert("no", number.as_ref().map(|x| x.1.clone()).unwrap_or_default());
+                fields.insert("title", title.clone());
+                fields.insert("author", author.clone().unwrap_or_default());
+                fields.insert("copyright", copyright.unwrap_or_default());
+                fields.insert("ccli", ccli.unwrap_or_default());
+                fields.insert("key", key.unwrap_or_default());
+                let theme_id = match item {
+                    ProgramItem::Song { theme_id: Some(t), .. } => Some(*t),
+                    _ => None,
                 }
+                .or_else(|| rule_theme(conn, item))
+                .or_else(|| wp_core::themes::default_id(conn, "song"));
+                let pattern = theme_id
+                    .and_then(|id| conn.query_row("SELECT json FROM theme WHERE id = ?1", [id], |r| r.get::<_, String>(0)).ok())
+                    .and_then(|j| serde_json::from_str::<serde_json::Value>(&j).ok())
+                    .and_then(|v| v.get("titleSlide").and_then(|t| t.as_str()).map(String::from))
+                    .filter(|t| !t.trim().is_empty())
+                    .unwrap_or_else(|| "{number} · {title}\n{author}".into());
+                let lines = wp_core::songs::fill_title(&pattern, &fields);
                 slides.insert(0, Slide { reference: None, label: "Title".into(), occurrence: 0, first_key: 0, last_key: 0, primary: lines, second: vec![], image: None, chords: vec![] });
             }
             Ok((slides, Some(title.clone())))
@@ -4055,6 +4075,14 @@ mod song_option_tests {
         let s = build_slides(&c, &item, &LiveState::default()).unwrap().0;
         assert_eq!(s[0].label, "Title");
         assert_eq!(s[0].primary, vec!["MHB 422 · Blessed Assurance".to_string(), "Fanny J. Crosby".to_string()]);
+        // the song theme lays out its own title slide
+        let tid = wp_core::themes::default_id(&c, "song").expect("a default song theme");
+        let j: String = c.query_row("SELECT json FROM theme WHERE id = ?1", [tid], |r| r.get(0)).unwrap();
+        let mut v: serde_json::Value = serde_json::from_str(&j).unwrap();
+        v["titleSlide"] = serde_json::json!("Hymn {no}\n{title}\n{key}");
+        c.execute("UPDATE theme SET json = ?1 WHERE id = ?2", rusqlite::params![v.to_string(), tid]).unwrap();
+        let s = build_slides(&c, &item, &LiveState::default()).unwrap().0;
+        assert_eq!(s[0].primary, vec!["Hymn 422".to_string(), "Blessed Assurance".to_string()], "the theme's pattern; no key, no line");
     }
 }
 

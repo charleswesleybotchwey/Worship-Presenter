@@ -397,3 +397,39 @@ test("a large-print screen shows bigger, bold words", async ({ page, context }) 
   expect(l[0]).toBeGreaterThan(n[0] * 1.2);
   expect(l[1]).toBe("700");
 });
+
+test("theme editor: the size arrow keeps going down, and the title slide takes its details", async ({ page }) => {
+  await page.goto("/#/control");
+  await page.locator(".lib-tabs").getByText("Themes").click();
+  await page.locator(".lt-theme").first().dblclick();
+  await page.locator("textarea[aria-label='Title slide pattern']").fill("Hymn ");
+  await page.locator(".te__token", { hasText: "No. (422)" }).click();
+  await expect(page.locator("textarea[aria-label='Title slide pattern']")).toHaveValue("Hymn {no}");
+  await page.locator(".te-layers button, .te__layers button", { hasText: "Lyrics" }).first().click();
+  const size = page.locator("label.prop:has(> span:text-is('Size')) input");
+  const start = Number(await size.inputValue());
+  for (let i = 0; i < 5; i++) {
+    await size.focus();
+    await page.keyboard.press("ArrowDown");
+  }
+  await expect(size).toHaveValue(String(start - 1.25)); // five quarter steps, none stuck
+});
+
+test("lists take the keyboard: Ctrl+A, arrows (not the live slide), Delete", async ({ page }) => {
+  await page.goto("/#/control");
+  const vis = ".lib-pane:not([hidden]) ";
+  await page.locator(".lt-row--songs", { hasText: "Blessed Assurance" }).click();
+  await page.locator(".wp-btn--primary", { hasText: "Go live" }).click();
+  const liveSlide = page.locator(".ew-pane[aria-label=Live] .sl-slide.is-current .sl-num");
+  await expect(liveSlide).toContainText("1");
+  await page.locator(".lt-row--songs", { hasText: "MHB 1," }).click();
+  await page.keyboard.press("Control+a");
+  await expect(page.locator(vis + ".lt-row--songs.is-selected")).toHaveCount(3);
+  await page.keyboard.press("Home");
+  await page.keyboard.press("ArrowDown");
+  await expect(page.locator(vis + ".lt-row--songs.is-selected")).toHaveCount(1);
+  await expect(liveSlide).toContainText("1"); // the arrow stayed in the list
+  page.once("dialog", (d) => void d.accept());
+  await page.keyboard.press("Delete");
+  await expect(page.locator(vis + ".lt-row--songs")).toHaveCount(2);
+});

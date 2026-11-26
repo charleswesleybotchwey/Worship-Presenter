@@ -203,6 +203,10 @@ export function Settings({
                 </button>
               </div>
               <p className="wp-note">Always: F5 Go live (not while typing), Ctrl+K commands, Ctrl+F song search, Ctrl+G quick scripture, F6 next region, 1–9 sections on the Live pane, Ctrl+Z back to the previous live item.</p>
+              <p className="wp-note">
+                In the lists (songs, media, themes, scripture results; click a list first): Ctrl+A select all, Delete delete the selection (it asks first; a backup is made for songs), ↑ ↓ move, Shift+↑ ↓ select several, Home and End the first and last, Enter
+                to Preview (themes: edit), Ctrl+Enter add to the schedule. In the schedule: Delete removes the item, Alt+↑ ↓ moves it. Esc always blanks the screens.
+              </p>
             </>
           )}
 

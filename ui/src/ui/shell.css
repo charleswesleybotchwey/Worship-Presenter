@@ -902,3 +902,37 @@ button.tool-chip { cursor: pointer; }
 .tune__gap { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--wp-muted); } .tune__gap input { width: 56px; }
 .tune__track { max-width: 260px; } .tune__time { font-size: 11px; color: var(--wp-muted); }
 .tune { display: flex; align-items: center; gap: 6px; padding: 4px 8px; flex-wrap: wrap; }
+
+/* ---------- the theme editor and settings forms: labels quiet, values bright ---------- */
+.prop > span:first-child, .oo-row > span:first-child, .ps__row > span:first-child, .prop-row > label > span:first-child {
+  color: var(--wp-muted); font-size: 12px; font-weight: 500; letter-spacing: .01em;
+}
+.prop input, .prop select, .prop textarea, .oo-row input, .oo-row select, .ps__row input, .ps__row select { color: var(--wp-ink); font-size: 13px; }
+.prop--check > span, .wp-check { color: var(--wp-secondary); font-size: 13px; }
+/* sections: a clear title that folds the section away */
+.prop-group { border-bottom: 1px solid var(--wp-line); padding: 0; }
+.prop-group > summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 8px; padding: 10px 14px; user-select: none; }
+.prop-group > summary::-webkit-details-marker { display: none; }
+.prop-group > summary::before { content: ""; width: 6px; height: 6px; border-right: 1.5px solid var(--wp-muted); border-bottom: 1.5px solid var(--wp-muted); transform: rotate(-45deg); transition: transform .15s; margin-right: 2px; }
+.prop-group[open] > summary::before { transform: rotate(45deg); }
+.prop-group > summary:hover { background: var(--wp-hover); }
+.prop-group > summary h3 { margin: 0; font-size: 13px; font-weight: 600; color: var(--wp-ink); letter-spacing: 0; text-transform: none; }
+.prop-group__body { display: grid; gap: 8px; padding: 2px 14px 14px; }
+/* section looks (Chorus, Bridge…): small titles in line with the rest */
+.te__section { display: grid; gap: 4px; padding: 6px 0; border-top: 1px dashed color-mix(in srgb, var(--wp-line) 70%, transparent); }
+.te__section > strong { font-size: 12px; font-weight: 600; color: var(--wp-secondary); padding: 0; margin: 0; }
+.te__section .prop-row { display: flex; flex-wrap: wrap; gap: 4px 16px; }
+.prop-group .hint { margin: 0; color: var(--wp-muted); font-size: 12px; }
+/* layer actions as real buttons */
+.te__layer-btn { padding: 4px 10px; font-size: 12px; }
+/* the title slide pattern */
+.te__title-pattern { width: 100%; font: 500 13px/1.4 var(--wp-font); padding: 6px 8px; resize: vertical; }
+.te__tokens { display: flex; flex-wrap: wrap; gap: 4px; }
+.te__token { border: 1px solid var(--wp-line); background: var(--wp-canvas); color: var(--wp-secondary); border-radius: 999px; padding: 2px 9px; font: 500 11px var(--wp-font); cursor: pointer; }
+.te__token:hover { color: var(--wp-ink); border-color: var(--wp-edge); }
+/* everything in a section lines up with its labels */
+.prop-group__body > .hint, .prop-group__body > .te__title-pattern, .prop-group__body > .te__tokens, .prop-group__body > .te__section { margin-left: 16px; margin-right: 16px; width: auto; }
+.te__layer-btn { justify-self: start; width: auto; }
+/* lists take the keyboard: a quiet edge shows which one has it */
+.lt-body:focus-visible, .lt-themes:focus-visible, .media:focus-visible { outline: none; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--wp-focus) 55%, transparent); }
+.lt-body:focus, .lt-themes:focus, .media:focus { outline: none; }

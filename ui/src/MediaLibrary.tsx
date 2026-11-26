@@ -1,3 +1,4 @@
+import { onListKey } from "./listKeys";
 import { dragItem, useGoLive } from "./dnd";
 import { OnlineMedia } from "./OnlineMedia";
 import { useCallback, useEffect, useMemo, useState, useRef } from "react";
@@ -187,8 +188,33 @@ export function MediaGrid({
   };
 
   shownRef.current = shown;
+  // the keyboard, as in any Windows list (both layouts): Ctrl+A, Delete, ↑ ↓, Enter…
+  const keys = onListKey({
+    ids: shown.map((m) => m.id),
+    sel: current,
+    multi,
+    setSel: (id) => setLastPick(id),
+    setMulti,
+    anchor,
+    onOpen: (id) => {
+      const m = shown.find((x) => x.id === id);
+      if (m && !m.missing) onPick(m);
+    },
+    // deleting from the keyboard only in the media library itself, never in a picture picker
+    onDelete: !menuFor ? undefined : (ids) => {
+      const chosen = shown.filter((x) => ids.includes(x.id));
+      if (!confirm(chosen.length === 1 ? `Delete “${chosen[0].title}” from the media library? Themes or items using it will show nothing in its place.` : `Delete ${chosen.length} items from the media library? Themes or items using them will show nothing in their place.`)) return;
+      void (async () => {
+        const failed: string[] = [];
+        for (const x of chosen) await api.deleteMedia(x.id).catch(() => failed.push(x.title));
+        setMulti(new Set());
+        await refresh();
+        if (failed.length) setProblem(`Deleted ${chosen.length - failed.length}; could not delete: ${failed.join(", ")}.`);
+      })();
+    },
+  });
   return (
-    <div className="media">
+    <div className="media" tabIndex={0} onKeyDown={keys}>
       <div className="media__bar">
         <label className="search">
           <Icon name="search" />

@@ -159,6 +159,8 @@ export interface Theme {
   /** When only the second language is shown (Live: Fante only), it takes the main text's
    *  place and size. Off: it keeps the second-language layer's look. Default on. */
   secondFills?: boolean;
+  /** Songs: the title slide's pattern ("{number} · {title}\n{author}"); empty = that. */
+  titleSlide?: string;
   transition: { kind: "cut" | "fade" | "slide-up" | "wipe" | "zoom" | "push" | "cover" | "cube" | "drop" | "iris" | "pageflip"; ms: number };
   layers: Layer[];
   /** Choruses, bridges… styled apart from the verses. */

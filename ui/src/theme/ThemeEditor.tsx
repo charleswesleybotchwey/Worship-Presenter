@@ -1,3 +1,4 @@
+import * as React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, type MediaItem } from "../api";
 import { MediaGrid } from "../MediaLibrary";
@@ -67,6 +68,11 @@ const ANIMS: { value: AnimKind; label: string }[] = [
 ];
 
 const r1 = (n: number) => Math.round(n * 10) / 10;
+/** A value rounded to as many decimals as its step has (0.25 → two, 0.05 → two, 15 → none). */
+export const showStep = (n: number, step: number) => {
+  const dec = Math.min(4, (String(step).split(".")[1] ?? "").length);
+  return Number(n.toFixed(Math.max(dec, Number.isInteger(n) ? 0 : 1)));
+};
 
 const hasSectionLabel = (t: Theme) => t.layers.some((l) => l.kind === "text" && (l as TextLayer).field === "section");
 
@@ -119,7 +125,9 @@ function Num({ label, value, onChange, step = 0.5, min, max, suffix }: { label: 
     <label className="prop">
       <span>{label}</span>
       <span className="prop__num">
-        <input type="number" value={r1(value)} step={step} min={min} max={max} onChange={(e) => e.target.value !== "" && onChange(Number(e.target.value))} />
+        {/* shown with the step's own decimals: 4.75 stays 4.75 (shown as 4.8, the next step
+            down landed on 4.75 again and the arrow seemed to stop) */}
+        <input type="number" value={showStep(value, step)} step={step} min={min} max={max} onChange={(e) => e.target.value !== "" && onChange(Number(e.target.value))} />
         {suffix && <em>{suffix}</em>}
       </span>
     </label>
@@ -200,12 +208,17 @@ function Check({ label, value, onChange }: { label: string; value: boolean; onCh
   );
 }
 
+/** A section of settings that folds away; each remembers whether it was left open. */
 function Group({ title, children }: { title: string; children: React.ReactNode }) {
+  const key = `wp-te-open:${title}`;
+  const [open, setOpen] = React.useState(() => localStorage.getItem(key) !== "0");
   return (
-    <section className="prop-group">
-      <h3>{title}</h3>
-      {children}
-    </section>
+    <details className="prop-group" open={open} onToggle={(e) => (setOpen(e.currentTarget.open), localStorage.setItem(key, e.currentTarget.open ? "1" : "0"))}>
+      <summary>
+        <h3>{title}</h3>
+      </summary>
+      <div className="prop-group__body">{children}</div>
+    </details>
   );
 }
 
@@ -779,6 +792,40 @@ export function ThemeEditor({ onClose, request }: { onClose: () => void; /** Fro
                   </label>
                 )}
               </Group>
+              {theme.kind === "song" && (
+                <Group title="Title slide">
+                  <p className="hint">What a song's first slide says, and how (when title slides are on: Settings → Projection). A detail a song does not have is left out with its separator.</p>
+                  <textarea
+                    className="te__title-pattern"
+                    rows={3}
+                    value={theme.titleSlide ?? ""}
+                    placeholder={"{number} · {title}\n{author}"}
+                    onChange={(e) => change({ ...theme, titleSlide: e.target.value })}
+                    aria-label="Title slide pattern"
+                  />
+                  <div className="te__tokens">
+                    {(
+                      [
+                        ["number", "Number (MHB 422)"],
+                        ["hymnal", "Hymnal (MHB)"],
+                        ["no", "No. (422)"],
+                        ["title", "Title"],
+                        ["author", "Author"],
+                        ["copyright", "Copyright"],
+                        ["ccli", "CCLI"],
+                        ["key", "Key"],
+                      ] as const
+                    ).map(([t, l]) => (
+                      <button key={t} className="te__token" title={`Add {${t}}`} onClick={() => change({ ...theme, titleSlide: `${theme.titleSlide ?? ""}{${t}}` })}>
+                        {l}
+                      </button>
+                    ))}
+                    <button className="te__token" title="A new line" onClick={() => change({ ...theme, titleSlide: `${theme.titleSlide ?? ""}\n` })}>
+                      ↵ New line
+                    </button>
+                  </div>
+                </Group>
+              )}
               <Group title="Background">
                 <Select
                   label="Type"
@@ -951,7 +998,7 @@ export function ThemeEditor({ onClose, request }: { onClose: () => void; /** Fro
                 <div className="prop-row">
                   <Check label="Lock position" value={layer.locked} onChange={(locked) => setLayer({ locked })} />
                   <button
-                    className="btn-quiet btn-danger"
+                    className="wp-btn te__layer-btn btn-danger"
                     onClick={() => {
                       change({ ...theme, layers: theme.layers.filter((l) => l.id !== layer.id) });
                       setSelected(null);
@@ -961,7 +1008,7 @@ export function ThemeEditor({ onClose, request }: { onClose: () => void; /** Fro
                   </button>
                 </div>
                 <button
-                  className="btn-quiet"
+                  className="wp-btn te__layer-btn"
                   onClick={() => {
                     const copy = { ...structuredClone(layer), id: newId(layer.kind), name: `${layer.name} copy`, y: Math.min(95, layer.y + 3) };
                     change({ ...theme, layers: [...theme.layers, copy] });

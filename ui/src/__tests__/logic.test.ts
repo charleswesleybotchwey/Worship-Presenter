@@ -202,3 +202,63 @@ describe("hymn tunes: verses as runs of slides", () => {
     ]);
   });
 });
+
+import { showStep } from "../theme/ThemeEditor";
+
+describe("number boxes keep their step's decimals", () => {
+  it("does not round a quarter step away (the arrow stuck)", () => {
+    expect(showStep(4.75, 0.25)).toBe(4.75);
+    expect(showStep(1.15, 0.05)).toBe(1.15);
+    expect(showStep(45, 15)).toBe(45);
+    expect(showStep(4.7500000001, 0.25)).toBe(4.75);
+  });
+});
+
+import { listKey, type ListState } from "../listKeys";
+
+describe("keyboard in lists", () => {
+  const make = (over: Partial<ListState> = {}) => {
+    const s: ListState & { deleted?: number[]; added?: number[]; opened?: number } = {
+      ids: [10, 20, 30, 40],
+      sel: 20,
+      multi: new Set(),
+      anchor: { current: 1 },
+      setSel: (id) => (s.sel = id),
+      setMulti: (m) => (s.multi = m),
+      onDelete: (ids) => (s.deleted = ids),
+      onAdd: (ids) => (s.added = ids),
+      onOpen: (id) => (s.opened = id),
+      ...over,
+    };
+    return s;
+  };
+  const key = (k: string, mods: Partial<KeyboardEvent> = {}) => ({ key: k, ctrlKey: false, metaKey: false, shiftKey: false, altKey: false, ...mods });
+  it("Ctrl+A selects everything; Delete deletes the selection", () => {
+    const s = make();
+    expect(listKey(key("a", { ctrlKey: true }), s)).toBe(true);
+    expect([...s.multi]).toEqual([10, 20, 30, 40]);
+    listKey(key("Delete"), s);
+    expect(s.deleted).toEqual([10, 20, 30, 40]);
+  });
+  it("arrows move, Shift extends, Home and End jump", () => {
+    const s = make();
+    listKey(key("ArrowDown"), s);
+    expect(s.sel).toBe(30);
+    listKey(key("ArrowDown", { shiftKey: true }), s);
+    expect([...s.multi]).toEqual([30, 40]);
+    listKey(key("Home"), s);
+    expect((s.sel, s.multi.size)).toBe(0);
+    expect(s.sel).toBe(10);
+    listKey(key("End"), s);
+    expect(s.sel).toBe(40);
+  });
+  it("Enter previews, Ctrl+Enter adds; with nothing to delete, Delete is left alone", () => {
+    const s = make();
+    listKey(key("Enter"), s);
+    expect(s.opened).toBe(20);
+    listKey(key("Enter", { ctrlKey: true }), s);
+    expect(s.added).toEqual([20]);
+    expect(listKey(key("Delete"), make({ sel: null }))).toBe(false);
+    expect(listKey(key("Escape"), make())).toBe(false); // Esc still blanks the screens
+  });
+});

@@ -123,7 +123,7 @@ pub fn save(conn: &Connection, id: Option<i64>, theme: &Value) -> Result<i64> {
     }
 }
 
-fn default_id(conn: &Connection, kind: &str) -> Option<i64> {
+pub fn default_id(conn: &Connection, kind: &str) -> Option<i64> {
     conn.query_row("SELECT value FROM setting WHERE key = ?1", [format!("theme_default_{kind}")], |r| r.get::<_, String>(0))
         .ok()
         .and_then(|v| v.parse().ok())
