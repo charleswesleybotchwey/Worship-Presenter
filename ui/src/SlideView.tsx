@@ -104,6 +104,9 @@ export function SlideView({
       </Crossfade>
     );
   }
-  const data = { sound, allPrimary: allSlides?.map((x) => x.primary), allSecond: allSlides?.map((x) => x.second), primary: slide.primary, second: slide.second, reference: kind === "scripture" ? (slide.reference != null ? slide.reference || null : caption) : null, title: kind === "song" ? caption : null, section: kind === "song" ? sectionName(slide.label) : null, first: position?.first, last: position?.last, textScale: adjust?.scale, textShift: adjust?.shift, rotateKey: caption ?? slide.label, copyright: kind === "song" ? copyright ?? null : null };
+  // only the second language (Live: Fante only): it takes the main text's place and size,
+  // unless the theme keeps it in its own place
+  const alone = kind === "song" && slide.primary.length === 0 && slide.second.length > 0 && theme.secondFills !== false;
+  const data = { sound, allPrimary: allSlides?.map((x) => (alone ? x.second : x.primary)), allSecond: allSlides?.map((x) => (alone ? [] : x.second)), primary: alone ? slide.second : slide.primary, second: alone ? [] : slide.second, reference: kind === "scripture" ? (slide.reference != null ? slide.reference || null : caption) : null, title: kind === "song" ? caption : null, section: kind === "song" ? sectionName(slide.label) : null, first: position?.first, last: position?.last, textScale: adjust?.scale, textShift: adjust?.shift, rotateKey: caption ?? slide.label, copyright: kind === "song" ? copyright ?? null : null };
   return <ThemeView theme={theme} data={data} phase={phase} showKey={showKey} textKey={textKey} hideText={hideText} still={still} />;
 }

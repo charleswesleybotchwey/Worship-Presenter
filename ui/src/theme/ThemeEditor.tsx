@@ -873,6 +873,7 @@ export function ThemeEditor({ onClose, request }: { onClose: () => void; /** Fro
               </Group>
               <Group title="Two languages">
                 <Check label="Line by line (each line, then its translation)" value={!!theme.pairLines} onChange={(pairLines) => change({ ...theme, pairLines })} />
+                <Check label="Second language alone fills the screen (when only it is shown)" value={theme.secondFills !== false} onChange={(secondFills) => change({ ...theme, secondFills })} />
               </Group>
               <Group title="Between slides">
                 <Select

@@ -4,13 +4,14 @@ import type { ThemeRow } from "../../theme/types";
 import { ROLE_NAMES, defaultLook, outputLabel, type OutputView } from "../../live/outputs";
 
 /** A screen's looks (as ProPresenter's). */
-const LOOK_NAMES: Record<string, string> = { full: "Full slides", lower: "Lower third", stage: "Stage display", words: "Words only", media: "Media only" };
+const LOOK_NAMES: Record<string, string> = { full: "Full slides", lower: "Lower third", stage: "Stage display", words: "Words only", media: "Media only", board: "Hymn board" };
 const LOOK_NOTES: Record<string, string> = {
   full: "Everything: backgrounds, videos, words and the logo (the congregation's screens).",
   lower: "The words in a lower-third band, see-through elsewhere: for the livestream and keying.",
   stage: "The stage display for the pulpit and the band (Settings → Stage display).",
   words: "The words on black: no backgrounds, pictures or video (overflow rooms, confidence monitors).",
   media: "Backgrounds and videos without the words (side screens, walls).",
+  board: "The day's hymn numbers in large type, the one being sung lit, like the boards on church walls.",
 };
 
 // EasyWorship's Options dialog for the outputs: Main, Alternate (lower third) and
@@ -147,6 +148,9 @@ export function OutputOptions({ views, mainLive }: { views: (role: string) => Ou
                 </select>
               </label>
               <p className="oo-note">{LOOK_NOTES[draft.look ?? defaultLook(draft.role)]}</p>
+              <label className="wp-check">
+                <input type="checkbox" checked={!!draft.large_print} onChange={(e) => set({ large_print: e.target.checked })} aria-label="Large print" /> Large print: bigger, bold, white on black (for older members or a far-away screen)
+              </label>
               {draft.role !== "main" && (
                 <button
                   className="btn-quiet btn-danger"

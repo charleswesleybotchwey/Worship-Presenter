@@ -880,3 +880,25 @@ button.tool-chip { cursor: pointer; }
 .lang-switch button.is-on { background: var(--wp-selected); color: var(--wp-ink); }
 .lang-switch.is-limited { box-shadow: inset 0 0 0 1px var(--wp-attention); }
 .lang-switch.is-limited button.is-on { background: var(--wp-attention); color: #1d1c1a; }
+/* the package dialog */
+.pkg { width: min(620px, 94vw); }
+.pkg__body { display: grid; gap: 10px; padding: 14px 18px 18px; }
+.pkg__bibles { border: 0; padding: 0; display: grid; gap: 4px; }
+.pkg__bibles legend { font-weight: 600; margin-bottom: 4px; }
+.pkg__list { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+.pkg__done { margin: 0; padding: 10px 12px; border-radius: 6px; background: var(--wp-ready-soft); }
+.pkg__format { display: flex; gap: 10px; align-items: flex-start; padding: 6px 8px; border-radius: 6px; cursor: pointer; } .pkg__format:hover { background: var(--wp-hover); } .pkg__format span { display: grid; gap: 2px; } .pkg__format input { margin-top: 3px; }
+/* after a power cut: pick up where you were */
+.recovery { position: fixed; left: 50%; top: 64px; transform: translateX(-50%); z-index: 90; display: flex; align-items: center; gap: 12px; padding: 10px 12px 10px 16px; border-radius: 8px; background: var(--wp-overlay); border: 1px solid var(--wp-attention); box-shadow: 0 12px 32px rgba(0, 0, 0, .45); max-width: min(760px, 94vw); }
+.recovery strong { color: var(--wp-attention); white-space: nowrap; }
+.spell { display: grid; gap: 4px; margin: 6px 0; padding: 8px 10px; border-radius: 6px; background: var(--wp-overlay); font-size: 13px; } .spell__row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+/* the lectionary panel */
+.lect__day { display: grid; gap: 2px; }
+.lect__day strong { font-size: 16px; }
+.lect__list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.lect__list li { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 5px; background: var(--wp-overlay); }
+.opn.lect { align-content: start; grid-auto-rows: max-content; } .lect__day { align-content: start; }
+.opn.lect { grid-template-rows: none; }
+.tune__gap { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--wp-muted); } .tune__gap input { width: 56px; }
+.tune__track { max-width: 260px; } .tune__time { font-size: 11px; color: var(--wp-muted); }
+.tune { display: flex; align-items: center; gap: 6px; padding: 4px 8px; flex-wrap: wrap; }

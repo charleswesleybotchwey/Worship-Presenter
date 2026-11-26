@@ -13,6 +13,8 @@ import { DRAG_TYPE, dragItem, useGoLive } from "../../dnd";
 import { PopupMenu, type MenuEntry } from "../../PopupMenu";
 import { printChordChart, printSongWords } from "../../print";
 import { AnnouncementList, ContextMenu } from "../service/panes";
+import { langName } from "../../languages";
+import { SAMPLE as THEME_SAMPLES } from "../../theme/Gallery";
 import { ThemeView } from "../../theme/ThemeView";
 import { KIND_NAMES, type ThemeKind, type ThemeRow } from "../../theme/types";
 import type { Deck } from "../../api";
@@ -58,7 +60,7 @@ function useWindow(count: number) {
 
 type Sort = { col: "number" | "title" | "first_line" | "langs" | "author" | "copyright"; dir: 1 | -1 };
 
-const LANG_NAMES: Record<string, string> = { en: "English", fat: "Fante", tw: "Twi", ak: "Akan", gaa: "Ga", ga: "Ga", ee: "Ewe", dag: "Dagbani", gur: "Farefare", ha: "Hausa", fr: "French", yo: "Yoruba" };
+const LANG_NAMES = new Proxy({} as Record<string, string>, { get: (_t, k: string) => langName(k) });
 const langNames = (l: string[]) => l.map((x) => LANG_NAMES[x] ?? x.toUpperCase()).join(" + ");
 
 function SongsTab({
@@ -311,6 +313,11 @@ function SongsTab({
               { label: "&Refresh", run: () => setBump((x) => x + 1) },
               "-",
               { label: "Pri&nt", sub: [{ label: "&Words (every language)…", run: () => void printSongWords(row.id) }, { label: "&Chord chart…", run: () => void printChordChart(row.id) }] },
+              {
+                label: several.length > 1 ? `E&xport ${several.length} songs…` : "E&xport…",
+                run: () => window.dispatchEvent(new CustomEvent("wp-song-export", { detail: several.length > 1 ? several.map((x) => x.id) : [row.id] })),
+              },
+              ...(rows.length > 1 ? [{ label: `Export all ${rows.length.toLocaleString()} songs in this list…`, run: () => window.dispatchEvent(new CustomEvent("wp-song-export", { detail: rows.map((x) => x.id) })) } as MenuEntry] : []),
               "-",
               { label: "&Preview", run: () => onPreview(item(row)) },
               { label: "&Go live", run: () => live(item(row)) },
@@ -674,7 +681,7 @@ function ScripturesTab({ refInput, onPreview, onAdd, onAir, inPreview }: { refIn
                 ‹
               </button>
               <span className="wp-num">
-                {view.book} {view.chapter} · {view.rows.length} verses
+                {view.book} {view.chapter}
               </span>
               <button className="wp-icon-btn" aria-label="Next chapter" onClick={() => goChapter(1)} disabled={view.chapter >= view.chapters}>
                 ›
@@ -746,7 +753,8 @@ function ScripturesTab({ refInput, onPreview, onAdd, onAir, inPreview }: { refIn
 // ---------- Themes ----------
 
 const THEME_KINDS: ThemeKind[] = ["song", "scripture", "lower_third", "announcement"];
-const SAMPLE = { primary: ["song text line one", "song text line two"], second: ["second language line"], reference: "John 3:16", title: "Title", section: "Verse 1" };
+// a theme's picture shows words of its own kind (a scripture theme, a verse)
+const sampleFor = (kind: string) => THEME_SAMPLES[kind] ?? THEME_SAMPLES.song;
 
 export type ThemeEditRequest = { id?: number; newKind?: ThemeKind };
 
@@ -958,7 +966,7 @@ function ThemesTab({ version, previewKind, onUseForItem, onEdit }: { version: nu
               title="Double-click to edit; right-click for more"
             >
               <div className="lt-theme__pic">
-                <ThemeView theme={r.theme} data={SAMPLE} still />
+                <ThemeView theme={r.theme} data={sampleFor(r.kind)} still />
               </div>
               <span>
                 {r.name}

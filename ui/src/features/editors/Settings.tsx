@@ -1,6 +1,6 @@
 import { StageLayoutEditor } from "../../StageLayoutEditor";
 import { useEffect, useState } from "react";
-import { pickPath } from "../../api";
+import { pickLectionaryFile, pickPath } from "../../api";
 import { api, pickCsvSave, pickFolder, pickRecording, pickTextSave, type SpeechStatus, type NdiStatus, type RemoteStatus, type ServiceInterval, type UsageRow } from "../../api";
 import { OutputOptions } from "./OutputOptions";
 import { printUsage } from "../../print";
@@ -363,6 +363,38 @@ export function Settings({
               <h2>Library</h2>
               <Row name="Main hymnbook" hint="A number typed alone in the quick box (“555”) opens this hymnbook's song. Other hymnbooks: “NCAN 12”.">
                 <HymnalPick value={core.quick_hymnal ?? ""} onChange={(v) => void setCoreKey("quick_hymnal", v)} />
+              </Row>
+              <Row name="Creeds and prayers" hint="The Apostles' and Nicene Creeds, the Lord's Prayer, the Gloria, the Doxology and Psalm 24 as a responsive reading (traditional English, out of copyright), in a “Creeds and prayers” collection. Add your church's Fante, Twi or Ga wording as a second language in the song editor.">
+                <button
+                  className="wp-btn"
+                  onClick={async () => {
+                    try {
+                      const [added, there] = await api.liturgyAdd();
+                      setMsg({ text: added ? `${added} creeds and prayers added to “Creeds and prayers”.` : `All ${there} are already in the library.` });
+                    } catch (e) {
+                      setMsg({ text: String(e instanceof Error ? e.message : e), bad: true });
+                    }
+                  }}
+                >
+                  Add to the library
+                </button>
+              </Row>
+              <Row name="Lectionary" hint="Your church's readings (e.g. from the Methodist Church Ghana Diary), saved from Excel as CSV. First row: “date” (or “sunday” and “year”), optionally “occasion”, then the readings in order. Ctrl+K → Lectionary readings then adds them to a service.">
+                <button
+                  className="wp-btn"
+                  onClick={async () => {
+                    const path = await pickLectionaryFile();
+                    if (!path) return;
+                    try {
+                      const r = await api.lectionaryImport(path);
+                      setMsg({ text: `Lectionary imported: ${r.by_date + r.by_sunday} days${r.skipped ? ` (${r.skipped} rows without a date or Sunday left out)` : ""}.` });
+                    } catch (e) {
+                      setMsg({ text: String(e instanceof Error ? e.message : e), bad: true });
+                    }
+                  }}
+                >
+                  Import…
+                </button>
               </Row>
               <Row name="Repair two-language songs" hint="Songs from EasyWorship with English and Fante (e.g. “MHB 1, ENG&FANTE”) that came in as one language. Choose the EasyWorship folder holding Songs.db and SongWords.db; those songs are rebuilt with both languages. A backup is made first.">
                 <button

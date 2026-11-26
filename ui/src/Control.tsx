@@ -13,10 +13,14 @@ import { FindReplace } from "./FindReplace";
 import { OutputsPanel } from "./OutputsPanel";
 import { PropsPanel } from "./PropsPanel";
 import { MacrosPanel } from "./MacrosPanel";
+import { PackageDialog, SongExportDialog } from "./PackageDialog";
+import { langName } from "./languages";
+import { LectionaryPanel } from "./LectionaryPanel";
 import { GroupButtons } from "./features/service/GroupButtons";
 import { TimelineBar } from "./features/service/TimelineBar";
+import { TuneBar } from "./features/service/TuneBar";
 import { defaultLook } from "./live/outputs";
-import { ServiceActions, TimerChip, AutoBar, RepeatBar, Clock, ViewToggle, PreviewMedia } from "./features/service/LiveControls";
+import { ServiceActions, TimerChip, AutoBar, Clock, ViewToggle, PreviewMedia } from "./features/service/LiveControls";
 import { GoLiveContext } from "./dnd";
 import { api, isDesktop, type PulpitNote, type SpeechStatus, onLibraryRestored, onProfileChanged, onSettingsChanged, type LangMode, type LiveState, type Macro, type MediaItem, type Mode, type ProgramItem, type Schedule, type Slide } from "./api";
 import { SlideView } from "./SlideView";
@@ -57,7 +61,6 @@ interface Loaded {
 type Tab = { id: "service" } | { id: "themes" } | { id: "settings" } | { id: "song"; songId: number | null } | { id: "ann"; deckId: number | null; template: Deck | null };
 
 const MEDIA_SLIDE: Slide = { label: "Media", occurrence: 0, first_key: 0, last_key: 0, primary: [], second: [] };
-const LANG_NAMES: Record<string, string> = { en: "English", fat: "Fante", tw: "Twi", gaa: "Ga", ee: "Ewe" };
 
 function isTyping(el: EventTarget | null) {
   const t = el as HTMLElement | null;
@@ -143,7 +146,7 @@ export function Control() {
   const [, setSourceTab] = useState<"schedule" | "library">("schedule");
   const [, setCompactTask] = useState<"schedule" | "library" | "preview">("preview");
   const [notice, setNotice] = useState<{ text: string; bad?: boolean; action?: { label: string; run: () => void } } | null>(null);
-  const [layer, setLayer] = useState<null | "palette" | "outputs" | "import" | "backups" | "profiles" | "service" | "timer" | "alert" | "music" | "camera" | "preservice" | "offering" | "outline" | "record" | "lyrics" | "replace" | "outputs" | "dashboard" | "props" | "macros">(null);
+  const [layer, setLayer] = useState<null | "palette" | "outputs" | "import" | "backups" | "profiles" | "service" | "timer" | "alert" | "music" | "camera" | "preservice" | "offering" | "outline" | "record" | "lyrics" | "replace" | "outputs" | "dashboard" | "props" | "macros" | "package-export" | "package-import" | "lectionary">(null);
   const music = useMusic();
   const [profile, setProfile] = useState({ slug: "default", name: "" });
   const [libraryVersion, setLibraryVersion] = useState(0);
@@ -352,6 +355,19 @@ export function Control() {
   }, [state?.slide_idx, state?.mode, liveItemKey, liveActions]);
   const [slideMenu, setSlideMenu] = useState<{ x: number; y: number; i: number } | null>(null);
   const [toolsOpen, setToolsOpen] = useState(false);
+  const [exportIds, setExportIds] = useState<number[] | null>(null);
+  // after a power cut: what was on the screens, to pick up again
+  const [recovery, setRecovery] = useState<{ schedule_id: number | null; item_idx: number; slide_idx: number } | null>(null);
+  useEffect(() => {
+    api.recoveryInfo().then(setRecovery).catch(() => {});
+  }, []);
+  // the live song's languages, for the language switch
+  const [liveLangs, setLiveLangs] = useState<string[]>([]);
+  const liveSongId = live?.item?.kind === "song" ? live.item.song_id : null;
+  useEffect(() => {
+    if (liveSongId == null) return void setLiveLangs([]);
+    api.getSong(liveSongId).then((d) => setLiveLangs(d.lyrics.map((l) => l.lang))).catch(() => setLiveLangs([]));
+  }, [liveSongId]);
   const previewItemKey = preview?.item ? JSON.stringify(slideKey(preview.item, [], 0)?.slice(0, 2) ?? null) : "";
   useEffect(() => {
     const k = slideKey(preview?.item, [], 0);
@@ -722,6 +738,8 @@ export function Control() {
     window.addEventListener("wp-props", props);
     const macros = () => setLayer("macros");
     window.addEventListener("wp-macros", macros);
+    const songExport = (e: Event) => setExportIds((e as CustomEvent<number[]>).detail);
+    window.addEventListener("wp-song-export", songExport);
     window.addEventListener("wp-offering", open);
     window.addEventListener("wp-outline", outline);
     return () => (window.removeEventListener("wp-offering", open), window.removeEventListener("wp-outline", outline), window.removeEventListener("wp-lyrics", lyrics));
@@ -806,6 +824,8 @@ export function Control() {
       case "file.service": return palette("service");
       case "file.import": return palette("import");
       case "file.ews": return void openEws();
+      case "file.package-export": return setLayer("package-export");
+      case "file.package-import": return setLayer("package-import");
       case "file.backups": return palette("backups");
       case "file.print-order": return palette("print-order");
       case "file.outputs": return palette("outputs");
@@ -903,6 +923,10 @@ export function Control() {
       { id: "clear-all", group: "Live", label: "Clear all (words, media, props, alert, music)", run: () => void api.clearAll() },
       { id: "check", group: "Service", label: "Check system (screens, disk, backup…)", run: () => setLayer("dashboard") },
       { id: "outputs-panel", group: "Service", label: "Outputs dashboard", run: () => setLayer("dashboard") },
+      { id: "liturgy", group: "Library", label: "Add creeds and prayers to the library (Apostles' Creed, Lord's Prayer…)", run: () => void api.liturgyAdd().then(([a, t]) => say(a ? `${a} creeds and prayers added to “Creeds and prayers”.` : `All ${t} are already in the library.`)) },
+      { id: "lectionary", group: "Service", label: "Lectionary readings for this service…", run: () => setLayer("lectionary") },
+      { id: "pkg-export", group: "Library", label: "Export a Worship Presenter package (songs in every language, themes, Bibles)…", run: () => setLayer("package-export") },
+      { id: "pkg-import", group: "Library", label: "Import a Worship Presenter package…", run: () => setLayer("package-import") },
       { id: "ews", group: "Service", label: "Open an EasyWorship schedule (.ewsx)…", run: () => void openEws() },
       { id: "ann", group: "Library", label: "Announcements (offering, birthdays, welcome loop)", keywords: "notices slides momo tithe", run: () => (setActiveTab("service"), setLibTab("presentations"), setSourceTab("library")) },
       { id: "media", group: "Library", label: "Media library", run: () => (setActiveTab("service"), setLibTab("media"), setSourceTab("library")) },
@@ -1276,12 +1300,12 @@ export function Control() {
           {liveTitle}
         </span>
         {/* the song's languages, always in sight (amber when not both) */}
-        {live?.item?.kind === "song" && !rehearsal && (
+        {live?.item?.kind === "song" && !rehearsal && liveLangs.length > 1 && (
           <div className={`lang-switch ${(state?.lang_mode ?? "both") !== "both" ? "is-limited" : ""}`} role="group" aria-label="Languages on the screens">
             {([
-              ["primary", LANG_NAMES.en],
+              ["primary", langName(liveLangs[0] ?? "en")],
               ["both", "Both"],
-              ["second", LANG_NAMES.fat],
+              ["second", liveLangs[1] ? langName(liveLangs[1]) : "Second"],
             ] as const).map(([m, l]) => (
               <button key={m} className={(state?.lang_mode ?? "both") === m ? "is-on" : ""} aria-pressed={(state?.lang_mode ?? "both") === m} onClick={() => void run(api.setLayout(undefined, m as LangMode))}>
                 {l}
@@ -1304,6 +1328,8 @@ export function Control() {
       )}
       {/* timelines: a song in time with a backing track */}
       {!rehearsal && <TimelineBar item={live?.item} slideIdx={state?.slide_idx ?? 0} slides={liveSlides} onShow={show} />}
+      {/* a hymn's tune, once per verse, the slides in step */}
+      {!rehearsal && live?.item?.kind === "song" && <TuneBar songId={live.item.song_id} slides={liveSlides} slideIdx={state?.slide_idx ?? 0} onShow={show} />}
       {/* ProPresenter's group buttons: straight to the chorus, the bridge… */}
       {!rehearsal && live?.item?.kind === "song" && <GroupButtons slides={gridSlides} current={state?.slide_idx ?? -1} onGo={(i) => show(i)} />}
       <div className="ew-list">
@@ -1477,7 +1503,6 @@ export function Control() {
 
       </div>
       {!rehearsal && state?.auto && live?.item?.kind === "announcement" && <AutoBar state={state} onPause={(p) => void run(api.setAutoPaused(p))} />}
-      {!rehearsal && live?.item?.kind === "song" && <RepeatBar state={state} slides={liveSlides} onSet={(label, total, done) => void run(api.setRepeat(label, total, done))} />}
       <form
         className="wp-stage-note"
         onSubmit={(e) => {
@@ -1848,6 +1873,31 @@ export function Control() {
       </footer>
 
       {layer === "palette" && <Palette commands={commands} onClose={() => setLayer(null)} />}
+      {recovery && service && (recovery.schedule_id == null || recovery.schedule_id === service.id) && schedule[recovery.item_idx] && (
+        <div className="recovery" role="alert">
+          <strong>Worship Presenter closed unexpectedly</strong>
+          <span>
+            Pick up where you were: {itemTitle(schedule[recovery.item_idx])}, slide {recovery.slide_idx + 1}.
+          </span>
+          <button
+            className="wp-btn wp-btn--primary"
+            onClick={() => {
+              const it = schedule[recovery.item_idx];
+              void run(api.goLive(it, recovery.slide_idx)).then(() => say(`Back on the screens: ${itemTitle(it)}.`));
+              setRecovery(null);
+              void api.recoveryDismiss();
+            }}
+          >
+            Resume
+          </button>
+          <button className="wp-btn wp-btn--quiet" onClick={() => (setRecovery(null), void api.recoveryDismiss())}>
+            Dismiss
+          </button>
+        </div>
+      )}
+      {layer === "lectionary" && <LectionaryPanel serviceDate={service?.service_date ?? null} onAdd={(items) => setSchedule((sc) => [...sc, ...items])} onClose={() => setLayer(null)} />}
+      {exportIds && <SongExportDialog ids={exportIds} onClose={() => setExportIds(null)} />}
+      {(layer === "package-export" || layer === "package-import") && <PackageDialog mode={layer === "package-export" ? "export" : "import"} onClose={() => setLayer(null)} />}
       {layer === "props" && <PropsPanel showing={state?.props ?? []} onClose={() => setLayer(null)} />}
       {layer === "macros" && <MacrosPanel onRun={(m) => void runMacro(m)} onClose={() => setLayer(null)} />}
       {slideMenu && preview && (

@@ -7,7 +7,8 @@ import type { Theme } from "./types";
 // the church's own colours and fonts (Settings → Brand kit).
 
 const KIND: Record<string, string> = { song: "Songs", scripture: "Scripture", lower_third: "Lower third", announcement: "Announcements" };
-const SAMPLE: Record<string, { primary: string[]; second: string[]; reference?: string; title?: string; section?: string; first?: boolean; last?: boolean }> = {
+/** Sample words for a theme's picture, by kind (a scripture theme shows a verse…). */
+export const SAMPLE: Record<string, { primary: string[]; second: string[]; reference?: string; title?: string; section?: string; first?: boolean; last?: boolean }> = {
   song: { primary: ["O for a thousand tongues to sing", "My great Redeemer’s praise,"], second: ["Meenya ngyiramá apem matow ndwom", "Meyi mo Pomfò ayɛw,"], title: "MHB 1", section: "Verse 1", first: true, last: false },
   scripture: { primary: ["For God so loved the world that He gave His only begotten Son"], second: [], reference: "John 3:16" },
   lower_third: { primary: ["O for a thousand tongues to sing"], second: ["Meenya ngyiramá apem matow ndwom"], reference: "MHB 1" },

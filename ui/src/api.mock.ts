@@ -151,6 +151,7 @@ const mMacros: Macro[] = [
   { id: 2, name: "Sermon", color: "#3b82f6", actions: [{ kind: "props_clear" }, { kind: "prop_on", value: 1 }, { kind: "resume" }] },
 ];
 const mSlideActions: Record<string, Record<string, number>> = {};
+const mTunes: Record<number, { media_id: number; gap_ms: number }> = {};
 const mTimelines: Record<string, { item_kind: string; item_id: number; media_id: number; cues: [number, number][] }> = {};
 
 // sample props (as ProPresenter's): a LIVE badge, a sermon title band and a clock
@@ -171,6 +172,10 @@ let mOutputs: OutputConfig[] = [
   { ...OUT_DEFAULT, role: "foldback", name: "Stage", on_logo: "blank", on_blank: "blank" },
   // a sample projector wall screen (the left of two), for the corner and edge tests
   { ...SAMPLE_WALL } as OutputConfig,
+  // a sample large-print screen (older members' TV)
+  { ...SAMPLE_WALL, role: "screen-large", name: "Large print TV", look: "full", pin: null, region: null, blend: null, grid: false, large_print: true } as OutputConfig,
+  // a sample hymn board screen
+  { ...SAMPLE_WALL, role: "screen-hymns", name: "Hymn board", look: "board", pin: null, region: null, blend: null, grid: false } as OutputConfig,
 ];
 let mIntervals: ServiceInterval[] = [];
 const mMusic = { started: false, playing: false, paused: false, index: 0, pos: 0, at: Date.now(), volume: 0.8, ducked: false, ids: [] as number[], rules: { on_live: "fade_out", with_announcements: true, crossfade_ms: 4000, looping: true } as MusicRules };
@@ -972,6 +977,13 @@ export async function mock(cmd: string, a: Record<string, unknown>): Promise<unk
       if (i > 0) mOutputs.splice(i, 1);
       return;
     }
+    case "liturgy_add":
+      return [6, 0];
+    case "recovery_info":
+      // the browser preview can pretend a power cut: #/control?powercut
+      return location.search.includes("powercut") || location.hash.includes("powercut") ? { schedule_id: null, item_idx: 0, slide_idx: 1 } : null;
+    case "recovery_dismiss":
+      return;
     case "updates_on":
       return true;
     case "screens_power":
@@ -1079,6 +1091,43 @@ export async function mock(cmd: string, a: Record<string, unknown>): Promise<unk
       return;
     case "songs_repair_bilingual":
       return { bilingual: 1, repaired: 0, not_found: 0 };
+    case "spelling_check": {
+      // the stand-in knows one: "Pomfo" where the songs say "Pomfò"… and "nyankopon"
+      const out: { line: number; word: string; suggestion: string; count: number }[] = [];
+      String(a.text).split("\n").forEach((l, n) => {
+        if (/\bnyankopon\b/i.test(l)) out.push({ line: n, word: "nyankopon", suggestion: "nyankopɔn", count: 212 });
+      });
+      return out;
+    }
+    case "tune_get":
+      return mTunes[Number(a.songId)] ?? null;
+    case "tune_set":
+      if (a.tune) mTunes[Number(a.songId)] = a.tune as { media_id: number; gap_ms: number };
+      else delete mTunes[Number(a.songId)];
+      return;
+    case "lectionary_for":
+      return { date: String(a.date), day: { name: "Advent 1", year: "B", season: "advent" }, occasion: "Advent Sunday", readings: ["Isaiah 64:1-64:9", "Psalm 80:1-80:7, 80:16-80:18", "1 Corinthians 1:3-1:9", "Mark 13:24-13:37"], entries: 52 };
+    case "lectionary_import":
+      return { by_date: 52, by_sunday: 0, skipped: 0 };
+    case "hymn_board": {
+      // the songs of the last service saved here, else the library's first three
+      const items = (mSchedules[mSchedules.length - 1]?.items ?? []).filter((x) => x.kind === "song") as { kind: "song"; song_id: number }[];
+      const ids = items.length ? items.map((x) => x.song_id) : SONGS.slice(0, 3).map((x) => x.hit.id);
+      const liveId = mItem?.kind === "song" ? mItem.song_id : null;
+      return ids.map((id) => {
+        const h = SONGS.find((x) => x.hit.id === id)?.hit;
+        return { number: h?.numbers[0] ?? "", title: h?.title ?? "", live: id === liveId };
+      });
+    }
+    case "songs_export":
+      if (a.format === "openlyrics" && !a.onePerSong && (a.ids as number[]).length > 1) throw new Error("OpenLyrics keeps one song a file: choose “One file per song”.");
+      return (a.ids as number[]).length;
+    case "package_export":
+      return 48_213;
+    case "package_review":
+      return { manifest: { songs: 3, themes: 4, bibles: ["TK"], props: 3, macros: 2 }, new_songs: 1, duplicate_songs: 2, sample_titles: ["MHB 1, ENG&FANTE", "MHB 50", "Blessed Assurance"], multilingual_songs: 1, new_themes: 1, new_bibles: [], present_bibles: ["TK"] };
+    case "package_import":
+      return { songs_added: 1, songs_replaced: a.replace ? 2 : 0, songs_skipped: a.replace ? 0 : 2, themes_added: 1, bibles_added: [], props_added: 0, macros_added: 0 };
     case "macros_list":
       return mMacros.map((x) => structuredClone(x));
     case "macro_save": {

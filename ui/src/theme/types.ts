@@ -156,6 +156,9 @@ export interface Theme {
   };
   /** Two languages line by line (each line, then its translation) in the words layer. */
   pairLines?: boolean;
+  /** When only the second language is shown (Live: Fante only), it takes the main text's
+   *  place and size. Off: it keeps the second-language layer's look. Default on. */
+  secondFills?: boolean;
   transition: { kind: "cut" | "fade" | "slide-up" | "wipe" | "zoom" | "push" | "cover" | "cube" | "drop" | "iris" | "pageflip"; ms: number };
   layers: Layer[];
   /** Choruses, bridges… styled apart from the verses. */

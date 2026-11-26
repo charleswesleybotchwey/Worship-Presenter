@@ -1,3 +1,4 @@
+import { allLanguages } from "../languages";
 import { useEffect, useState } from "react";
 import { api, type ThemeRule } from "../api";
 import type { ThemeRow } from "./types";
@@ -19,15 +20,7 @@ const MATCHES: Record<"song" | "scripture", { value: ThemeRule["match"]; label: 
   ],
 };
 
-const LANGS = [
-  ["en", "English"],
-  ["fat", "Fante"],
-  ["tw", "Twi"],
-  ["gaa", "Ga"],
-  ["ee", "Ewe"],
-  ["dag", "Dagbani"],
-  ["fr", "French"],
-];
+const LANGS = allLanguages().map((l) => [l.code, l.name] as const);
 
 export function ThemeRules({ onClose }: { onClose: (saved: boolean) => void }) {
   const [rules, setRules] = useState<ThemeRule[]>([]);

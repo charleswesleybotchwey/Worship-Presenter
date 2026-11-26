@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { BUILT_IN, addLanguage, langName, useLanguages } from "./languages";
 import { ArrangementEditor } from "./features/editors/ArrangementEditor";
 import { sectionsOf } from "./groups";
 import { capitaliseLines, dropBlankLines, tidySpaces, trimLineEnds } from "./songTidy";
@@ -8,15 +9,8 @@ import { SlideView } from "./SlideView";
 // Edit or create a song. Lyrics are plain text per language with [V1] / [C] labels;
 // the right side shows the slides exactly as they will project, updated as you type.
 
-export const LANGS: { code: string; name: string }[] = [
-  { code: "en", name: "English" },
-  { code: "fat", name: "Fante" },
-  { code: "tw", name: "Twi" },
-  { code: "gaa", name: "Ga" },
-  { code: "ee", name: "Ewe" },
-  { code: "dag", name: "Dagbani" },
-];
-const langName = (c: string) => LANGS.find((l) => l.code === c)?.name ?? c;
+// the app's one language list, plus any the church types in
+export const LANGS = BUILT_IN;
 
 // Most keyboards here cannot type these directly.
 const CHARS = ["ɛ", "ɔ", "Ɛ", "Ɔ", "ŋ", "Ŋ", "ɣ", "ʒ"];
@@ -65,6 +59,10 @@ export function SongEditor({
   serviceItem?: { lyrics?: { lang: string; body: string }[] | null } | null;
   onApply?: (lyrics: { lang: string; body: string }[] | null) => void;
 }) {
+  // the language list (a hook: before any early return)
+  const languages = useLanguages();
+  // spelling for a language without a dictionary, against the library's own songs
+  const [spell, setSpell] = useState<{ line: number; word: string; suggestion: string; count: number }[] | null>(null);
   const [view, setView] = useState<"slides" | "pairing">("slides");
   const [doc, setDoc] = useState<SongDoc | null>(songId == null ? EMPTY : null);
   const [numbers, setNumbers] = useState("");
@@ -170,7 +168,7 @@ export function SongEditor({
     onClose();
   };
 
-  const unused = LANGS.filter((l) => !doc.lyrics.some((x) => x.lang === l.code));
+  const unused = languages.filter((l) => !doc.lyrics.some((x) => x.lang === l.code));
 
   // pairing view: the same even sharing-out the slides use
   const pairs = (() => {
@@ -259,15 +257,46 @@ export function SongEditor({
                   {i === 0 ? "" : " (second)"}
                 </button>
               ))}
+              {doc.lyrics[tab] && (
+                <select
+                  className="add-lang tab-lang"
+                  value={doc.lyrics[tab].lang}
+                  aria-label="This tab's language"
+                  title="The language of these lyrics"
+                  onChange={async (e) => {
+                    let code = e.target.value;
+                    if (code === "__other") {
+                      const name = prompt("The language's name (e.g. Kasem, Gonja, Italian)");
+                      if (!name?.trim()) return;
+                      code = await addLanguage(name);
+                    }
+                    if (doc.lyrics.some((x, k) => k !== tab && x.lang === code)) return;
+                    update({ lyrics: doc.lyrics.map((x, k) => (k === tab ? { ...x, lang: code } : x)) });
+                  }}
+                >
+                  {[...languages, ...(languages.some((l) => l.code === doc.lyrics[tab].lang) ? [] : [{ code: doc.lyrics[tab].lang, name: langName(doc.lyrics[tab].lang) }])].map((l) => (
+                    <option key={l.code} value={l.code} disabled={doc.lyrics.some((x, k) => k !== tab && x.lang === l.code)}>
+                      Language: {l.name}
+                    </option>
+                  ))}
+                  <option value="__other">Another language (type its name)…</option>
+                </select>
+              )}
               {doc.lyrics.length < 2 && (
                 <select
                   className="add-lang"
                   value=""
                   aria-label="Add a second language"
-                  onChange={(e) => {
-                    if (!e.target.value) return;
+                  onChange={async (e) => {
+                    let code = e.target.value;
+                    if (!code) return;
+                    if (code === "__other") {
+                      const name = prompt("The language's name (e.g. Kasem, Gonja, Italian)");
+                      if (!name?.trim()) return;
+                      code = await addLanguage(name);
+                    }
                     const labels = doc.lyrics[0].body.match(/^\[.+\]$/gm) ?? ["[V1]"];
-                    update({ lyrics: [...doc.lyrics, { lang: e.target.value, body: labels.join("\n\n") + "\n" }] });
+                    update({ lyrics: [...doc.lyrics, { lang: code, body: labels.join("\n\n") + "\n" }] });
                     setTab(doc.lyrics.length);
                   }}
                 >
@@ -277,6 +306,7 @@ export function SongEditor({
                       {l.name}
                     </option>
                   ))}
+                  <option value="__other">Another language (type its name)…</option>
                 </select>
               )}
               {tab > 0 && (
@@ -303,6 +333,15 @@ export function SongEditor({
               <button className="btn-quiet" onClick={() => insertSection("B")}>
                 + Bridge
               </button>
+              {doc.lyrics[tab] && !doc.lyrics[tab].lang.startsWith("en") && (
+                <button
+                  className="btn-quiet"
+                  title="Words that your other songs in this language spell differently"
+                  onClick={() => void api.spellingCheck(doc.lyrics[tab].lang, doc.lyrics[tab].body).then(setSpell).catch(() => setSpell([]))}
+                >
+                  Check spelling
+                </button>
+              )}
               <select
                 className="wp-input editor__tidy"
                 value=""
@@ -361,6 +400,33 @@ export function SongEditor({
               onChange={(e) => setBody(e.target.value)}
               aria-label={`${langName(doc.lyrics[tab].lang)} lyrics`}
             />
+            {spell && (
+              <div className="spell" role="status">
+                {spell.length === 0 ? (
+                  <span className="wp-note">Nothing looks misspelt against your other songs in {langName(doc.lyrics[tab]?.lang ?? "")}.</span>
+                ) : (
+                  spell.map((x, n) => (
+                    <div key={n} className="spell__row">
+                      <span>
+                        Line {x.line + 1}: <strong>{x.word}</strong> → <strong>{x.suggestion}</strong> <small className="wp-note">({x.count.toLocaleString()} times in your songs)</small>
+                      </span>
+                      <button
+                        className="btn-quiet"
+                        onClick={() => {
+                          // the word on that line, keeping a capital first letter
+                          const lines = doc.lyrics[tab].body.split("\n");
+                          lines[x.line] = lines[x.line].replace(new RegExp(`(^|[^\\p{L}'’])(${x.word})(?=$|[^\\p{L}'’])`, "iu"), (_m, pre: string, w: string) => pre + (w[0] === w[0].toUpperCase() ? x.suggestion[0].toUpperCase() + x.suggestion.slice(1) : x.suggestion));
+                          update({ lyrics: doc.lyrics.map((l, i2) => (i2 === tab ? { ...l, body: lines.join("\n") } : l)) });
+                          setSpell((all) => all?.filter((_, m) => m !== n) ?? null);
+                        }}
+                      >
+                        Fix
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
             <p className="hint hint--tight">
               Start each part with a label in square brackets: [V1], [V2], [C] for chorus, [B] for bridge. The second language uses the same labels; its lines are paired with the first
               language part by part.

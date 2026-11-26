@@ -1195,6 +1195,50 @@ fn output_remove(app: AppHandle, st: State<'_, AppState>, role: String) -> Res<(
     wp_core::options::remove_output(&st.db.lock().unwrap(), &role).map_err(err)
 }
 
+/// Creeds and prayers into the library (a "Creeds and prayers" collection): (added, already there).
+#[tauri::command(async)]
+fn liturgy_add(app: AppHandle, st: State<'_, AppState>) -> Res<(usize, usize)> {
+    let r = wp_core::liturgy::add(&st.db.lock().unwrap()).map_err(err)?;
+    use tauri::Emitter;
+    let _ = app.emit("library-restored", ());
+    Ok(r)
+}
+
+/// What was on the screens when the last session ended abnormally (a power cut).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct Recovery {
+    schedule_id: Option<i64>,
+    item_idx: usize,
+    slide_idx: usize,
+}
+static RECOVERY: Mutex<Option<Recovery>> = Mutex::new(None);
+static RUNNING_FLAG: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// Something to pick up again: the last session did not close normally and the screens were
+/// showing an item (not blank).
+fn recovery_from(marker_left: bool, saved_state: Option<&[u8]>) -> Option<Recovery> {
+    if !marker_left {
+        return None;
+    }
+    let prev: LiveState = serde_json::from_slice(saved_state?).ok()?;
+    let item_idx = prev.item_idx?;
+    if prev.mode == Mode::Blank {
+        return None;
+    }
+    Some(Recovery { schedule_id: prev.schedule_id, item_idx, slide_idx: prev.slide_idx })
+}
+
+/// After a power cut: where the service was (once), for "Pick up where you were".
+#[tauri::command]
+fn recovery_info() -> Option<Recovery> {
+    RECOVERY.lock().unwrap().clone()
+}
+
+#[tauri::command]
+fn recovery_dismiss() {
+    *RECOVERY.lock().unwrap() = None;
+}
+
 /// Whether this build can update itself (it carries the update key).
 #[tauri::command]
 fn updates_on() -> bool {
@@ -1721,7 +1765,7 @@ fn identify_output(app: AppHandle, role: String) {
 }
 
 /// Settings the core uses; only these keys can be written.
-const SETTINGS: &[&str] = &["project_on_restart", "low_spec_mode", "lines_per_slide", "advance_after_go_live", "font_fallback", "speech_engine", "speech_mic", "speech_refs_only", "speech_whisper_model", "scripture_verse_numbers", "stage_layout", "ndi_lower_third", "media_fade_ms", "song_chorus_after_verse", "song_title_slide", "scripture_verses_per_slide", "scripture_ref_where", "scripture_ref_scope", "scripture_ref_only", "scripture_abbrev", "deepgram_key", "deepgram_model", "quick_hymnal", "logo_media_id", "brand_colors", "brand_font", "brand_heading_font"];
+const SETTINGS: &[&str] = &["project_on_restart", "low_spec_mode", "lines_per_slide", "advance_after_go_live", "font_fallback", "speech_engine", "speech_mic", "speech_refs_only", "speech_whisper_model", "scripture_verse_numbers", "stage_layout", "ndi_lower_third", "media_fade_ms", "song_chorus_after_verse", "song_title_slide", "languages_custom", "scripture_verses_per_slide", "scripture_ref_where", "scripture_ref_scope", "scripture_ref_only", "scripture_abbrev", "deepgram_key", "deepgram_model", "quick_hymnal", "logo_media_id", "brand_colors", "brand_font", "brand_heading_font"];
 
 #[tauri::command(async)]
 fn get_settings(st: State<'_, AppState>) -> Res<std::collections::HashMap<String, String>> {
@@ -1964,6 +2008,199 @@ fn timeline_save(st: State<'_, AppState>, timeline: wp_core::timelines::Timeline
 #[tauri::command(async)]
 fn timeline_delete(st: State<'_, AppState>, kind: String, id: i64) -> Res<()> {
     wp_core::timelines::delete(&st.db.lock().unwrap(), &kind, id).map_err(err)
+}
+
+/// Probable typos in lyrics of a language without a dictionary here, against the library's
+/// own spelling of it.
+#[tauri::command(async)]
+fn spelling_check(st: State<'_, AppState>, lang: String, text: String) -> Res<Vec<wp_core::spelling::Suggestion>> {
+    wp_core::spelling::check(&st.db.lock().unwrap(), &lang, &text).map_err(err)
+}
+
+/// A song's tune (one verse, played once per verse).
+#[tauri::command(async)]
+fn tune_get(st: State<'_, AppState>, song_id: i64) -> Res<Option<wp_core::tunes::Tune>> {
+    wp_core::tunes::get(&st.db.lock().unwrap(), song_id).map_err(err)
+}
+
+#[tauri::command(async)]
+fn tune_set(st: State<'_, AppState>, song_id: i64, tune: Option<wp_core::tunes::Tune>) -> Res<()> {
+    wp_core::tunes::set(&st.db.lock().unwrap(), song_id, tune.as_ref()).map_err(err)
+}
+
+/// The lectionary day and the church's readings for a date ("2026-11-29").
+#[tauri::command(async)]
+fn lectionary_for(st: State<'_, AppState>, date: String) -> Res<wp_core::lectionary::Readings> {
+    wp_core::lectionary::readings(&st.db.lock().unwrap(), &date).map_err(err)
+}
+
+/// The church's lectionary from a CSV file (replaces the one imported before).
+#[tauri::command(async)]
+fn lectionary_import(st: State<'_, AppState>, path: String) -> Res<wp_core::lectionary::ImportReport> {
+    let bytes = std::fs::read(&path).map_err(err)?;
+    let text = String::from_utf8_lossy(&bytes);
+    let rep = wp_core::lectionary::import(&st.db.lock().unwrap(), &text).map_err(err)?;
+    applog::write("LIBRARY", &format!("lectionary imported: {} by date, {} by Sunday, {} skipped", rep.by_date, rep.by_sunday, rep.skipped));
+    Ok(rep)
+}
+
+/// The hymn board: the open service's songs with their hymn numbers, and which is being
+/// sung (a screen whose look is "Hymn board" shows them, like the boards on church walls).
+#[derive(Serialize)]
+struct BoardEntry {
+    number: String,
+    title: String,
+    live: bool,
+}
+
+#[tauri::command(async)]
+fn hymn_board(st: State<'_, AppState>) -> Res<Vec<BoardEntry>> {
+    let Some(id) = *st.schedule_id.lock().unwrap() else { return Ok(vec![]) };
+    let live_song = match &*st.item.lock().unwrap() {
+        Some(ProgramItem::Song { song_id, .. }) => Some(*song_id),
+        _ => None,
+    };
+    let conn = st.db.lock().unwrap();
+    let s = wp_core::schedule::load(&conn, id).map_err(err)?;
+    let mut out = Vec::new();
+    for it in s.items {
+        if let wp_core::schedule::Item::Song { song_id, .. } = it {
+            let number = conn
+                .query_row("SELECT h.code || ' ' || n.number FROM song_number n JOIN hymnal h ON h.id = n.hymnal_id WHERE n.song_id = ?1 ORDER BY n.rowid LIMIT 1", [song_id], |r| r.get::<_, String>(0))
+                .unwrap_or_default();
+            let title = conn.query_row("SELECT title FROM song WHERE id = ?1", [song_id], |r| r.get::<_, String>(0)).unwrap_or_default();
+            out.push(BoardEntry { number, title, live: live_song == Some(song_id) });
+        }
+    }
+    Ok(out)
+}
+
+/// Songs out, one or many (as ProPresenter): `format` "wpp" (Worship Presenter, every
+/// language), "openlyrics" (.xml, read by OpenLP, FreeShow…) or "text" (.txt). With
+/// `one_per_song`, `path` is a folder and each song gets its own file; otherwise one file.
+#[tauri::command(async)]
+async fn songs_export(app: AppHandle, ids: Vec<i64>, format: String, path: String, one_per_song: bool) -> Res<usize> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let st = app.state::<AppState>();
+        let conn = st.db.lock().unwrap();
+        let media = st.profile_dir().join("media");
+        if ids.is_empty() {
+            return Err("Choose at least one song.".to_string());
+        }
+        // language names, the app's own and the church's typed-in ones
+        let custom: Vec<(String, String)> = conn
+            .query_row("SELECT value FROM setting WHERE key = 'languages_custom'", [], |r| r.get::<_, String>(0))
+            .ok()
+            .and_then(|j| serde_json::from_str::<Vec<serde_json::Value>>(&j).ok())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|v| Some((v.get("code")?.as_str()?.to_string(), v.get("name")?.as_str()?.to_string())))
+            .collect();
+        let lang_name = |c: &str| -> String {
+            let known = [("en", "English"), ("fat", "Fante"), ("tw", "Twi"), ("ak", "Akan"), ("gaa", "Ga"), ("ga", "Ga"), ("ee", "Ewe"), ("dag", "Dagbani"), ("nzi", "Nzema"), ("ada", "Dangme"), ("ha", "Hausa"), ("yo", "Yoruba"), ("fr", "French"), ("es", "Spanish"), ("pt", "Portuguese")];
+            known.iter().find(|(k, _)| *k == c).map(|(_, n)| n.to_string()).or_else(|| custom.iter().find(|(k, _)| k == c).map(|(_, n)| n.clone())).unwrap_or_else(|| c.to_string())
+        };
+        let ext = match format.as_str() {
+            "wpp" => "wpp",
+            "openlyrics" => "xml",
+            "text" => "txt",
+            _ => return Err("Unknown export format.".into()),
+        };
+        let one = |id: i64| -> Res<Vec<u8>> {
+            Ok(match format.as_str() {
+                "wpp" => wp_core::package::export(&conn, &media, &wp_core::package::Choice { song_ids: vec![id], ..Default::default() }).map_err(err)?,
+                "openlyrics" => wp_core::song_export::openlyrics(&wp_core::songs::load(&conn, id).map_err(err)?).into_bytes(),
+                _ => wp_core::song_export::text(&wp_core::songs::load(&conn, id).map_err(err)?, &lang_name).into_bytes(),
+            })
+        };
+        let mut written = 0usize;
+        if one_per_song {
+            let dir = std::path::Path::new(&path);
+            std::fs::create_dir_all(dir).map_err(err)?;
+            let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for id in &ids {
+                let title = wp_core::songs::load(&conn, *id).map_err(err)?.title;
+                let base = wp_core::song_export::file_name(&title);
+                let mut name = format!("{base}.{ext}");
+                let mut n = 2;
+                while used.contains(&name.to_lowercase()) || dir.join(&name).exists() {
+                    name = format!("{base} ({n}).{ext}");
+                    n += 1;
+                }
+                used.insert(name.to_lowercase());
+                std::fs::write(dir.join(&name), one(*id)?).map_err(err)?;
+                written += 1;
+            }
+        } else {
+            let bytes = match format.as_str() {
+                "wpp" => wp_core::package::export(&conn, &media, &wp_core::package::Choice { song_ids: ids.clone(), ..Default::default() }).map_err(err)?,
+                "text" => {
+                    let mut all = String::new();
+                    for (k, id) in ids.iter().enumerate() {
+                        if k > 0 {
+                            all.push_str("\n\n— — —\n\n");
+                        }
+                        all.push_str(&wp_core::song_export::text(&wp_core::songs::load(&conn, *id).map_err(err)?, &lang_name));
+                    }
+                    all.into_bytes()
+                }
+                // OpenLyrics holds one song a file
+                _ if ids.len() == 1 => one(ids[0])?,
+                _ => return Err("OpenLyrics keeps one song a file: choose “One file per song”.".into()),
+            };
+            std::fs::write(&path, bytes).map_err(err)?;
+            written = ids.len();
+        }
+        applog::write("EXPORT", &format!("{written} songs as {format} to {path}"));
+        Ok(written)
+    })
+    .await
+    .map_err(err)?
+}
+
+/// The app's own package (.wpp): songs in every language, themes, Bibles, props, macros.
+#[tauri::command(async)]
+async fn package_export(app: AppHandle, choice: wp_core::package::Choice, path: String) -> Res<u64> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let st = app.state::<AppState>();
+        let bytes = wp_core::package::export(&st.db.lock().unwrap(), &st.profile_dir().join("media"), &choice).map_err(err)?;
+        std::fs::write(&path, &bytes).map_err(err)?;
+        applog::write("PACKAGE", &format!("exported {} bytes to {path}", bytes.len()));
+        Ok(bytes.len() as u64)
+    })
+    .await
+    .map_err(err)?
+}
+
+#[tauri::command(async)]
+async fn package_review(app: AppHandle, path: String) -> Res<wp_core::package::Review> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let st = app.state::<AppState>();
+        let bytes = std::fs::read(&path).map_err(err)?;
+        let r = wp_core::package::review(&st.db.lock().unwrap(), &bytes).map_err(err);
+        r
+    })
+    .await
+    .map_err(err)?
+}
+
+#[tauri::command(async)]
+async fn package_import(app: AppHandle, path: String, replace: bool) -> Res<wp_core::package::Report> {
+    let a = app.clone();
+    let rep = tauri::async_runtime::spawn_blocking(move || {
+        let st = a.state::<AppState>();
+        let bytes = std::fs::read(&path).map_err(err)?;
+        let conn = st.db.lock().unwrap();
+        wp_core::backup::create(&conn, &st.backups(), "before-package").map_err(err)?;
+        wp_core::package::import(&conn, &st.profile_dir().join("media"), &bytes, replace).map_err(err)
+    })
+    .await
+    .map_err(err)??;
+    applog::write("PACKAGE", &format!("imported: {} songs added, {} replaced, {} skipped; {} themes; Bibles {:?}", rep.songs_added, rep.songs_replaced, rep.songs_skipped, rep.themes_added, rep.bibles_added));
+    use tauri::Emitter;
+    // the lists in every window refresh, as after a restore
+    let _ = app.emit("library-restored", ());
+    Ok(rep)
 }
 
 /// Songs imported as one language although EasyWorship has them in two: rebuilt with both
@@ -2805,6 +3042,10 @@ fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
         .item(&item("file.service", "&Open or start a service order…", "")?)
         .item(&item("file.import", "&Import songs or Bibles…", "")?)
         .item(&item("file.ews", "Open &EasyWorship schedule…", "")?)
+        .separator()
+        .item(&item("file.package-export", "E&xport a Worship Presenter package…", "")?)
+        .item(&item("file.package-import", "Import a Worship Presenter &package…", "")?)
+        .separator()
         .item(&item("file.backups", "&Backups…", "")?)
         .item(&item("file.print-order", "&Print the service order…", "Ctrl+P")?)
         .separator()
@@ -3256,6 +3497,15 @@ pub fn run() {
                 .query_row("SELECT value FROM setting WHERE key = 'project_on_restart'", [], |r| r.get::<_, String>(0))
                 .map(|v| v == "true")
                 .unwrap_or(false);
+            // a power cut (or crash): the marker of the last session is still there
+            let flag = dir.join("running.flag");
+            let prev = std::fs::read(dir.join("state.json")).ok();
+            if let Some(r) = recovery_from(flag.exists(), prev.as_deref()) {
+                applog::write("START", &format!("the last session did not close normally (a power cut?): item {} slide {} was on the screens", r.item_idx + 1, r.slide_idx + 1));
+                *RECOVERY.lock().unwrap() = Some(r);
+            }
+            let _ = std::fs::write(&flag, format!("{:?}", std::time::SystemTime::now()));
+            let _ = RUNNING_FLAG.set(flag);
             let live = LiveState::load(&dir.join("state.json"), project_on_restart);
             app.manage(AppState {
                 db: Mutex::new(conn),
@@ -3573,6 +3823,16 @@ pub fn run() {
             clear_all,
             props_list,
             songs_repair_bilingual,
+            package_export,
+            songs_export,
+            hymn_board,
+            lectionary_for,
+            tune_get,
+            tune_set,
+            lectionary_import,
+            spelling_check,
+            package_review,
+            package_import,
             macros_list,
             timeline_get,
             timeline_save,
@@ -3586,6 +3846,9 @@ pub fn run() {
             output_add,
             output_remove,
             updates_on,
+            recovery_info,
+            liturgy_add,
+            recovery_dismiss,
             status_all,
             check::dashboard,
             check::system_check,
@@ -3674,8 +3937,16 @@ pub fn run() {
             delete_profile,
             switch_profile,
         ])
-        .run(tauri::generate_context!())
-        .expect("Worship Presenter failed to start");
+        .build(tauri::generate_context!())
+        .expect("Worship Presenter failed to start")
+        .run(|_, event| {
+            // a normal close: no power cut to recover from next time
+            if let tauri::RunEvent::Exit = event {
+                if let Some(f) = RUNNING_FLAG.get() {
+                    let _ = std::fs::remove_file(f);
+                }
+            }
+        });
 }
 
 #[cfg(test)]
@@ -3816,5 +4087,26 @@ mod bilingual_order_tests {
         c.execute("UPDATE song SET default_sequence = 'V1 V2' WHERE id = ?1", [id]).unwrap();
         println!("with an order: {:?}", second(&c));
         assert!(second(&c).iter().all(|n| *n > 0), "the second language is on every slide with an order too");
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+
+    #[test]
+    fn a_power_cut_with_something_on_the_screens_is_picked_up() {
+        let mut st = LiveState::default();
+        st.schedule_id = Some(7);
+        st.item_idx = Some(2);
+        st.slide_idx = 3;
+        st.mode = Mode::Live;
+        let bytes = serde_json::to_vec(&st).unwrap();
+        assert_eq!(recovery_from(true, Some(&bytes)), Some(Recovery { schedule_id: Some(7), item_idx: 2, slide_idx: 3 }));
+        assert_eq!(recovery_from(false, Some(&bytes)), None, "a normal close: nothing to recover");
+        st.mode = Mode::Blank;
+        assert_eq!(recovery_from(true, Some(&serde_json::to_vec(&st).unwrap())), None, "the screens were blank anyway");
+        assert_eq!(recovery_from(true, None), None);
+        assert_eq!(recovery_from(true, Some(b"damaged")), None);
     }
 }

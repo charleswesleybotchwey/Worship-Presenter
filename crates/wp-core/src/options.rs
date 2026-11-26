@@ -47,7 +47,7 @@ pub struct OutputConfig {
     /// format instead of opening on a monitor (None = a monitor or custom position).
     #[serde(default)]
     pub ndi: Option<NdiFormat>,
-    /// What the screen shows (as ProPresenter's looks): full | lower | stage | words | media
+    /// What the screen shows (as ProPresenter's looks): full | lower | stage | words | media | board
     #[serde(default = "full_look")]
     pub look: String,
     /// A stage screen's own layout (JSON, as Settings → Stage display); None = the shared one.
@@ -65,6 +65,9 @@ pub struct OutputConfig {
     /// An alignment grid over the picture while setting up corners and blends.
     #[serde(default)]
     pub grid: bool,
+    /// Large print on this screen: bigger, bold, white on black (older members, a far wall).
+    #[serde(default)]
+    pub large_print: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -100,6 +103,8 @@ struct Extra {
     blend: Option<Blend>,
     #[serde(default)]
     grid: bool,
+    #[serde(default)]
+    large_print: bool,
 }
 
 /// The part of the whole picture a screen shows, in % (left 0, width 55 = the left projector).
@@ -126,7 +131,7 @@ fn full_look() -> String {
 }
 
 /// The looks a screen can have.
-pub const LOOKS: [&str; 5] = ["full", "lower", "stage", "words", "media"];
+pub const LOOKS: [&str; 6] = ["full", "lower", "stage", "words", "media", "board"];
 
 /// The look of the first three screens when none is saved (as before screens).
 fn default_look(role: &str) -> &'static str {
@@ -167,6 +172,7 @@ pub fn outputs(conn: &Connection) -> Result<Vec<OutputConfig>> {
                 region: extra.region,
                 blend: extra.blend,
                 grid: extra.grid,
+                large_print: extra.large_print,
             })
         })?
         .collect::<std::result::Result<_, _>>()?;
@@ -211,6 +217,7 @@ pub fn save_output(conn: &Connection, c: &OutputConfig) -> Result<()> {
         region: c.region,
         blend: c.blend,
         grid: c.grid,
+        large_print: c.large_print,
     };
     if let Some(p) = c.pin {
         if p.iter().any(|v| !v.is_finite() || v.abs() > 45.0) {
@@ -467,6 +474,7 @@ mod tests {
             region: None,
             blend: None,
             grid: false,
+            large_print: false,
             ndi: None,
         };
         let now = vec!["EPSON PJ".to_string(), "Laptop".to_string()];
@@ -528,7 +536,9 @@ mod screen_tests {
         o.region = Some(Region { x: 45.0, y: 0.0, w: 55.0, h: 100.0 });
         o.blend = Some(Blend { left: 18.0, right: 0.0, top: 0.0, bottom: 0.0, gamma: 2.2 });
         o.stage_layout = Some(r#"{"boxes":[]}"#.into());
+        o.large_print = true;
         save_output(&c, &o).unwrap();
+        assert!(output(&c, &r).unwrap().large_print, "large print is kept");
         let back = output(&c, &r).unwrap();
         assert_eq!((back.pin, back.region, back.blend.map(|b| b.left), back.stage_layout.as_deref()), (o.pin, o.region, Some(18.0), Some(r#"{"boxes":[]}"#)));
         o.region = Some(Region { x: 60.0, y: 0.0, w: 55.0, h: 100.0 });

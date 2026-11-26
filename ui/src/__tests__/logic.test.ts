@@ -155,3 +155,50 @@ describe("slide groups and arrangements", () => {
     expect(parseOrder(" V1  C V2 ")).toEqual(["V1", "C", "V2"]);
   });
 });
+
+import { responsive } from "../rich";
+
+describe("responsive readings", () => {
+  it("hides the prefix and knows who reads", () => {
+    expect(responsive("Leader: The earth is the Lord's")).toEqual({ who: "leader", text: "The earth is the Lord's" });
+    expect(responsive("P: and the fulness thereof")).toEqual({ who: "people", text: "and the fulness thereof" });
+    expect(responsive("All: Amen.")).toEqual({ who: "people", text: "Amen." });
+    expect(responsive("Psalm 24: a psalm of David")).toEqual({ who: null, text: "Psalm 24: a psalm of David" });
+  });
+});
+
+import { cleanReading, readingParts } from "../LectionaryPanel";
+
+describe("lectionary readings as references", () => {
+  it("tidies a reading for the reference reader", () => {
+    expect(cleanReading("Isaiah 64:1-64:9")).toBe("Isaiah 64:1-9");
+    expect(cleanReading("Psalm 80:1-80:7, 80:16-80:18")).toBe("Psalm 80:1-7, 16-18");
+    expect(cleanReading("Psalm 126 or Canticle 15")).toBe("Psalm 126");
+    expect(cleanReading("Luke 2:1-2:14, (2:15-2:20)")).toBe("Luke 2:1-14");
+    expect(cleanReading("2 Peter 3:8-3:15a")).toBe("2 Peter 3:8-15");
+    expect(cleanReading("Isaiah 61:10-62:3")).toBe("Isaiah 61:10-62:3");
+  });
+  it("splits a reading with several ranges into references the app reads", () => {
+    expect(readingParts("Psalm 80:1-80:7, 80:16-80:18")).toEqual(["Psalm 80:1-7", "Psalm 80:16-18"]);
+    expect(readingParts("Galatians 3:23-3:25, 4:4-4:7")).toEqual(["Galatians 3:23-25", "Galatians 4:4-7"]);
+    expect(readingParts("1 Corinthians 1:3-9")).toEqual(["1 Corinthians 1:3-9"]);
+  });
+});
+
+import { stanzas } from "../features/service/TuneBar";
+
+describe("hymn tunes: verses as runs of slides", () => {
+  const s = (labels: string[]) => labels.map((label, i) => ({ label, occurrence: 0, i }));
+  it("each verse with its refrain, a title slide left out", () => {
+    expect(stanzas(s(["Title", "V1", "V1", "C", "V2", "V2", "C"]))).toEqual([
+      { start: 1, end: 3 },
+      { start: 4, end: 6 },
+    ]);
+  });
+  it("a song of choruses only sings each section to the tune", () => {
+    expect(stanzas(s(["C", "C", "B"]))).toEqual([
+      { start: 0, end: 1 },
+      { start: 2, end: 2 },
+    ]);
+  });
+});

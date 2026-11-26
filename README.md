@@ -95,6 +95,15 @@ Beside Blank / Logo / Clear: **Media** (hide backgrounds and video, keep the wor
 all**. Songs have coloured groups, group buttons on Live and a drag-and-drop arrangement
 editor; right-click a slide in Preview to make it run a macro when it goes live.
 
+## The lectionary
+
+Ctrl+K → **Lectionary readings** shows any date's place in the Revised Common Lectionary
+(e.g. "Advent 1 · Year B") and your church's readings for it, ready to add to the service.
+The calendar is calculated (checked against an independent one for every day 2013–2035);
+the readings are your church's own list, imported in Settings → Library → Lectionary from a
+CSV saved from Excel: a first row with `date` (or `sunday` and `year`), optionally
+`occasion`, then the readings in order. No readings are shipped with the app.
+
 ## Before the service
 
 The dots beside Blank / Logo / Clear show every output at a glance (green live, blue

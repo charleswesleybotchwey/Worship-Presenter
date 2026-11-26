@@ -25,6 +25,7 @@ const LOOK_RULES: Record<string, Rule> = {
   full: { onLogo: "logo", lowerThird: false, keyed: false },
   lower: { onLogo: "transparent", lowerThird: true, keyed: true },
   stage: { onLogo: "blank", lowerThird: false, keyed: false },
+  board: { onLogo: "blank", lowerThird: false, keyed: false },
   words: { onLogo: "blank", lowerThird: false, keyed: false },
   media: { onLogo: "logo", lowerThird: false, keyed: false },
 };
@@ -168,6 +169,12 @@ export function Output({ role, keyed = false }: { role: string; keyed?: boolean 
       return undefined;
     }
   })();
+  if (look === "board")
+    return (
+      <div className="output output--stage" style={pinStyle}>
+        <HymnBoard revision={b?.state.revision ?? 0} itemKey={JSON.stringify(b?.item ?? null)} />
+      </div>
+    );
   if (look === "stage")
     return (
       <div className="output output--stage" style={pinStyle}>
@@ -177,7 +184,7 @@ export function Output({ role, keyed = false }: { role: string; keyed?: boolean 
     );
 
   return (
-    <div className={`output ${rule.keyed || seeThrough ? "output--keyed" : ""}`} style={{ ...(m ? { padding: `${m.top}px ${m.right}px ${m.bottom}px ${m.left}px` } : {}), ...pinStyle }}>
+    <div className={`output ${rule.keyed || seeThrough ? "output--keyed" : ""} ${cfg?.large_print ? "output--large" : ""}`} style={{ ...(m ? { padding: `${m.top}px ${m.right}px ${m.bottom}px ${m.left}px` } : {}), ...pinStyle }}>
       <div className={`output__frame ${seeThrough ? "output__frame--alpha" : ""}`}>
         {/* a projector wall: this screen shows its part of the whole picture */}
         <div className="output__region" style={regionStyle}>
@@ -188,7 +195,7 @@ export function Output({ role, keyed = false }: { role: string; keyed?: boolean 
           slide={slide}
           allSlides={shown?.slides}
           sound={role === "main"}
-          adjust={{ scale: shown?.state.text_scale ?? 1, shift: shown?.state.text_shift ?? 0 }}
+          adjust={{ scale: (shown?.state.text_scale ?? 1) * (cfg?.large_print ? 1.35 : 1), shift: shown?.state.text_shift ?? 0 }}
           copyright={shown?.song_copyright}
           position={{ first: (shown?.state.slide_idx ?? 0) === 0, last: (shown?.state.slide_idx ?? 0) >= (shown?.slides.length ?? 1) - 1 }}
           kind={shown?.item?.kind ?? "song"}
@@ -198,7 +205,7 @@ export function Output({ role, keyed = false }: { role: string; keyed?: boolean 
           playing={b?.state.media_playing}
           restart={b?.state.media_restart}
           muted={role !== "main"}
-          look={{ lowerThird: rule.lowerThird, wordsOnly: look === "words" || !!b?.state.media_off }}
+          look={{ lowerThird: rule.lowerThird, wordsOnly: look === "words" || !!b?.state.media_off || !!cfg?.large_print }}
           blank={phase === "off"}
           hideText={b?.state.mode === "clear" || camFull || look === "media"}
           alpha={seeThrough || (!!cam && cam.mode !== "corner")}
@@ -360,4 +367,35 @@ function AlignGrid() {
       <circle cx={50} cy={50} r={8} className="output__grid-edge" />
     </svg>
   );
+}
+
+/** The hymn board (like the boards on church walls): the day's hymn numbers, the one being
+ *  sung lit. Asks again when the live item changes, and every few seconds for edits. */
+function HymnBoard({ revision, itemKey }: { revision: number; itemKey: string }) {
+  const [rows, setRows] = useState<{ number: string; title: string; live: boolean }[]>([]);
+  useEffect(() => {
+    const load = () => api.hymnBoard().then(setRows).catch(() => {});
+    load();
+    const t = setInterval(load, 4000);
+    return () => clearInterval(t);
+  }, [revision, itemKey]);
+  return (
+    <div className="hymn-board">
+      <div className="hymn-board__head">Hymns</div>
+      {rows.length === 0 && <div className="hymn-board__empty">No hymns in this service yet</div>}
+      <ol className="hymn-board__list">
+        {rows.map((r, i) => (
+          <li key={i} className={r.live ? "is-live" : ""}>
+            <span className="hymn-board__num">{r.number || r.title}</span>
+            {r.number && <span className="hymn-board__title">{titleAfter(r.title, r.number)}</span>}
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
+/** "MHB 1, ENG&FANTE" after its number "MHB 1" → "ENG&FANTE" (the number is shown large). */
+function titleAfter(title: string, number: string): string {
+  return title.toLowerCase().startsWith(number.toLowerCase()) ? title.slice(number.length).replace(/^[\s,:.-]+/, "") : title;
 }

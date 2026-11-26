@@ -1,4 +1,4 @@
-import { renderRich, stripRich } from "../rich";
+import { renderLine, stripRich } from "../rich";
 import { Crossfade, useMediaFadeMs } from "../fade";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { resolveBrand, useBrand } from "./brand";
@@ -205,7 +205,7 @@ function FitText({ lines: raw, style, valign, others }: { lines: string[]; style
             className={style.enter && style.enter !== "none" ? `tl-enter tl-enter--${style.enter}` : undefined}
             style={style.enter && style.enter !== "none" ? { animationDelay: `${i * (style.enter === "type" ? 700 : 140)}ms` } : undefined}
           >
-            {lineBg ? <span className="tl-line" style={lineBg}>{renderRich(l.replace(PAIRED, ""))}</span> : renderRich(l.replace(PAIRED, ""))}
+            {lineBg ? <span className="tl-line" style={lineBg}>{renderLine(l.replace(PAIRED, ""))}</span> : renderLine(l.replace(PAIRED, ""))}
           </p>
         ))}
       </div>
@@ -408,7 +408,7 @@ export function ThemeView({
           inner = (
             <>
               {l.style.box?.mode === "block" && lines.length > 0 && <GrowBox box={l.style.box} />}
-              <div key={isSlideText ? textKey : "fixed"} className={`tl-text ${isSlideText && fade && phase !== "static" ? enter : ""}`} style={isSlideText ? fade : undefined}>
+              <div key={isSlideText ? textKey : "fixed"} data-field={l.field} className={`tl-text ${isSlideText && fade && phase !== "static" ? enter : ""}`} style={isSlideText ? fade : undefined}>
                 {lines.length ? (
                   <div
                     className="tl-pairhost"

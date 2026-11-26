@@ -367,6 +367,8 @@ export interface OutputConfig {
   region?: { x: number; y: number; w: number; h: number } | null;
   blend?: { left: number; right: number; top: number; bottom: number; gamma: number } | null;
   grid?: boolean;
+  /** large print on this screen: bigger, bold, white on black */
+  large_print?: boolean;
   role: string;
   name: string;
   display_index: number | null;
@@ -595,6 +597,9 @@ export const api = {
   onlineOpen: (url: string) => call<void>("online_open", { url }),
   streamKeySet: (kind: string, value: string) => call<void>("stream_key_set", { kind, value }),
   streamKeysSaved: () => call<Record<string, boolean>>("stream_keys_saved"),
+  liturgyAdd: () => call<[number, number]>("liturgy_add"),
+  recoveryInfo: () => call<{ schedule_id: number | null; item_idx: number; slide_idx: number } | null>("recovery_info"),
+  recoveryDismiss: () => call<void>("recovery_dismiss"),
   updatesOn: () => call<boolean>("updates_on"),
   updateCheck: () => call<{ version: string; notes: string | null } | null>("update_check"),
   updateInstall: () => call<void>("update_install"),
@@ -656,6 +661,16 @@ export const api = {
   timelineSave: (timeline: { item_kind: string; item_id: number; media_id: number; cues: [number, number][] }) => call<void>("timeline_save", { timeline }),
   timelineDelete: (kind: string, id: number) => call<void>("timeline_delete", { kind, id }),
   songsRepairBilingual: (path: string) => call<{ bilingual: number; repaired: number; not_found: number }>("songs_repair_bilingual", { path }),
+  spellingCheck: (lang: string, text: string) => call<{ line: number; word: string; suggestion: string; count: number }[]>("spelling_check", { lang, text }),
+  tuneGet: (songId: number) => call<{ media_id: number; gap_ms: number } | null>("tune_get", { songId }),
+  tuneSet: (songId: number, tune: { media_id: number; gap_ms: number } | null) => call<void>("tune_set", { songId, tune }),
+  lectionaryFor: (date: string) => call<Lectionary>("lectionary_for", { date }),
+  lectionaryImport: (path: string) => call<{ by_date: number; by_sunday: number; skipped: number }>("lectionary_import", { path }),
+  hymnBoard: () => call<{ number: string; title: string; live: boolean }[]>("hymn_board"),
+  songsExport: (ids: number[], format: "wpp" | "openlyrics" | "text", path: string, onePerSong: boolean) => call<number>("songs_export", { ids, format, path, onePerSong }),
+  packageExport: (choice: PackageChoice, path: string) => call<number>("package_export", { choice, path }),
+  packageReview: (path: string) => call<PackageReview>("package_review", { path }),
+  packageImport: (path: string, replace: boolean) => call<PackageReport>("package_import", { path, replace }),
   macrosList: () => call<Macro[]>("macros_list"),
   macroSave: (m: Macro) => call<number>("macro_save", { m }),
   macroDelete: (id: number) => call<void>("macro_delete", { id }),
@@ -795,6 +810,73 @@ export async function pickMediaFiles(): Promise<string[]> {
     filters: [{ name: "Pictures, videos and sound", extensions: ["png", "jpg", "jpeg", "webp", "gif", "bmp", "mp4", "m4v", "webm", "mov", "mp3", "wav", "ogg", "m4a", "aac", "flac"] }],
   });
   return Array.isArray(r) ? r : typeof r === "string" ? [r] : [];
+}
+
+/** Where to save exported songs: a file of the format, or a folder for one file per song. */
+export async function pickSongExport(format: "wpp" | "openlyrics" | "text", name: string, folder: boolean): Promise<string | null> {
+  if (!inTauri) return folder ? "C:\\Songs" : `${name}.${format === "openlyrics" ? "xml" : format === "text" ? "txt" : "wpp"}`;
+  const d = await import("@tauri-apps/plugin-dialog");
+  if (folder) {
+    const r = await d.open({ directory: true, title: "Choose a folder for the songs (one file each)" });
+    return typeof r === "string" ? r : null;
+  }
+  const f = { wpp: { name: "Worship Presenter", extensions: ["wpp"] }, openlyrics: { name: "OpenLyrics", extensions: ["xml"] }, text: { name: "Text", extensions: ["txt"] } }[format];
+  return (await d.save({ title: "Export songs", defaultPath: `${name}.${f.extensions[0]}`, filters: [f] })) ?? null;
+}
+
+/** The lectionary day and the church's readings for a date. */
+export interface Lectionary {
+  date: string;
+  day: { name: string; year: string; season: string } | null;
+  occasion: string | null;
+  readings: string[];
+  entries: number;
+}
+export async function pickLectionaryFile(): Promise<string | null> {
+  if (!inTauri) return "lectionary.csv";
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const r = await open({ title: "Import the church's lectionary", filters: [{ name: "CSV (from Excel)", extensions: ["csv", "txt"] }] });
+  return typeof r === "string" ? r : null;
+}
+
+/** Worship Presenter packages (.wpp): where to save one, and which to open. */
+export async function pickPackageSave(): Promise<string | null> {
+  if (!inTauri) return "Library.wpp";
+  const { save } = await import("@tauri-apps/plugin-dialog");
+  const day = new Date().toISOString().slice(0, 10);
+  return (await save({ title: "Export a Worship Presenter package", defaultPath: `Worship Presenter ${day}.wpp`, filters: [{ name: "Worship Presenter package", extensions: ["wpp"] }] })) ?? null;
+}
+export async function pickPackageOpen(): Promise<string | null> {
+  if (!inTauri) return "Library.wpp";
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const r = await open({ title: "Import a Worship Presenter package", filters: [{ name: "Worship Presenter package", extensions: ["wpp"] }] });
+  return typeof r === "string" ? r : null;
+}
+export interface PackageChoice {
+  all_songs: boolean;
+  song_ids: number[];
+  themes: boolean;
+  bibles: string[];
+  props_and_macros: boolean;
+}
+export interface PackageReview {
+  manifest: { songs: number; themes: number; bibles: string[]; props: number; macros: number };
+  new_songs: number;
+  duplicate_songs: number;
+  sample_titles: string[];
+  multilingual_songs: number;
+  new_themes: number;
+  new_bibles: string[];
+  present_bibles: string[];
+}
+export interface PackageReport {
+  songs_added: number;
+  songs_replaced: number;
+  songs_skipped: number;
+  themes_added: number;
+  bibles_added: string[];
+  props_added: number;
+  macros_added: number;
 }
 
 /** Where to save an exported theme. */

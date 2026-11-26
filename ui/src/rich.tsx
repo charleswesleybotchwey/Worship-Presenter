@@ -42,3 +42,19 @@ export function renderRich(line: string): ReactNode {
     ),
   );
 }
+
+/** Responsive readings: "Leader:" / "L:" and "People:" / "P:" / "All:" at the start of a
+ *  line. On the screens the prefix is hidden and the people's lines are bold. */
+const LEADER = /^\s*(leader|minister|l|m)\s*:\s*/i;
+const PEOPLE = /^\s*(people|all|congregation|p|c)\s*:\s*/i;
+export function responsive(line: string): { who: "leader" | "people" | null; text: string } {
+  if (PEOPLE.test(line)) return { who: "people", text: line.replace(PEOPLE, "") };
+  if (LEADER.test(line)) return { who: "leader", text: line.replace(LEADER, "") };
+  return { who: null, text: line };
+}
+/** A screen line: rich text, with a responsive reading's people's lines in bold. */
+export function renderLine(line: string): ReactNode {
+  const r = responsive(line);
+  if (r.who === "people") return <strong className="tl-people">{renderRich(r.text)}</strong>;
+  return renderRich(r.text);
+}

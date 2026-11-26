@@ -18,6 +18,8 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("0011_props", include_str!("../migrations/0011_props.sql")),
     ("0012_macros", include_str!("../migrations/0012_macros.sql")),
     ("0013_timelines", include_str!("../migrations/0013_timelines.sql")),
+    ("0014_lectionary", include_str!("../migrations/0014_lectionary.sql")),
+    ("0015_tunes", include_str!("../migrations/0015_tunes.sql")),
 ];
 
 /// Opens (or creates) a profile's library database with WAL and foreign keys on,

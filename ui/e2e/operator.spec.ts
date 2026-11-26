@@ -292,3 +292,108 @@ test("the library keeps its place, marks what is live, and the window never scro
   await page.mouse.wheel(0, 3000);
   expect(await page.evaluate(() => document.scrollingElement!.scrollTop)).toBe(0);
 });
+
+test("the song editor opens and takes a language typed in", async ({ page }) => {
+  await page.goto("/#/control");
+  await page.locator(".lt-row--songs", { hasText: "MHB 50" }).click({ button: "right" });
+  await page.locator("[data-menu-depth='0'] button", { hasText: "Edit" }).first().click();
+  page.once("dialog", (d) => void d.accept("Kasem"));
+  await page.locator("select[aria-label='Add a second language']").selectOption("__other");
+  await expect(page.locator("select[aria-label=\"This tab's language\"] option:checked")).toHaveText("Language: Kasem");
+});
+
+test("a Worship Presenter package is exported, reviewed and imported", async ({ page }) => {
+  await page.goto("/#/control");
+  // the window is ready (its keys work) once the library has drawn
+  await expect(page.locator(".lt-row--songs").first()).toBeVisible();
+  const command = async (text: string) => {
+    await page.keyboard.press("Control+k");
+    const box = page.locator(".palette__input");
+    await expect(box).toBeVisible();
+    await box.fill(text);
+    await page.keyboard.press("Enter");
+  };
+  await command("Export a Worship Presenter package");
+  await page.locator(".pkg button", { hasText: "Export…" }).click();
+  await expect(page.locator(".pkg")).toContainText("Saved");
+  await page.locator(".pkg button", { hasText: "Close" }).click();
+  await command("Import a Worship Presenter package");
+  await page.locator(".pkg button", { hasText: "Choose a package" }).click();
+  await expect(page.locator(".pkg__list")).toContainText("in more than one language");
+  await page.locator(".pkg button", { hasText: "Import" }).click();
+  await expect(page.locator(".pkg__done")).toContainText("songs added");
+});
+
+test("songs export one at a time or several, as OpenLyrics one file each", async ({ page }) => {
+  await page.goto("/#/control");
+  await page.locator(".lt-row--songs", { hasText: "MHB 50" }).click();
+  await page.locator(".lt-row--songs", { hasText: "Blessed Assurance" }).click({ modifiers: ["Control"] });
+  await page.locator(".lt-row--songs", { hasText: "Blessed Assurance" }).click({ button: "right" });
+  await page.locator("[data-menu-depth='0'] button", { hasText: "Export 2 songs" }).click();
+  await page.locator("input[name=song-format]").nth(1).check();
+  await expect(page.locator(".pkg input[type=checkbox]")).toBeChecked(); // OpenLyrics: a file each
+  await page.locator(".pkg button", { hasText: "Export…" }).click();
+  await expect(page.locator(".pkg__done")).toHaveText("2 files saved in the folder.");
+});
+
+test("spelling in Fante is checked against the library, and fixed", async ({ page }) => {
+  await page.goto("/#/control");
+  await page.locator(".lt-row--songs", { hasText: "MHB 1," }).click({ button: "right" });
+  await page.locator("[data-menu-depth='0'] button", { hasText: "Edit" }).first().click();
+  await page.locator("button", { hasText: "Fante" }).first().click();
+  const ta = page.locator("textarea").first();
+  await ta.fill((await ta.inputValue()) + "\nO Nyankopon, yɛ da wo ase");
+  await page.locator("button", { hasText: "Check spelling" }).click();
+  await expect(page.locator(".spell__row")).toContainText("nyankopɔn");
+  await page.locator(".spell__row button", { hasText: "Fix" }).click();
+  await expect(ta).toHaveValue(/O Nyankopɔn, yɛ da wo ase/);
+});
+
+test("a hymn board screen lists the service's hymn numbers", async ({ page }) => {
+  await page.goto("/#/output/screen-hymns");
+  await expect(page.locator(".hymn-board__num").first()).toHaveText("MHB 1");
+});
+
+test("the lectionary shows the day and adds its readings to the service", async ({ page }) => {
+  await page.goto("/#/control");
+  await expect(page.locator(".lt-row--songs").first()).toBeVisible();
+  await page.keyboard.press("Control+k");
+  await expect(page.locator(".palette__input")).toBeVisible();
+  await page.locator(".palette__input").fill("Lectionary readings");
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".lect__day")).toContainText("Year B");
+  await expect(page.locator(".lect__list li").last()).toBeInViewport(); // not pushed out of sight
+  await page.locator(".lect button", { hasText: "Add all" }).click();
+  await page.locator(".lect button", { hasText: "Close" }).click();
+  await expect(page.locator(".wp-pane--schedule .wp-row")).toHaveCount(5); // the psalm's two ranges as two items
+});
+
+test("a hymn's tune plays once per verse, the slides moving with it", async ({ page }) => {
+  await page.goto("/#/control");
+  await page.locator(".lt-row--songs", { hasText: "Blessed Assurance" }).click();
+  await page.locator(".wp-btn--primary", { hasText: "Go live" }).click();
+  await page.locator("select[aria-label=\"The song's tune\"]").selectOption({ label: "🎞 Motion loop blue" });
+  await page.locator(".tune button", { hasText: "Play verse by verse" }).click();
+  await expect(page.locator(".tune .tune__time")).toHaveText("verse 1 of 2");
+  await expect(page.locator(".tune .tune__time")).toHaveText("verse 2 of 2", { timeout: 12_000 });
+  await expect(page.locator(".ew-pane[aria-label=Live] .sl-slide.is-current .sl-num")).toContainText("4", { timeout: 8000 });
+});
+
+test("a large-print screen shows bigger, bold words", async ({ page, context }) => {
+  const normal = await context.newPage();
+  const large = await context.newPage();
+  await normal.goto("/#/output/main");
+  await large.goto("/#/output/screen-large");
+  await page.goto("/#/control");
+  await page.locator(".lt-row--songs", { hasText: "MHB 1," }).click();
+  await page.locator(".wp-btn--primary", { hasText: "Go live" }).click();
+  const size = (p: typeof page) =>
+    p.locator('.tl-text[data-field="lyrics"]').first().evaluate((el) => {
+      const leaf = [...el.querySelectorAll("*")].find((e) => e.childElementCount === 0 && e.textContent?.trim()) ?? el;
+      return [parseFloat(getComputedStyle(leaf).fontSize), getComputedStyle(leaf).fontWeight];
+    });
+  await expect(large.locator(".output--large")).toBeVisible();
+  const [n, l] = [await size(normal), await size(large)];
+  expect(l[0]).toBeGreaterThan(n[0] * 1.2);
+  expect(l[1]).toBe("700");
+});
